@@ -687,7 +687,7 @@ func doRun(envName string) {
 // --- DB Operations ---
 
 func doDBPull(envName string) {
-	_, env := loadEnv(envName) // FIX: unused var
+	_, env := loadEnv(envName) // Fix unused variable warning
 	if env.Database.Driver != "sqlite" {
 		logFatal("Only sqlite supported")
 	}
@@ -704,15 +704,36 @@ func doDBPull(envName string) {
 		os.MkdirAll(filepath.Dir(local), 0755)
 	}
 
-	f, _ := os.Create(local)
+	f, err := os.Create(local)
+	if err != nil {
+		logFatal("Failed to create local file: %v", err)
+	}
+	defer f.Close()
+
+	// ROBUST STRATEGY:
+	// 1. Create a temp directory
+	// 2. Backup DB to a file in that temp dir (handles WAL mode safely)
+	// 3. Cat the file to stdout (stream to us)
+	// 4. Clean up
+	remoteScript := fmt.Sprintf(`
+		set -e
+		TEMP_DIR=$(mktemp -d)
+		trap "rm -rf $TEMP_DIR" EXIT
+		sqlite3 '%s' ".backup '$TEMP_DIR/backup.db'"
+		cat "$TEMP_DIR/backup.db"
+	`, remote)
 
 	sshArgs := getSSHBaseArgs(env)
-	sshArgs = append(sshArgs, fmt.Sprintf("sqlite3 '%s' '.backup /dev/stdout'", remote))
+	sshArgs = append(sshArgs, remoteScript)
 
 	cmd := exec.Command("ssh", sshArgs...)
 	cmd.Stdout = f
+	cmd.Stderr = os.Stderr // <--- CRITICAL FIX: Show remote errors!
+
 	if err := cmd.Run(); err != nil {
-		logFatal("Pull failed")
+		f.Close()
+		os.Remove(local) // Don't leave a 0-byte corrupted file
+		logFatal("Pull failed: %v", err)
 	}
 	logSuccess("Synced.")
 }
