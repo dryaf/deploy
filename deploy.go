@@ -11,7 +11,10 @@ import (
 	"time"
 )
 
-func doRun(envName string) {
+func doRelease(explicitVersion, envName string) {
+	// 0. Resolve Version (Strict or Lazy)
+	version := resolveAndValidateVersion(explicitVersion)
+
 	cfg, env := loadEnv(envName)
 
 	if _, err := exec.LookPath("rsync"); err != nil {
@@ -24,7 +27,7 @@ func doRun(envName string) {
 		logFatal("Remote check failed: 'rsync' and 'podman' are required on the host.")
 	}
 
-	logInfo("🚀 Deploying %s to %s...", cfg.AppName, envName)
+	logInfo("🚀 Deploying version %s to %s (%s)...", version, cfg.AppName, envName)
 
 	if !dryRun {
 		os.MkdirAll("build", 0755)
@@ -37,7 +40,7 @@ func doRun(envName string) {
 	}
 	logInfo("🔨 Building binary (%s)...", arch)
 
-	buildMeta := getBuildMetadata()
+	buildMeta := getBuildMetadata(version)
 	var ldflags string
 	if cfg.Build.Ldflags != "" {
 		tmpl, err := template.New("ld").Parse(cfg.Build.Ldflags)
@@ -83,6 +86,7 @@ func doRun(envName string) {
 	runSSH(env, fmt.Sprintf("mkdir -p %s/data %s/migrations ~/.config/containers/systemd", env.Dir, env.Dir))
 
 	binPath := fmt.Sprintf("%s/%s", env.Dir, cfg.BinaryName)
+	// Create backup
 	runSSH(env, fmt.Sprintf("[ -f %s ] && cp %s %s.bak || true", binPath, binPath, binPath))
 
 	artifacts := []string{}
@@ -164,6 +168,114 @@ func doRun(envName string) {
 	logSuccess("✅ Deployed successfully.")
 }
 
+// resolveAndValidateVersion handles the logic for strict versioning and "lazy" tagging.
+func resolveAndValidateVersion(explicitVersion string) string {
+	if dryRun {
+		if explicitVersion == "" {
+			return "v0.0.0-dryrun"
+		}
+		return explicitVersion
+	}
+
+	// 1. Global Pre-check: Clean Git State
+	out, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		logFatal("Failed to run git status")
+	}
+	if len(strings.TrimSpace(string(out))) > 0 {
+		logFatal("🚫 Git working directory is dirty. Commit or stash changes before releasing.")
+	}
+
+	hasRemote := true
+	if err := exec.Command("git", "remote", "get-url", "origin").Run(); err != nil {
+		hasRemote = false
+		logWarn("⚠️  No 'origin' remote found. Pushing tags will be skipped.")
+	}
+
+	// Case A: Explicit Version Provided
+	if explicitVersion != "" {
+		logInfo("🛡️  Validating explicit version %s...", explicitVersion)
+		if err := exec.Command("git", "rev-parse", "--verify", explicitVersion).Run(); err != nil {
+			logFatal("🚫 Tag '%s' not found locally.", explicitVersion)
+		}
+
+		headHash := strings.TrimSpace(getCmdOutput("git", "rev-parse", "HEAD"))
+		tagHash := strings.TrimSpace(getCmdOutput("git", "rev-parse", explicitVersion+"^{commit}"))
+
+		if headHash != tagHash {
+			logFatal("🚫 HEAD (%s) is not at tag %s (%s). Checkout the tag first.", headHash[:7], explicitVersion, tagHash[:7])
+		}
+
+		if hasRemote {
+			ensureTagPushed(explicitVersion)
+		}
+		return explicitVersion
+	}
+
+	// Case B: Lazy Mode (Auto-detect or Prompt)
+	logInfo("🔎 Checking for existing tag on HEAD...")
+	currentTag, err := exec.Command("git", "describe", "--tags", "--exact-match", "HEAD").Output()
+	if err == nil {
+		tag := strings.TrimSpace(string(currentTag))
+		logInfo("✅ Found existing tag: %s", tag)
+		if hasRemote {
+			ensureTagPushed(tag)
+		}
+		return tag
+	}
+
+	// No tag on HEAD. Prompt user.
+	logWarn("⚠️  No version tag found for current commit.")
+	fmt.Println("--- Recent Tags ---")
+	// Show last 5 tags, sorted by version (requires git 2.0+)
+	runCommandRaw("git", "tag", "--sort=-v:refname", "--list")
+	fmt.Println("-------------------")
+
+	newVersion := prompt("Enter new semantic version (e.g. v1.0.1)")
+	if newVersion == "" {
+		logFatal("Version is required.")
+	}
+
+	if !strings.HasPrefix(newVersion, "v") {
+		logWarn("Convention suggestion: versions usually start with 'v' (e.g. v1.0.0)")
+		if !confirm("Use '" + newVersion + "' anyway?") {
+			os.Exit(1)
+		}
+	}
+
+	// Create Tag
+	logInfo("🏷️  Creating tag %s...", newVersion)
+	if err := runCommandRaw("git", "tag", "-a", newVersion, "-m", "Release "+newVersion); err != nil {
+		logFatal("Failed to create tag: %v", err)
+	}
+
+	// Push Tag
+	if hasRemote {
+		logInfo("⬆️  Pushing tag to origin...")
+		if err := runCommandRaw("git", "push", "origin", newVersion); err != nil {
+			logFatal("Failed to push tag: %v", err)
+		}
+	}
+
+	return newVersion
+}
+
+func ensureTagPushed(version string) {
+	logInfo("☁️  Verifying tag presence on remote...")
+	err := exec.Command("git", "ls-remote", "--exit-code", "--tags", "origin", version).Run()
+	if err != nil {
+		logWarn("🚫 Tag '%s' exists locally but NOT on origin.", version)
+		if confirm(fmt.Sprintf("Push '%s' to origin now?", version)) {
+			if err := runCommandRaw("git", "push", "origin", version); err != nil {
+				logFatal("Failed to push tag: %v", err)
+			}
+			logSuccess("Tag pushed.")
+		} else {
+			logFatal("Aborting. Deployment requires synced tags.")
+		}
+	}
+}
+
 func rollback(env Environment, binPath, dockerfile string) {
 	logWarn("🔍 Diagnosing with remote logs (last 50 lines)...")
 	runSSHStream(env, fmt.Sprintf("journalctl --user -u %s.service -n 50 --no-pager", env.Quadlet.ServiceName))
@@ -180,7 +292,7 @@ func rollback(env Environment, binPath, dockerfile string) {
 	}
 }
 
-func getBuildMetadata() BuildMetadata {
+func getBuildMetadata(explicitVersion string) BuildMetadata {
 	get := func(args ...string) string {
 		if dryRun {
 			return "dry"
@@ -188,10 +300,17 @@ func getBuildMetadata() BuildMetadata {
 		out, _ := exec.Command(args[0], args[1:]...).Output()
 		return strings.TrimSpace(string(out))
 	}
+
+	// If explicit version passed, use it. Otherwise fall back to git describe
+	v := explicitVersion
+	if v == "" {
+		v = get("git", "describe", "--tags", "--always", "--dirty")
+	}
+
 	return BuildMetadata{
-		Version: get("git", "rev-parse", "--short", "HEAD"),
+		Version: v,
 		Date:    time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-		Tag:     get("git", "describe", "--tags", "--abbrev=0"),
+		Tag:     v,
 		Commit:  get("git", "rev-parse", "HEAD"),
 	}
 }

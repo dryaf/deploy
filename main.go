@@ -26,11 +26,20 @@ func main() {
 	switch args[0] {
 	case "init":
 		doInit()
-	case "run":
-		if len(args) < 2 {
-			logFatal("Usage: deploy [flags] run <env>")
+	case "release":
+		// Syntax 1: deploy release <env> (Interactive/Auto)
+		// Syntax 2: deploy release <version> <env> (Explicit)
+		var envName, version string
+		if len(args) == 2 {
+			envName = args[1]
+			version = "" // Trigger auto-detection
+		} else if len(args) == 3 {
+			version = args[1]
+			envName = args[2]
+		} else {
+			logFatal("Usage: deploy release [version] <env>")
 		}
-		doRun(args[1])
+		doRelease(version, envName)
 	case "traefik":
 		if len(args) < 2 {
 			logFatal("Usage: deploy traefik <env>")
@@ -103,7 +112,7 @@ func printUsage() {
 	fmt.Println("Usage: deploy <command> [args]")
 	fmt.Println("Commands:")
 	fmt.Println("  init                  Generate deploy.yaml")
-	fmt.Println("  run <env>             Deploy app")
+	fmt.Println("  release [tag] <env>   Deploy to env. If tag omitted, auto-detects or prompts.")
 	fmt.Println("  start <env>           Start service")
 	fmt.Println("  stop <env>            Stop service")
 	fmt.Println("  restart <env>         Restart service")

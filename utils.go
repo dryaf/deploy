@@ -44,6 +44,13 @@ func confirm(prompt string) bool {
 	return strings.ToLower(strings.TrimSpace(res)) == "y"
 }
 
+func prompt(label string) string {
+	fmt.Printf("%s: ", label)
+	r := bufio.NewReader(os.Stdin)
+	res, _ := r.ReadString('\n')
+	return strings.TrimSpace(res)
+}
+
 func getCmdOutput(name string, args ...string) string {
 	out, _ := exec.Command(name, args...).Output()
 	return strings.TrimSpace(string(out))
