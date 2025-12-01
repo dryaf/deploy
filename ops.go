@@ -6,12 +6,42 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
+
+func doStatus(envName string) {
+	if envName != "" {
+		// Single env status
+		doSystemStats(envName)
+		return
+	}
+
+	// All envs status
+	cfg := loadConfig()
+	if len(cfg.Environments) == 0 {
+		logWarn("No environments defined in deploy.yaml")
+		return
+	}
+
+	// Sort keys for consistent output order
+	keys := make([]string, 0, len(cfg.Environments))
+	for k := range cfg.Environments {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		fmt.Printf("\n------------------------------------------------------------\n")
+		fmt.Printf(" 🌍 ENVIRONMENT: %s\n", k)
+		fmt.Printf("------------------------------------------------------------\n")
+		doSystemStats(k)
+	}
+}
 
 func doSystemStats(envName string) {
 	_, env := loadEnv(envName)

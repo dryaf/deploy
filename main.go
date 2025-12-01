@@ -58,7 +58,14 @@ func main() {
 			logFatal("Usage: deploy logs [--podman] <env>")
 		}
 		doLogs(logsCmd.Arg(0), *usePodman)
+	case "status":
+		env := ""
+		if len(args) > 1 {
+			env = args[1]
+		}
+		doStatus(env)
 	case "system-stats":
+		// Alias for backward compatibility or explicit single env use
 		if len(args) < 2 {
 			logFatal("Usage: deploy system-stats <env>")
 		}
@@ -131,8 +138,8 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  init                     Generate deploy.yaml")
 	fmt.Println("  release [tag] <env>      Deploy to env. If tag omitted, auto-detects or prompts.")
+	fmt.Println("  status [env]             Show detailed system health. If env omitted, shows all.")
 	fmt.Println("  maintenance_page <env>   Setup/Update the standby maintenance page container")
-	fmt.Println("  system-stats <env>       Show host/container health stats")
 	fmt.Println("  system-updates <ac> <env> Manage unattended upgrades (status|enable|disable)")
 	fmt.Println("  start <env>              Start service")
 	fmt.Println("  stop <env>               Stop service")

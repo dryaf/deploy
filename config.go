@@ -119,7 +119,7 @@ type BuildMetadata struct {
 	GoVersion   string
 }
 
-func loadEnv(envName string) (Config, Environment) {
+func loadConfig() Config {
 	data, err := os.ReadFile("deploy.yaml")
 	if err != nil {
 		logFatal("Read error: %v", err)
@@ -128,22 +128,23 @@ func loadEnv(envName string) (Config, Environment) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		logFatal("Parse error: %v", err)
 	}
+	return cfg
+}
+
+func loadEnv(envName string) (Config, Environment) {
+	cfg := loadConfig()
 	env, ok := cfg.Environments[envName]
 	if !ok {
 		logFatal("Env %s not found", envName)
 	}
 
 	// Merge Global Maintenance Defaults into Environment
-	// We only overwrite if the Environment value is empty/zero
 	if env.Maintenance.Title == "" {
 		env.Maintenance.Title = cfg.Maintenance.Title
 	}
 	if env.Maintenance.Text == "" {
 		env.Maintenance.Text = cfg.Maintenance.Text
 	}
-	// Note: We don't merge 'Enabled' strictly because false is a valid setting.
-	// However, since the CLI command ignores 'Enabled' and forces deploy,
-	// checking Title/Text is sufficient for templates.
 
 	return cfg, env
 }
