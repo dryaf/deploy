@@ -76,25 +76,26 @@ type RateLimitConfig struct {
 }
 
 type Quadlet struct {
-	ServiceName string       `yaml:"service_name"`
-	Description string       `yaml:"description"`
-	Image       string       `yaml:"image"`
-	Network     string       `yaml:"network"`
-	Labels      []string     `yaml:"labels"`
-	Router      RouterConfig `yaml:"router"`
-	Volumes     []string     `yaml:"volumes"`
-	EnvVars     []string     `yaml:"env_vars"`
-	Ports       []string     `yaml:"ports"`
-	AutoRestart bool         `yaml:"auto_restart"`
-	Timezone    string       `yaml:"timezone"`
-	Memory      string       `yaml:"memory"`
-	CPU         string       `yaml:"cpu"`
-	ReadOnly    bool         `yaml:"read_only"`
-	HealthCmd   string       `yaml:"health_cmd"`
-	HealthURL   string       `yaml:"health_url"`
-	PodmanArgs  []string     `yaml:"podman_args"`
-	Exec        string       `yaml:"exec"`
-	Dockerfile  string       `yaml:"dockerfile"`
+	ServiceName  string       `yaml:"service_name"`
+	Description  string       `yaml:"description"`
+	Image        string       `yaml:"image"`
+	Network      string       `yaml:"network"`
+	Labels       []string     `yaml:"labels"`
+	Router       RouterConfig `yaml:"router"`
+	Volumes      []string     `yaml:"volumes"`
+	EnvVars      []string     `yaml:"env_vars"`
+	Ports        []string     `yaml:"ports"`
+	AutoRestart  bool         `yaml:"auto_restart"`
+	StopOnDeploy bool         `yaml:"stop_on_deploy"` // New field
+	Timezone     string       `yaml:"timezone"`
+	Memory       string       `yaml:"memory"`
+	CPU          string       `yaml:"cpu"`
+	ReadOnly     bool         `yaml:"read_only"`
+	HealthCmd    string       `yaml:"health_cmd"`
+	HealthURL    string       `yaml:"health_url"`
+	PodmanArgs   []string     `yaml:"podman_args"`
+	Exec         string       `yaml:"exec"`
+	Dockerfile   string       `yaml:"dockerfile"`
 
 	ContainerUID int      `yaml:"container_uid"`
 	ContainerGID int      `yaml:"container_gid"`

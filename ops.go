@@ -10,6 +10,192 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+func doSystemStats(envName string) {
+	_, env := loadEnv(envName)
+	logInfo("📊 Fetching sophisticated stats from %s (%s)...", envName, env.Host)
+
+	// We construct a robust shell script to run everything in one SSH session.
+	// NOTE: We must use "%%" for literal % signs in the shell script because
+	// this string is passed to fmt.Sprintf in Go.
+	containerName := "systemd-" + env.Quadlet.ServiceName
+
+	script := fmt.Sprintf(`
+		# Colors
+		BLUE='\033[1;34m'
+		RED='\033[0;31m'
+		GREEN='\033[0;32m'
+		YELLOW='\033[0;33m'
+		NC='\033[0m'
+
+		# --- 1. HOST INFO ---
+		echo -e "${BLUE}=== 🖥️  SYSTEM HEALTH ===${NC}"
+		if [ -f /etc/os-release ]; then
+			source /etc/os-release
+			printf "OS:      ${PRETTY_NAME}\n"
+		else
+			printf "OS:      $(uname -s)\n"
+		fi
+		printf "Kernel:  $(uname -r) ($(uname -m))\n"
+		printf "Uptime:  $(uptime -p)\n"
+
+		# Load & Memory
+		printf "Load:    $(cat /proc/loadavg | awk '{print $1, $2, $3}')\n"
+		printf "Memory:  $(free -h | awk '/^Mem:/ {print $3 " / " $2}')\n"
+
+		# Disk Usage (Target Dir Partition)
+		# Use %%s in printf to safely handle string with %% sign
+		DISK_INFO=$(df -h %s | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')
+		printf "Disk:    %%s\n" "${DISK_INFO}"
+
+		# --- 2. MAINTENANCE ---
+		echo ""
+		echo -e "${BLUE}=== 📦 UPDATES ===${NC}"
+		UPDATES="Unknown"
+		if command -v apt &> /dev/null; then
+			# Debian/Ubuntu
+			CNT=$(apt list --upgradable 2>/dev/null | grep -v "Listing..." | wc -l)
+			UPDATES="${CNT} packages pending"
+
+			# Check Unattended Upgrades Status
+			if systemctl is-active unattended-upgrades &>/dev/null; then
+				# Check config file for explicit enable
+				if grep -q 'APT::Periodic::Unattended-Upgrade "1"' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
+					UU_STATUS="${GREEN}Enabled (Active)${NC}"
+				else
+					UU_STATUS="${YELLOW}Service Active / Config Disabled${NC}"
+				fi
+			else
+				UU_STATUS="${RED}Disabled${NC}"
+			fi
+		elif command -v dnf &> /dev/null; then
+			# Fedora/RHEL
+			CNT=$(dnf check-update -q 2>/dev/null | wc -l)
+			if [ "$CNT" -gt 0 ]; then UPDATES="~${CNT} packages pending"; else UPDATES="System up to date"; fi
+			UU_STATUS="N/A (Not apt)"
+		elif command -v apk &> /dev/null; then
+			# Alpine
+			CNT=$(apk version -l '<' 2>/dev/null | wc -l)
+			UPDATES="${CNT} packages pending"
+			UU_STATUS="N/A (Not apt)"
+		fi
+
+		if [[ "$UPDATES" != *"0 packages"* && "$UPDATES" != "System up to date" && "$UPDATES" != "Unknown" ]]; then
+			printf "Status:      ${YELLOW}%%s${NC}\n" "${UPDATES}"
+		else
+			printf "Status:      ${GREEN}System up to date${NC}\n"
+		fi
+		if [ ! -z "$UU_STATUS" ]; then
+			printf "Auto-Update: ${UU_STATUS}\n"
+		fi
+
+		# --- 3. SECURITY ---
+		echo ""
+		echo -e "${BLUE}=== 🛡️  SECURITY (24h) ===${NC}"
+
+		# Failed SSH Attempts (parsing journalctl)
+		if command -v journalctl &> /dev/null; then
+			FAILURES=$(journalctl -u ssh -u sshd -q --since "24 hours ago" | grep -i "Failed password" | wc -l)
+			if [ "$FAILURES" -gt 0 ]; then
+				printf "Failed Logins: ${RED}%%s attempts${NC}\n" "${FAILURES}"
+			else
+				printf "Failed Logins: ${GREEN}0${NC}\n"
+			fi
+		else
+			printf "Failed Logins: (Cannot read logs)\n"
+		fi
+
+		# Last 3 Logins
+		printf "Last Logins:\n"
+		# Use %%s for awk print formats to avoid Go fmt.Sprintf swallowing them
+		last -n 3 -a -i | head -n 3 | awk '{printf "  - %%s (%%s %%s %%s) from %%s\n", $1, $4, $5, $6, $NF}'
+
+		# --- 4. SERVICE ---
+		echo ""
+		echo -e "${BLUE}=== ⚙️  SERVICE (%s) ===${NC}"
+		SYSTEMD_STATUS=$(systemctl --user is-active %s.service 2>/dev/null)
+		if [ "$SYSTEMD_STATUS" == "active" ]; then
+			printf "Status:  ${GREEN}Active (Running)${NC}\n"
+			# Show runtime
+			systemctl --user status %s.service --no-pager | grep "Active:" | sed 's/^[ \t]*//'
+		else
+			printf "Status:  ${RED}${SYSTEMD_STATUS:-Not Found}${NC}\n"
+		fi
+
+		# --- 5. CONTAINER ---
+		echo ""
+		echo -e "${BLUE}=== 🐳 CONTAINER ===${NC}"
+		# Podman ps name filter
+		if podman ps -q --filter name=%s | grep -q .; then
+			# Podman stats
+			podman stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}" %s
+		else
+			printf "${YELLOW}Container is NOT running.${NC}\n"
+		fi
+
+	`, env.Dir, env.Quadlet.ServiceName, env.Quadlet.ServiceName, env.Quadlet.ServiceName, containerName, containerName)
+
+	c := exec.Command("ssh", append(getSSHBaseArgs(env), script)...)
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	if err := c.Run(); err != nil {
+		logError("Failed to retrieve stats: %v", err)
+	}
+}
+
+func doSystemUpdates(envName, action string) {
+	_, env := loadEnv(envName)
+	logInfo("📦 Managing Unattended Upgrades on %s (%s)...", envName, env.Host)
+
+	var script string
+	switch action {
+	case "status":
+		script = `
+			echo "Checking status..."
+			if ! command -v apt-get &>/dev/null; then echo "Not a Debian/Ubuntu system."; exit 1; fi
+			dpkg -l | grep unattended-upgrades >/dev/null || echo "Package: NOT INSTALLED"
+			systemctl is-active unattended-upgrades >/dev/null && echo "Service: ACTIVE" || echo "Service: INACTIVE"
+			if grep -q 'APT::Periodic::Unattended-Upgrade "1"' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
+				echo "Config:  ENABLED"
+			else
+				echo "Config:  DISABLED"
+			fi
+		`
+	case "enable":
+		// Requires sudo
+		script = `
+			set -e
+			echo "Installing/Enabling..."
+			if ! command -v apt-get &>/dev/null; then echo "Not a Debian/Ubuntu system."; exit 1; fi
+			sudo apt-get update >/dev/null
+			sudo apt-get install -y unattended-upgrades >/dev/null
+			# Enable in apt config
+			echo 'APT::Periodic::Update-Package-Lists "1";' | sudo tee /etc/apt/apt.conf.d/20auto-upgrades
+			echo 'APT::Periodic::Unattended-Upgrade "1";' | sudo tee -a /etc/apt/apt.conf.d/20auto-upgrades
+			sudo systemctl enable unattended-upgrades
+			sudo systemctl restart unattended-upgrades
+			echo "✅ Unattended Upgrades ENABLED."
+		`
+	case "disable":
+		script = `
+			set -e
+			echo "Disabling..."
+			if ! command -v apt-get &>/dev/null; then echo "Not a Debian/Ubuntu system."; exit 1; fi
+			# Disable in apt config
+			echo 'APT::Periodic::Update-Package-Lists "0";' | sudo tee /etc/apt/apt.conf.d/20auto-upgrades
+			echo 'APT::Periodic::Unattended-Upgrade "0";' | sudo tee -a /etc/apt/apt.conf.d/20auto-upgrades
+			sudo systemctl stop unattended-upgrades
+			sudo systemctl disable unattended-upgrades
+			echo "❌ Unattended Upgrades DISABLED."
+		`
+	default:
+		logFatal("Invalid action. Use 'status', 'enable', or 'disable'.")
+	}
+
+	if err := runSSH(env, script); err != nil {
+		logFatal("Failed to perform upgrades action: %v", err)
+	}
+}
+
 func doGenAuth(user, password string) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -166,6 +352,7 @@ environments:
       network: "traefik-net.network"
       auto_restart: true
       timezone: "Europe/Vienna"
+      # stop_on_deploy: true # Uncomment to stop app before syncing/building (save RAM)
 
       container_uid: 65532
       container_gid: 65532

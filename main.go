@@ -53,6 +53,17 @@ func main() {
 			logFatal("Usage: deploy logs [--podman] <env>")
 		}
 		doLogs(logsCmd.Arg(0), *usePodman)
+	case "system-stats":
+		if len(args) < 2 {
+			logFatal("Usage: deploy system-stats <env>")
+		}
+		doSystemStats(args[1])
+	case "system-updates":
+		// Syntax: deploy system-updates <status|enable|disable> <env>
+		if len(args) < 3 {
+			logFatal("Usage: deploy system-updates <status|enable|disable> <env>")
+		}
+		doSystemUpdates(args[2], args[1])
 	case "stop":
 		if len(args) < 2 {
 			logFatal("Usage: deploy stop <env>")
@@ -111,18 +122,20 @@ func main() {
 func printUsage() {
 	fmt.Println("Usage: deploy <command> [args]")
 	fmt.Println("Commands:")
-	fmt.Println("  init                  Generate deploy.yaml")
-	fmt.Println("  release [tag] <env>   Deploy to env. If tag omitted, auto-detects or prompts.")
-	fmt.Println("  start <env>           Start service")
-	fmt.Println("  stop <env>            Stop service")
-	fmt.Println("  restart <env>         Restart service")
-	fmt.Println("  enable <env>          Enable service at boot")
-	fmt.Println("  disable <env>         Disable service at boot")
-	fmt.Println("  prune <env>           Clean up unused images/builder cache")
-	fmt.Println("  traefik <env>         Setup Traefik infrastructure")
-	fmt.Println("  logs <env>            Stream logs")
-	fmt.Println("  db pull <env>         Sync DB (Remote -> Local)")
-	fmt.Println("  db push <env>         Sync DB (Local -> Remote)")
-	fmt.Println("  gen-auth <u?> <p?>    Generate Basic Auth string")
-	fmt.Println("  rights <env> <target> Manual permission fix (target: 'user' or 'container')")
+	fmt.Println("  init                     Generate deploy.yaml")
+	fmt.Println("  release [tag] <env>      Deploy to env. If tag omitted, auto-detects or prompts.")
+	fmt.Println("  system-stats <env>       Show host/container health stats")
+	fmt.Println("  system-updates <ac> <env> Manage unattended upgrades (status|enable|disable)")
+	fmt.Println("  start <env>              Start service")
+	fmt.Println("  stop <env>               Stop service")
+	fmt.Println("  restart <env>            Restart service")
+	fmt.Println("  enable <env>             Enable service at boot")
+	fmt.Println("  disable <env>            Disable service at boot")
+	fmt.Println("  prune <env>              Clean up unused images/builder cache")
+	fmt.Println("  traefik <env>            Setup Traefik infrastructure")
+	fmt.Println("  logs <env>               Stream logs")
+	fmt.Println("  db pull <env>            Sync DB (Remote -> Local)")
+	fmt.Println("  db push <env>            Sync DB (Local -> Remote)")
+	fmt.Println("  gen-auth <u?> <p?>       Generate Basic Auth string")
+	fmt.Println("  rights <env> <target>    Manual permission fix (target: 'user' or 'container')")
 }

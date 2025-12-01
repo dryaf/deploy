@@ -81,6 +81,14 @@ func doRelease(explicitVersion, envName string) {
 	env.Quadlet.Labels = generateTraefikLabels(env.Quadlet.ServiceName, env.Quadlet.Router, env.Traefik.CertResolver)
 	containerPath := generateQuadlet(env, "build")
 
+	// --- OPTIONAL: Stop Service Early ---
+	if env.Quadlet.StopOnDeploy {
+		logInfo("🛑 Stopping service before sync/build (stop_on_deploy=true)...")
+		// We ignore errors here in case the service isn't running yet
+		runSSH(env, fmt.Sprintf("systemctl --user stop %s.service || true", env.Quadlet.ServiceName))
+	}
+	// ------------------------------------
+
 	// 3. Sync
 	logInfo("📤 Syncing...")
 	runSSH(env, fmt.Sprintf("mkdir -p %s/data %s/migrations ~/.config/containers/systemd", env.Dir, env.Dir))
@@ -100,7 +108,12 @@ func doRelease(explicitVersion, envName string) {
 	runRsync(env, artifacts, fmt.Sprintf("%s@%s:%s/", env.User, env.Host, env.Dir), "--delete")
 
 	if env.SyncEnvFile != "" {
-		runRsync(env, []string{env.SyncEnvFile}, fmt.Sprintf("%s@%s:%s/.env", env.User, env.Host, env.Dir))
+		// Confirm before overwriting env file
+		if confirm(fmt.Sprintf("Sync/Overwrite remote .env with local '%s'?", env.SyncEnvFile)) {
+			runRsync(env, []string{env.SyncEnvFile}, fmt.Sprintf("%s@%s:%s/.env", env.User, env.Host, env.Dir))
+		} else {
+			logInfo("Skipping .env sync.")
+		}
 	}
 	runRsync(env, []string{containerPath}, fmt.Sprintf("%s@%s:~/.config/containers/systemd/", env.User, env.Host))
 
@@ -125,6 +138,7 @@ func doRelease(explicitVersion, envName string) {
 		dockerfile = "Dockerfile.vps"
 	}
 
+	// Note: 'restart' works even if the service was stopped earlier.
 	script := strings.Join([]string{
 		fmt.Sprintf("cd %s", env.Dir),
 		fmt.Sprintf("podman build -f %s -t %s .", dockerfile, env.Quadlet.Image),
