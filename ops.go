@@ -380,12 +380,29 @@ binary_name: "{{ .BinaryName }}"
 
 build:
   arch: "amd64"
+  # Standard local build.
   # This uses placeholders {{ "{{" }}.Version{{ "}}" }} which are injected during 'deploy release'
   ldflags: "-s -w -X 'main.Version={{ "{{" }}.Version{{ "}}" }}' -X 'main.Commit={{ "{{" }}.Commit{{ "}}" }}'"
 
+  # Cross-compilation helper for Mac/Windows Users (CGO/SQLite Support).
+  # Uncomment this 'cmd' block to build inside a Linux container using Podman.
+  # This ensures SQLite drivers are compiled correctly for Alpine Linux.
+  # cmd: >-
+  #   podman run --rm -v "$(pwd):/app" -w /app
+  #   docker.io/library/golang:1.24.5-alpine
+  #   sh -c "apk add --no-cache gcc musl-dev git &&
+  #   go build -ldflags=\"-w -s -extldflags '-static'
+  #   -X 'main.buildVersion={{ "{{" }}.Version{{ "}}" }}'
+  #   -X 'main.buildDate={{ "{{" }}.Date{{ "}}" }}'
+  #   -X 'main.buildTag={{ "{{" }}.Tag{{ "}}" }}'
+  #   -X 'main.goVersion={{ "{{" }}.GoVersion{{ "}}" }}'\"
+  #   -o build/{{ .BinaryName }} ."
+
 artifacts:
-  include: ["migrations/", "Dockerfile"]
-  exclude: ["data/", "*.db"]
+  # Files to sync to the remote server.
+  # Note: No trailing slash on directories unless you specifically want rsync contents-only behavior.
+  include: ["migrations", "Dockerfile"]
+  exclude: ["data", "*.db", ".env", ".git", ".idea", ".vscode"]
 
 # Global Maintenance Configuration (Optional)
 maintenance:
@@ -412,6 +429,7 @@ environments:
       network: "traefik-net.network"
       auto_restart: true
       timezone: "Europe/Vienna"
+      exec: "/{{ .BinaryName }}"
       # stop_on_deploy: true
 
       container_uid: 65532
@@ -420,6 +438,7 @@ environments:
 
       volumes:
         - "./data:/data:Z"
+        - "./migrations:/migrations:ro,Z"
 
       router:
         host: "{{ .AppName }}.example.com"
@@ -428,4 +447,5 @@ environments:
 
       env_vars:
         - "APP_ENV=production"
+        - "DATASTORE_TYPE=sqlite"
 `
