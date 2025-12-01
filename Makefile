@@ -8,7 +8,8 @@ INSTALL_DIR=$(HOME)/bin
 all: build
 
 build:
-	go build -o $(BINARY_NAME) main.go
+	# Builds all files in the current directory (package main)
+	go build -o $(BINARY_NAME) .
 
 install: build
 	mkdir -p $(INSTALL_DIR)
