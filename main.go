@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -687,7 +688,7 @@ func doRun(envName string) {
 // --- DB Operations ---
 
 func doDBPull(envName string) {
-	_, env := loadEnv(envName) // Fix unused variable warning
+	_, env := loadEnv(envName)
 	if env.Database.Driver != "sqlite" {
 		logFatal("Only sqlite supported")
 	}
@@ -696,8 +697,21 @@ func doDBPull(envName string) {
 	remote := fmt.Sprintf("%s/%s", strings.TrimRight(env.Dir, "/"), env.Database.Source)
 
 	logInfo("📥 Pulling DB from %s...", env.Host)
-	if !confirm(fmt.Sprintf("Overwrite local %s?", local)) {
-		return
+
+	// Backup Local DB if it exists
+	if _, err := os.Stat(local); err == nil {
+		if !confirm(fmt.Sprintf("Local file %s exists. Backup and overwrite?", local)) {
+			return
+		}
+		backup := local + ".bak"
+		logInfo("📦 Backing up local DB to %s...", backup)
+		if err := copyFile(local, backup); err != nil {
+			logFatal("Failed to backup local file: %v", err)
+		}
+	} else {
+		if !confirm(fmt.Sprintf("Download to %s?", local)) {
+			return
+		}
 	}
 
 	if !dryRun {
@@ -719,6 +733,10 @@ func doDBPull(envName string) {
 		set -e
 		TEMP_DIR=$(mktemp -d)
 		trap "rm -rf $TEMP_DIR" EXIT
+		if ! command -v sqlite3 &> /dev/null; then
+            echo "sqlite3 not found on remote" >&2
+            exit 1
+        fi
 		sqlite3 '%s' ".backup '$TEMP_DIR/backup.db'"
 		cat "$TEMP_DIR/backup.db"
 	`, remote)
@@ -728,14 +746,14 @@ func doDBPull(envName string) {
 
 	cmd := exec.Command("ssh", sshArgs...)
 	cmd.Stdout = f
-	cmd.Stderr = os.Stderr // <--- CRITICAL FIX: Show remote errors!
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
 		f.Close()
 		os.Remove(local) // Don't leave a 0-byte corrupted file
 		logFatal("Pull failed: %v", err)
 	}
-	logSuccess("Synced.")
+	logSuccess("Synced to %s", local)
 }
 
 func doDBPush(envName string) {
@@ -748,23 +766,56 @@ func doDBPush(envName string) {
 		return
 	}
 
-	runSSH(env, fmt.Sprintf("systemctl --user stop %s.service", env.Quadlet.ServiceName))
-
-	if env.Quadlet.ContainerUID > 0 {
-		logInfo("🔧 Reclaiming file permissions...")
-		runSSH(env, fmt.Sprintf("podman unshare chown $(id -u):$(id -g) %s", remote))
+	// 1. Stop Service
+	logInfo("🛑 Stopping service...")
+	if err := runSSH(env, fmt.Sprintf("systemctl --user stop %s.service", env.Quadlet.ServiceName)); err != nil {
+		logFatal("Failed to stop service: %v", err)
 	}
 
-	logInfo("📤 Uploading...")
-	runRsync(env, []string{local}, fmt.Sprintf("%s@%s:%s", env.User, env.Host, remote))
+	// Use a cleanup/restore function block to ensure service starts even if rsync fails
+	err := func() error {
+		// 2. Permission Fix (if needed)
+		if env.Quadlet.ContainerUID > 0 {
+			logInfo("🔧 Reclaiming file permissions...")
+			// Claim main DB and potential WAL files
+			runSSH(env, fmt.Sprintf("podman unshare chown $(id -u):$(id -g) %s %s-wal %s-shm || true", remote, remote, remote))
+		}
 
+		// 3. Backup Remote
+		logInfo("📦 Creating remote backup...")
+		// Copy .db to .db.bak
+		if err := runSSH(env, fmt.Sprintf("cp %s %s.bak || true", remote, remote)); err != nil {
+			return fmt.Errorf("remote backup failed: %v", err)
+		}
+		// Remove old WAL/SHM to avoid corruption when new DB lands
+		runSSH(env, fmt.Sprintf("rm -f %s-wal %s-shm", remote, remote))
+
+		// 4. Upload
+		logInfo("📤 Uploading...")
+		if err := runRsyncSafe(env, []string{local}, fmt.Sprintf("%s@%s:%s", env.User, env.Host, remote)); err != nil {
+			logError("Rsync failed: %v", err)
+			logInfo("Restoring from backup...")
+			runSSH(env, fmt.Sprintf("mv %s.bak %s", remote, remote))
+			return err
+		}
+
+		return nil
+	}()
+
+	// 5. Restore Permissions
 	if env.Quadlet.ContainerUID > 0 {
 		logInfo("🔧 Restoring container permissions...")
-		runSSH(env, fmt.Sprintf("podman unshare chown %d:%d %s", env.Quadlet.ContainerUID, env.Quadlet.ContainerGID, remote))
+		runSSH(env, fmt.Sprintf("podman unshare chown %d:%d %s %s.bak", env.Quadlet.ContainerUID, env.Quadlet.ContainerGID, remote, remote))
 	}
 
+	// 6. Start Service
+	logInfo("▶️ Starting service...")
 	runSSH(env, fmt.Sprintf("systemctl --user start %s.service", env.Quadlet.ServiceName))
-	logSuccess("Pushed.")
+
+	if err != nil {
+		logFatal("Push failed: %v", err)
+	}
+	logSuccess("Pushed successfully.")
 }
 
 // --- Common Helpers ---
@@ -949,6 +1000,23 @@ func genFile(path string, tmplStr string, data any) {
 	t.Execute(f, data)
 }
 
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	return err
+}
+
 func runCommand(desc string, cmd *exec.Cmd) error {
 	if dryRun {
 		logDebug("[DRY] %s", cmd.String())
@@ -984,6 +1052,12 @@ func runCommandRaw(name string, args ...string) error {
 }
 
 func runRsync(env Environment, sources []string, dest string, extraArgs ...string) {
+	if err := runRsyncSafe(env, sources, dest, extraArgs...); err != nil {
+		logFatal("Rsync failed: %v", err)
+	}
+}
+
+func runRsyncSafe(env Environment, sources []string, dest string, extraArgs ...string) error {
 	args := []string{"-avz"}
 
 	sshCmd := "ssh"
@@ -1004,9 +1078,7 @@ func runRsync(env Environment, sources []string, dest string, extraArgs ...strin
 	args = append(args, sources...)
 	args = append(args, dest)
 
-	if err := runCommandRaw("rsync", args...); err != nil {
-		logFatal("Rsync failed: %v", err)
-	}
+	return runCommandRaw("rsync", args...)
 }
 
 func getSSHBaseArgs(env Environment) []string {
