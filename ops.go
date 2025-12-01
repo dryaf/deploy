@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -93,6 +94,37 @@ func doLogs(envName string, usePodman bool) {
 	c.Stderr = os.Stderr
 	c.Stdin = os.Stdin
 	c.Run()
+}
+
+func doServiceAction(envName, action string) {
+	_, env := loadEnv(envName)
+	serviceName := env.Quadlet.ServiceName
+
+	valid := map[string]bool{
+		"start":   true,
+		"stop":    true,
+		"restart": true,
+		"enable":  true,
+		"disable": true,
+	}
+	if !valid[action] {
+		logFatal("Invalid action '%s'. Use start, stop, restart, enable, or disable.", action)
+	}
+
+	logInfo("⚙️  Executing '%s' on service '%s' (%s)...", action, serviceName, env.Host)
+
+	cmd := fmt.Sprintf("systemctl --user %s %s.service", action, serviceName)
+	if err := runSSH(env, cmd); err != nil {
+		logFatal("Action '%s' failed: %v", action, err)
+	}
+
+	if action == "start" || action == "restart" {
+		time.Sleep(2 * time.Second)
+		logInfo("Checking status...")
+		runSSHStream(env, fmt.Sprintf("systemctl --user is-active %s.service", serviceName))
+	}
+
+	logSuccess("Service action '%s' completed.", action)
 }
 
 func doInit() {

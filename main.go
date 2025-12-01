@@ -44,6 +44,31 @@ func main() {
 			logFatal("Usage: deploy logs [--podman] <env>")
 		}
 		doLogs(logsCmd.Arg(0), *usePodman)
+	case "stop":
+		if len(args) < 2 {
+			logFatal("Usage: deploy stop <env>")
+		}
+		doServiceAction(args[1], "stop")
+	case "start":
+		if len(args) < 2 {
+			logFatal("Usage: deploy start <env>")
+		}
+		doServiceAction(args[1], "start")
+	case "restart":
+		if len(args) < 2 {
+			logFatal("Usage: deploy restart <env>")
+		}
+		doServiceAction(args[1], "restart")
+	case "enable":
+		if len(args) < 2 {
+			logFatal("Usage: deploy enable <env>")
+		}
+		doServiceAction(args[1], "enable")
+	case "disable":
+		if len(args) < 2 {
+			logFatal("Usage: deploy disable <env>")
+		}
+		doServiceAction(args[1], "disable")
 	case "db":
 		if len(args) < 3 {
 			logFatal("Usage: deploy db <pull|push> <env>")
@@ -79,6 +104,11 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  init                  Generate deploy.yaml")
 	fmt.Println("  run <env>             Deploy app")
+	fmt.Println("  start <env>           Start service")
+	fmt.Println("  stop <env>            Stop service")
+	fmt.Println("  restart <env>         Restart service")
+	fmt.Println("  enable <env>          Enable service at boot")
+	fmt.Println("  disable <env>         Disable service at boot")
 	fmt.Println("  prune <env>           Clean up unused images/builder cache")
 	fmt.Println("  traefik <env>         Setup Traefik infrastructure")
 	fmt.Println("  logs <env>            Stream logs")
