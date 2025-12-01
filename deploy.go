@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"text/template"
 	"time"
@@ -59,7 +60,21 @@ func doRelease(explicitVersion, envName string) {
 	var cmd *exec.Cmd
 	if cfg.Build.Cmd != "" {
 		logInfo("   Using custom build command...")
-		cmd = exec.Command("sh", "-c", cfg.Build.Cmd)
+
+		// Parse the command string as a template
+		tmpl, err := template.New("cmd").Parse(cfg.Build.Cmd)
+		if err != nil {
+			logFatal("Custom CMD template error: %v", err)
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, buildMeta); err != nil {
+			logFatal("Custom CMD exec error: %v", err)
+		}
+		finalCmd := buf.String()
+
+		logDebug("   Exec: %s", finalCmd)
+
+		cmd = exec.Command("sh", "-c", finalCmd)
 		cmd.Env = os.Environ()
 		cmd.Env = append(cmd.Env, fmt.Sprintf("LDFLAGS=%s", ldflags))
 	} else {
@@ -145,6 +160,7 @@ func doRelease(explicitVersion, envName string) {
 		permCmd,
 		"systemctl --user daemon-reload",
 		"mkdir -p ~/.config/systemd/user/default.target.wants",
+		// Enable Main Service
 		fmt.Sprintf("ln -sf /run/user/$(id -u)/systemd/generator/%s.service ~/.config/systemd/user/default.target.wants/%s.service", env.Quadlet.ServiceName, env.Quadlet.ServiceName),
 		"systemctl --user daemon-reload",
 		fmt.Sprintf("systemctl --user restart %s.service", env.Quadlet.ServiceName),
@@ -180,6 +196,50 @@ func doRelease(explicitVersion, envName string) {
 	}
 
 	logSuccess("✅ Deployed successfully.")
+}
+
+func doMaintenancePage(envName string) {
+	_, env := loadEnv(envName)
+
+	// Removed the strict check. If the user invokes this command, they want it.
+	// Defaults will be applied in generateMaintenance()
+
+	logInfo("🚧 Setting up Maintenance Page infrastructure on %s...", env.Host)
+
+	if !dryRun {
+		os.MkdirAll("build", 0755)
+	}
+
+	// 1. Generate Files
+	maintPath, htmlPath := generateMaintenance(env, "build")
+
+	// 2. Sync
+	logInfo("📤 Syncing maintenance artifacts...")
+	runSSH(env, fmt.Sprintf("mkdir -p %s/maintenance ~/.config/containers/systemd", env.Dir))
+	runRsync(env, []string{htmlPath}, fmt.Sprintf("%s@%s:%s/maintenance/index.html", env.User, env.Host, env.Dir))
+	runRsync(env, []string{maintPath}, fmt.Sprintf("%s@%s:~/.config/containers/systemd/", env.User, env.Host))
+
+	// 3. Activate
+	serviceName := env.Quadlet.ServiceName + "-maint"
+	logInfo("🔄 Activating maintenance container (%s)...", serviceName)
+
+	script := strings.Join([]string{
+		"systemctl --user daemon-reload",
+		"mkdir -p ~/.config/systemd/user/default.target.wants",
+		// Manually link to enable persistence (workaround for 'failed to enable unit: generated' error)
+		fmt.Sprintf("ln -sf /run/user/$(id -u)/systemd/generator/%s.service ~/.config/systemd/user/default.target.wants/%s.service", serviceName, serviceName),
+		// Just Start (enable is covered by the link above)
+		fmt.Sprintf("systemctl --user start %s.service", serviceName),
+		// Verify
+		fmt.Sprintf("sleep 2 && systemctl --user is-active %s.service", serviceName),
+	}, " && ")
+
+	if err := runSSH(env, script); err != nil {
+		logFatal("Failed to start maintenance container: %v", err)
+	}
+
+	logSuccess("✅ Maintenance page is UP (Priority 1).")
+	logInfo("   It will be served automatically whenever '%s' (Priority 100) is stopped.", env.Quadlet.ServiceName)
 }
 
 // resolveAndValidateVersion handles the logic for strict versioning and "lazy" tagging.
@@ -321,11 +381,26 @@ func getBuildMetadata(explicitVersion string) BuildMetadata {
 		v = get("git", "describe", "--tags", "--always", "--dirty")
 	}
 
+	// Calculate MainVersion (e.g. v1.2.3 -> v1.2)
+	mainVer := v
+	cleanVer := strings.TrimPrefix(v, "v") // handle v1.2.3 -> 1.2.3
+	parts := strings.Split(cleanVer, ".")
+	if len(parts) >= 2 {
+		// Re-add 'v' if it was present, purely heuristic
+		prefix := ""
+		if strings.HasPrefix(v, "v") {
+			prefix = "v"
+		}
+		mainVer = prefix + parts[0] + "." + parts[1]
+	}
+
 	return BuildMetadata{
-		Version: v,
-		Date:    time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-		Tag:     v,
-		Commit:  get("git", "rev-parse", "HEAD"),
+		Version:     v,
+		Date:        time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+		Tag:         v,
+		Commit:      get("git", "rev-parse", "HEAD"),
+		MainVersion: mainVer,
+		GoVersion:   runtime.Version(),
 	}
 }
 
@@ -353,4 +428,59 @@ func generateQuadlet(env Environment, outDir string) string {
 		os.WriteFile(path, buf.Bytes(), 0644)
 	}
 	return path
+}
+
+func generateMaintenance(env Environment, outDir string) (string, string) {
+	// 1. Apply Defaults if config is missing (Enabled check removed in CLI)
+	if env.Maintenance.Title == "" {
+		env.Maintenance.Title = "System Maintenance"
+	}
+	if env.Maintenance.Text == "" {
+		env.Maintenance.Text = "The system is currently undergoing maintenance. We will be back shortly."
+	}
+
+	// 2. Generate HTML
+	var htmlBuf bytes.Buffer
+	t1, _ := template.New("h").Parse(maintenanceHtmlTmpl)
+	t1.Execute(&htmlBuf, env.Maintenance)
+
+	htmlPath := filepath.Join(outDir, "maintenance.html")
+	if !dryRun {
+		os.WriteFile(htmlPath, htmlBuf.Bytes(), 0644)
+	}
+
+	// 3. Generate Container
+	resolver := env.Traefik.CertResolver
+	if resolver == "" {
+		resolver = "myresolver"
+	}
+
+	// Determine the Rule (Priority: explicit rule > host)
+	rule := env.Quadlet.Router.Rule
+	if rule == "" {
+		if env.Quadlet.Router.Host != "" {
+			rule = fmt.Sprintf("Host(`%s`)", env.Quadlet.Router.Host)
+		} else {
+			// Fallback if both missing (unlikely if config validates)
+			rule = "Host(`unknown-host`)"
+		}
+	}
+
+	data := MaintenanceTemplateData{
+		ServiceName: env.Quadlet.ServiceName,
+		Rule:        rule,
+		Network:     env.Quadlet.Network,
+		TargetDir:   env.Dir,
+		Resolver:    resolver,
+	}
+	var cBuf bytes.Buffer
+	t2, _ := template.New("mc").Parse(maintenanceContainerTmpl)
+	t2.Execute(&cBuf, data)
+
+	containerPath := filepath.Join(outDir, env.Quadlet.ServiceName+"-maint.container")
+	if !dryRun {
+		os.WriteFile(containerPath, cBuf.Bytes(), 0644)
+	}
+
+	return containerPath, htmlPath
 }

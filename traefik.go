@@ -88,6 +88,10 @@ func generateTraefikLabels(serviceName string, r RouterConfig, defaultResolver s
 	}
 
 	labels = append(labels, "traefik.enable=true")
+
+	// High Priority for Main App (beats maintenance page)
+	labels = append(labels, fmt.Sprintf("traefik.http.routers.%s.priority=100", serviceName))
+
 	rule := r.Rule
 	if rule == "" {
 		rule = fmt.Sprintf("Host(`%s`)", r.Host)

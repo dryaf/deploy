@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strings"
+	"text/template"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -313,33 +316,90 @@ func doServiceAction(envName, action string) {
 	logSuccess("Service action '%s' completed.", action)
 }
 
-func doInit() {
-	if _, err := os.Stat("deploy.yaml"); err == nil {
-		logFatal("deploy.yaml exists")
-	}
-	os.WriteFile("deploy.yaml", []byte(getDefaultConfig()), 0644)
-	logSuccess("Created deploy.yaml")
+// --- INIT LOGIC ---
+
+type InitContext struct {
+	AppName    string
+	BinaryName string
+	User       string
 }
 
-func getDefaultConfig() string {
-	return `app_name: "my-app"
-binary_name: "server"
+func doInit() {
+	if _, err := os.Stat("deploy.yaml"); err == nil {
+		logFatal("deploy.yaml already exists")
+	}
+
+	// 1. Detect Context
+	cwd, err := os.Getwd()
+	if err != nil {
+		logFatal("Could not get working directory: %v", err)
+	}
+	appName := filepath.Base(cwd)
+
+	// Normalize appName (lowercase, replace spaces)
+	appName = strings.ToLower(strings.ReplaceAll(appName, " ", "-"))
+
+	// Detect User
+	userName := "deploy_user"
+	u, err := user.Current()
+	if err == nil && u.Username != "" {
+		// Clean username (e.g., on Windows "DOMAIN\User" -> "User")
+		parts := strings.Split(u.Username, "\\")
+		userName = parts[len(parts)-1]
+	}
+
+	data := InitContext{
+		AppName:    appName,
+		BinaryName: appName + "-server", // Convention
+		User:       userName,
+	}
+
+	logInfo("✨ Initializing deploy.yaml for app '%s' with user '%s'...", data.AppName, data.User)
+
+	// 2. Render Template
+	tmpl, err := template.New("init").Parse(defaultConfigTmpl)
+	if err != nil {
+		logFatal("Internal template error: %v", err)
+	}
+
+	f, err := os.Create("deploy.yaml")
+	if err != nil {
+		logFatal("Failed to create file: %v", err)
+	}
+	defer f.Close()
+
+	if err := tmpl.Execute(f, data); err != nil {
+		logFatal("Failed to write config: %v", err)
+	}
+
+	logSuccess("Created deploy.yaml. Please edit 'host' and 'ssh_key' details.")
+}
+
+const defaultConfigTmpl = `app_name: "{{ .AppName }}"
+binary_name: "{{ .BinaryName }}"
 
 build:
   arch: "amd64"
-  ldflags: "-s -w -X 'main.Version={{.Version}}' -X 'main.Commit={{.Commit}}'"
+  # This uses placeholders {{ "{{" }}.Version{{ "}}" }} which are injected during 'deploy release'
+  ldflags: "-s -w -X 'main.Version={{ "{{" }}.Version{{ "}}" }}' -X 'main.Commit={{ "{{" }}.Commit{{ "}}" }}'"
 
 artifacts:
   include: ["migrations/", "Dockerfile"]
   exclude: ["data/", "*.db"]
 
+# Global Maintenance Configuration (Optional)
+maintenance:
+  enabled: true
+  title: "Under Maintenance"
+  text: "We are currently upgrading the {{ .AppName }} system. Please try again in a minute."
+
 environments:
   prod:
     host: "vps.example.com"
-    user: "deploy_user"
+    user: "{{ .User }}"
     ssh_port: 22
-    # ssh_key: "~/.ssh/id_ed25519_vps" # Optional
-    target_dir: "/home/deploy_user/web/my-app"
+    # ssh_key: "~/.ssh/id_ed25519_vps"
+    target_dir: "/home/{{ .User }}/web/{{ .AppName }}"
     sync_env_file: ".env"
 
     traefik:
@@ -347,12 +407,12 @@ environments:
       network_name: "traefik-net"
 
     quadlet:
-      service_name: "my-app"
-      image: "localhost/my-app:latest"
+      service_name: "{{ .AppName }}"
+      image: "localhost/{{ .AppName }}:latest"
       network: "traefik-net.network"
       auto_restart: true
       timezone: "Europe/Vienna"
-      # stop_on_deploy: true # Uncomment to stop app before syncing/building (save RAM)
+      # stop_on_deploy: true
 
       container_uid: 65532
       container_gid: 65532
@@ -362,13 +422,10 @@ environments:
         - "./data:/data:Z"
 
       router:
-        host: "app.example.com"
+        host: "{{ .AppName }}.example.com"
         internal_port: 8080
         https_redirect: true
-
-      # health_url: "http://localhost:8080/health"
 
       env_vars:
         - "APP_ENV=production"
 `
-}

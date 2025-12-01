@@ -11,6 +11,7 @@ type Config struct {
 	BinaryName   string                 `yaml:"binary_name"`
 	Build        BuildConfig            `yaml:"build"`
 	Artifacts    ArtifactsConfig        `yaml:"artifacts"`
+	Maintenance  MaintenanceConfig      `yaml:"maintenance"` // Global Default
 	Environments map[string]Environment `yaml:"environments"`
 }
 
@@ -27,15 +28,22 @@ type ArtifactsConfig struct {
 }
 
 type Environment struct {
-	Host        string         `yaml:"host"`
-	User        string         `yaml:"user"`
-	Port        int            `yaml:"ssh_port"`
-	SSHKey      string         `yaml:"ssh_key"`
-	Dir         string         `yaml:"target_dir"`
-	SyncEnvFile string         `yaml:"sync_env_file"`
-	Quadlet     Quadlet        `yaml:"quadlet"`
-	Database    DatabaseConfig `yaml:"database"`
-	Traefik     TraefikConfig  `yaml:"traefik"`
+	Host        string            `yaml:"host"`
+	User        string            `yaml:"user"`
+	Port        int               `yaml:"ssh_port"`
+	SSHKey      string            `yaml:"ssh_key"`
+	Dir         string            `yaml:"target_dir"`
+	SyncEnvFile string            `yaml:"sync_env_file"`
+	Quadlet     Quadlet           `yaml:"quadlet"`
+	Maintenance MaintenanceConfig `yaml:"maintenance"` // Env Override
+	Database    DatabaseConfig    `yaml:"database"`
+	Traefik     TraefikConfig     `yaml:"traefik"`
+}
+
+type MaintenanceConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Title   string `yaml:"title"`
+	Text    string `yaml:"text"`
 }
 
 type DatabaseConfig struct {
@@ -86,7 +94,7 @@ type Quadlet struct {
 	EnvVars      []string     `yaml:"env_vars"`
 	Ports        []string     `yaml:"ports"`
 	AutoRestart  bool         `yaml:"auto_restart"`
-	StopOnDeploy bool         `yaml:"stop_on_deploy"` // New field
+	StopOnDeploy bool         `yaml:"stop_on_deploy"`
 	Timezone     string       `yaml:"timezone"`
 	Memory       string       `yaml:"memory"`
 	CPU          string       `yaml:"cpu"`
@@ -103,10 +111,12 @@ type Quadlet struct {
 }
 
 type BuildMetadata struct {
-	Version string
-	Commit  string
-	Date    string
-	Tag     string
+	Version     string
+	Commit      string
+	Date        string
+	Tag         string
+	MainVersion string
+	GoVersion   string
 }
 
 func loadEnv(envName string) (Config, Environment) {
@@ -122,5 +132,18 @@ func loadEnv(envName string) (Config, Environment) {
 	if !ok {
 		logFatal("Env %s not found", envName)
 	}
+
+	// Merge Global Maintenance Defaults into Environment
+	// We only overwrite if the Environment value is empty/zero
+	if env.Maintenance.Title == "" {
+		env.Maintenance.Title = cfg.Maintenance.Title
+	}
+	if env.Maintenance.Text == "" {
+		env.Maintenance.Text = cfg.Maintenance.Text
+	}
+	// Note: We don't merge 'Enabled' strictly because false is a valid setting.
+	// However, since the CLI command ignores 'Enabled' and forces deploy,
+	// checking Title/Text is sufficient for templates.
+
 	return cfg, env
 }

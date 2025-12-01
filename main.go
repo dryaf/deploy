@@ -40,6 +40,11 @@ func main() {
 			logFatal("Usage: deploy release [version] <env>")
 		}
 		doRelease(version, envName)
+	case "maintenance_page":
+		if len(args) < 2 {
+			logFatal("Usage: deploy maintenance_page <env>")
+		}
+		doMaintenancePage(args[1])
 	case "traefik":
 		if len(args) < 2 {
 			logFatal("Usage: deploy traefik <env>")
@@ -97,6 +102,8 @@ func main() {
 			doDBPull(args[2])
 		} else if args[1] == "push" {
 			doDBPush(args[2])
+		} else {
+			logFatal("Invalid db action: %s", args[1])
 		}
 	case "gen-auth":
 		if len(args) < 3 {
@@ -124,6 +131,7 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  init                     Generate deploy.yaml")
 	fmt.Println("  release [tag] <env>      Deploy to env. If tag omitted, auto-detects or prompts.")
+	fmt.Println("  maintenance_page <env>   Setup/Update the standby maintenance page container")
 	fmt.Println("  system-stats <env>       Show host/container health stats")
 	fmt.Println("  system-updates <ac> <env> Manage unattended upgrades (status|enable|disable)")
 	fmt.Println("  start <env>              Start service")
@@ -135,7 +143,7 @@ func printUsage() {
 	fmt.Println("  traefik <env>            Setup Traefik infrastructure")
 	fmt.Println("  logs <env>               Stream logs")
 	fmt.Println("  db pull <env>            Sync DB (Remote -> Local)")
-	fmt.Println("  db push <env>            Sync DB (Local -> Remote)")
+	fmt.Println("  db push <env>            Overwrite Remote DB (Service MUST be stopped first)")
 	fmt.Println("  gen-auth <u?> <p?>       Generate Basic Auth string")
 	fmt.Println("  rights <env> <target>    Manual permission fix (target: 'user' or 'container')")
 }

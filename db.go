@@ -78,41 +78,43 @@ func doDBPush(envName string) {
 	local := filepath.Clean(env.Database.Source)
 	remote := fmt.Sprintf("%s/%s", strings.TrimRight(env.Dir, "/"), env.Database.Source)
 
-	logWarn("🔥 PUSHING DB to %s. Service will STOP.", envName)
-	if !confirm("Sure?") {
+	// 1. Safety Check: Is service running?
+	// In dry-run, we skip this check because runSSH returns nil (success) which would trigger false positive.
+	if !dryRun {
+		// systemctl is-active returns 0 (success) if running, which means err == nil
+		err := runSSH(env, fmt.Sprintf("systemctl --user is-active -q %s.service", env.Quadlet.ServiceName))
+		if err == nil {
+			logFatal("⛔ Service '%s' is RUNNING on %s.\n   You must manually stop it before pushing a database to prevent corruption.\n   Run: deploy stop %s", env.Quadlet.ServiceName, env.Host, envName)
+		}
+	}
+
+	logWarn("🔥 OVERWRITING REMOTE DB on %s.", envName)
+	if !confirm("Are you sure?") {
 		return
 	}
 
-	// 1. Stop Service
-	logInfo("🛑 Stopping service...")
-	if err := runSSH(env, fmt.Sprintf("systemctl --user stop %s.service", env.Quadlet.ServiceName)); err != nil {
-		logFatal("Failed to stop service: %v", err)
+	// 2. Permission Fix (if needed) - Pre-transfer
+	if env.Quadlet.ContainerUID > 0 {
+		logInfo("🔧 Reclaiming file permissions...")
+		runSSH(env, fmt.Sprintf("podman unshare chown $(id -u):$(id -g) %s %s-wal %s-shm || true", remote, remote, remote))
 	}
 
-	err := func() error {
-		// 2. Permission Fix (if needed)
-		if env.Quadlet.ContainerUID > 0 {
-			logInfo("🔧 Reclaiming file permissions...")
-			runSSH(env, fmt.Sprintf("podman unshare chown $(id -u):$(id -g) %s %s-wal %s-shm || true", remote, remote, remote))
-		}
+	// 3. Backup Remote
+	logInfo("📦 Creating remote backup...")
+	if err := runSSH(env, fmt.Sprintf("cp %s %s.bak || true", remote, remote)); err != nil {
+		logFatal("Remote backup failed: %v", err)
+	}
+	// Clean up WAL/SHM to ensure clean state
+	runSSH(env, fmt.Sprintf("rm -f %s-wal %s-shm", remote, remote))
 
-		// 3. Backup Remote
-		logInfo("📦 Creating remote backup...")
-		if err := runSSH(env, fmt.Sprintf("cp %s %s.bak || true", remote, remote)); err != nil {
-			return fmt.Errorf("remote backup failed: %v", err)
-		}
-		runSSH(env, fmt.Sprintf("rm -f %s-wal %s-shm", remote, remote))
-
-		// 4. Upload
-		logInfo("📤 Uploading...")
-		if err := runRsyncSafe(env, []string{local}, fmt.Sprintf("%s@%s:%s", env.User, env.Host, remote)); err != nil {
-			logError("Rsync failed: %v", err)
-			logInfo("Restoring from backup...")
-			runSSH(env, fmt.Sprintf("mv %s.bak %s", remote, remote))
-			return err
-		}
-		return nil
-	}()
+	// 4. Upload
+	logInfo("📤 Uploading...")
+	if err := runRsyncSafe(env, []string{local}, fmt.Sprintf("%s@%s:%s", env.User, env.Host, remote)); err != nil {
+		logError("Rsync failed: %v", err)
+		logInfo("Restoring from backup...")
+		runSSH(env, fmt.Sprintf("mv %s.bak %s", remote, remote))
+		logFatal("Upload failed and backup restored.")
+	}
 
 	// 5. Restore Permissions
 	if env.Quadlet.ContainerUID > 0 {
@@ -120,12 +122,6 @@ func doDBPush(envName string) {
 		runSSH(env, fmt.Sprintf("podman unshare chown %d:%d %s %s.bak", env.Quadlet.ContainerUID, env.Quadlet.ContainerGID, remote, remote))
 	}
 
-	// 6. Start Service
-	logInfo("▶️ Starting service...")
-	runSSH(env, fmt.Sprintf("systemctl --user start %s.service", env.Quadlet.ServiceName))
-
-	if err != nil {
-		logFatal("Push failed: %v", err)
-	}
-	logSuccess("Pushed successfully.")
+	logSuccess("Database pushed successfully.")
+	logInfo("ℹ️  Service remains STOPPED. Run 'deploy start %s' or 'deploy release %s' when ready.", envName, envName)
 }

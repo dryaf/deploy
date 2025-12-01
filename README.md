@@ -16,6 +16,7 @@ This tool replaces fragile Makefiles and complex Bash scripts with a single, dec
     *   **Dry Run:** Preview every shell command before it executes.
 *   **Infrastructure Management:**
     *   **Traefik Bootstrap:** Installs and configures Traefik (with Let's Encrypt) on a fresh server with one command.
+    *   **Maintenance Mode:** Automatic "Standby" container that serves a nice HTML page whenever your main app is stopped or restarting.
     *   **Label Abstraction:** Generates complex Traefik labels (Auth, Rate Limits, Middleware) from simple YAML config.
 *   **Developer Experience:**
     *   **Log Streaming:** Tail logs locally without SSH-ing into the server.
@@ -56,8 +57,20 @@ binary_name: "server" # The name of the compiled binary
 build:
   arch: "amd64" # Target architecture (amd64, arm64)
   # LDFLAGS template for version injection.
-  # Available variables: {{.Version}}, {{.Date}}, {{.Tag}}, {{.Commit}}
+  # Available variables:
+  #   {{.Version}}      -> v1.2.3 (Full Git Tag)
+  #   {{.MainVersion}}  -> v1.2   (Major.Minor)
+  #   {{.Commit}}       -> 8f3a1...
+  #   {{.Date}}         -> 2024-01-01T12:00:00Z
+  #   {{.GoVersion}}    -> go1.25.3
   ldflags: "-s -w -X 'main.Version={{.Version}}' -X 'main.Commit={{.Commit}}'"
+
+  # Optional: Custom Build Command
+  # If defined, 'cmd' overrides the standard 'go build' logic.
+  # Useful for building inside Docker/Podman (CGO/SQLite support).
+  # cmd: >-
+  #   podman run --rm -v "$(pwd):/app" -w /app golang:alpine
+  #   go build -ldflags="-X main.ver={{.Version}}" -o build/server .
 
 # Artifacts
 # Control exactly what gets synced via rsync.
@@ -84,7 +97,7 @@ environments:
     user: "deploy_user"
     ssh_port: 22
     ssh_key: "~/.ssh/id_ed25519_prod" # Optional: Use specific key instead of agent
-    
+
     # Paths
     target_dir: "/home/deploy_user/web/my-awesome-app"
     sync_env_file: ".env.prod" # Local file to be uploaded as '.env' on remote
@@ -102,7 +115,15 @@ environments:
       network_name: "traefik-net"
       dashboard: true
       # Basic Auth for Dashboard (user:hash). Generate via 'deploy gen-auth'
-      dashboard_auth: "admin:$2y$05$..." 
+      dashboard_auth: "admin:$2y$05$..."
+
+    # Maintenance Page Configuration (Optional)
+    # If enabled, a lightweight Nginx container runs in "standby" (Priority 1).
+    # When the main app (Priority 100) stops, Traefik fails over to this page instantly.
+    maintenance:
+      enabled: true
+      title: "Under Maintenance"
+      text: "We are currently upgrading the system. Please try again in a minute."
 
     # Runtime Configuration (The Quadlet)
     quadlet:
@@ -119,7 +140,7 @@ environments:
       # The tool will automatically run 'podman unshare chown' on 'chown_volumes'.
       container_uid: 65532
       container_gid: 65532
-      chown_volumes: 
+      chown_volumes:
         - "./data" # Fix permissions on this host dir before starting
 
       # --- Resources & Health ---
@@ -130,7 +151,7 @@ environments:
       volumes:
         - "./data:/data:Z"
         - "./migrations:/migrations:ro,Z"
-      
+
       # --- Traefik Router Abstraction ---
       # Generates all necessary Traefik labels automatically.
       router:
@@ -146,91 +167,9 @@ environments:
         #   burst: 50
         # headers:
         #   X-Custom: "Value"
-      
+
       # Standard Env Vars (in addition to the synced .env file)
       env_vars:
         - "APP_ENV=production"
         - "RUNNING_IN_CONTAINER=true"
 ```
-
----
-
-## 🛠 CLI Reference
-
-### 1. Deployment
-Builds the app locally, syncs artifacts, builds the container remotely, updates Systemd, and verifies health.
-```bash
-deploy run prod
-```
-*   `--dry-run`: Print all commands (SSH, rsync, build) without executing them.
-*   `-v`: Verbose output (see live stdout/stderr of remote commands).
-
-### 2. Infrastructure Setup
-Installs and configures Traefik with Let's Encrypt, Docker Socket proxying, and Dashboard.
-```bash
-deploy traefik prod
-```
-
-### 3. Observability
-Stream logs directly to your terminal.
-```bash
-# Stream Systemd logs (includes startup/shutdown events + app stdout)
-deploy logs prod
-
-# Stream raw Container logs (via Podman driver)
-deploy logs --podman prod
-```
-
-### 4. Database Operations
-Manage your SQLite data. **Note:** `push` stops the remote service during transfer to prevent corruption.
-```bash
-# Download remote DB to local ./data/
-deploy db pull prod
-
-# Upload local ./data/ to remote (Dangerous!)
-deploy db push test
-```
-
-### 5. Maintenance
-Clean up disk space on the VPS by removing dangling images and build cache.
-```bash
-deploy prune prod
-```
-
-### 6. Utilities
-```bash
-# Generate a BCrypt hash for Basic Auth config
-deploy gen-auth myuser mypassword
-
-# Manually fix volume permissions on remote (if things get messed up)
-# Target can be 'user' (reset to SSH user) or 'container' (set to container_uid)
-deploy rights prod container
-```
-
----
-
-## 🧠 Concepts & Architecture
-
-### The Deployment Pipeline
-1.  **Validation:** Checks for local dependencies (`rsync`, `go`) and remote connectivity.
-2.  **Build:** Cross-compiles the Go binary for Linux (`GOOS=linux`, `GOARCH=amd64/arm64`) locally. Injects version info via `LDFLAGS`.
-3.  **Generate:** Creates a Quadlet (`.container`) file in memory based on `deploy.yaml`.
-4.  **Backup:** Copies the existing binary on the server to `*.bak`.
-5.  **Sync:** Rsyncs the binary, Dockerfile, migrations, and config to the VPS.
-6.  **Activate:**
-    *   Builds the container image on the VPS.
-    *   Fixes volume permissions (if `container_uid` is set).
-    *   Updates Systemd units.
-    *   Restarts the service.
-7.  **Health Check:** Polls `systemctl is-active`. If it fails, performs an **Automatic Rollback** to the backup binary.
-
-### Rootless Permissions
-When using **Distroless** images (which run as non-root user 65532), mounting host directories is tricky. The container cannot write to a folder owned by your SSH user (UID 1000).
-*   **The Solution:** The tool uses `podman unshare chown -R 65532:65532 ./data` on the server. This maps the folder ownership into the container's user namespace, allowing it to write, while keeping it secure.
-
-### Traefik Integration
-The `router` config in YAML abstracts away the complex Traefik labels. It automatically handles:
-*   `traefik.enable=true`
-*   Host rules and Entrypoints.
-*   Middleware chains (Auth -> StripPrefix -> Compress -> Headers).
-*   Load Balancer ports.

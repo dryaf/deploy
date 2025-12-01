@@ -5,6 +5,14 @@ type TemplateData struct {
 	TargetDir string
 }
 
+type MaintenanceTemplateData struct {
+	ServiceName string
+	Rule        string // Pre-calculated Traefik Rule
+	Network     string
+	TargetDir   string
+	Resolver    string
+}
+
 type TraefikTemplateData struct {
 	TraefikConfig
 	HostUID string
@@ -129,4 +137,61 @@ Label="{{ . }}"
 
 [Install]
 WantedBy=default.target
+`
+
+// Updated: Uses {{.Rule}} and adds ReplacePathRegex middleware to handle deep links
+const maintenanceContainerTmpl = `[Unit]
+Description={{ .ServiceName }} Maintenance Page
+Requires=traefik.service
+After=network-online.target traefik.service
+
+[Container]
+Image=docker.io/library/nginx:alpine
+Network={{ .Network }}
+Volume={{ .TargetDir }}/maintenance/index.html:/usr/share/nginx/html/index.html:ro,Z
+
+# --- Traefik Labels ---
+Label="traefik.enable=true"
+
+# 1. Router & Priority
+Label="traefik.http.routers.{{ .ServiceName }}-maint.rule={{ .Rule }}"
+Label="traefik.http.routers.{{ .ServiceName }}-maint.priority=1"
+Label="traefik.http.routers.{{ .ServiceName }}-maint.entrypoints=websecure"
+Label="traefik.http.routers.{{ .ServiceName }}-maint.tls.certresolver={{ .Resolver }}"
+
+# 2. Middleware: Rewrite ALL paths to root (/) so Nginx serves index.html
+Label="traefik.http.middlewares.{{ .ServiceName }}-maint-strip.replacepathregex.regex=^/.*"
+Label="traefik.http.middlewares.{{ .ServiceName }}-maint-strip.replacepathregex.replacement=/"
+Label="traefik.http.routers.{{ .ServiceName }}-maint.middlewares={{ .ServiceName }}-maint-strip"
+
+# 3. Service
+Label="traefik.http.services.{{ .ServiceName }}-maint.loadbalancer.server.port=80"
+
+[Install]
+WantedBy=default.target
+`
+
+const maintenanceHtmlTmpl = `<!doctype html>
+<title>{{ .Title }}</title>
+<style>
+  body { text-align: center; padding: 150px; font: 20px Helvetica, sans-serif; color: #333; }
+  h1 { font-size: 50px; margin-bottom: 10px; }
+  article { display: block; text-align: left; width: 650px; margin: 0 auto; }
+  a { color: #dc8100; text-decoration: none; }
+  a:hover { color: #333; text-decoration: none; }
+  .lang { border-top: 1px solid #eee; margin-top: 20px; padding-top: 20px; font-size: 0.8em; color: #777; }
+</style>
+
+<article>
+    <h1>{{ .Title }}</h1>
+    <div>
+        <p>{{ .Text }}</p>
+        <p>&mdash; The Team</p>
+    </div>
+
+    <div class="lang">
+        <strong>Status:</strong> System Maintenance / Wartungsarbeiten<br>
+        We will be back shortly. Wir sind gleich wieder da.
+    </div>
+</article>
 `
