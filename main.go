@@ -106,6 +106,7 @@ type Quadlet struct {
 	CPU         string       `yaml:"cpu"`
 	ReadOnly    bool         `yaml:"read_only"`
 	HealthCmd   string       `yaml:"health_cmd"`
+	HealthURL   string       `yaml:"health_url"` // New: Application level health check
 	PodmanArgs  []string     `yaml:"podman_args"`
 	Exec        string       `yaml:"exec"`
 	Dockerfile  string       `yaml:"dockerfile"`
@@ -313,6 +314,8 @@ environments:
         host: "app.example.com"
         internal_port: 8080
         https_redirect: true
+
+      # health_url: "http://localhost:8080/health" # Application check
 
       env_vars:
         - "APP_ENV=production"
@@ -550,8 +553,15 @@ func doRun(envName string) {
 	cfg, env := loadEnv(envName)
 
 	if _, err := exec.LookPath("rsync"); err != nil {
-		logFatal("rsync missing")
+		logFatal("Local rsync missing")
 	}
+
+	// Pre-flight checks (Optimized SSH connection check)
+	logInfo("🔍 Verifying remote environment on %s...", env.Host)
+	if err := runSSH(env, "command -v rsync >/dev/null && command -v podman >/dev/null"); err != nil {
+		logFatal("Remote check failed: 'rsync' and 'podman' are required on the host.")
+	}
+
 	logInfo("🚀 Deploying %s to %s...", cfg.AppName, envName)
 
 	if !dryRun {
@@ -650,6 +660,7 @@ func doRun(envName string) {
 		dockerfile = "Dockerfile.vps"
 	}
 
+	// Activation Script
 	script := strings.Join([]string{
 		fmt.Sprintf("cd %s", env.Dir),
 		fmt.Sprintf("podman build -f %s -t %s .", dockerfile, env.Quadlet.Image),
@@ -664,25 +675,51 @@ func doRun(envName string) {
 
 	// --- FIX: Detailed logging & Diagnostics ---
 	if err := runSSH(env, script); err != nil {
-		logError("Activation failed: %v", err) // Print the captured error!
-		logWarn("🔍 Diagnosing with remote logs (last 50 lines)...")
-		// Use stream logger to force output to stdout
-		runSSHStream(env, fmt.Sprintf("journalctl --user -u %s.service -n 50 --no-pager", env.Quadlet.ServiceName))
-
-		logWarn("🚨 INITIATING AUTOMATIC ROLLBACK...")
-		rbScript := strings.Join([]string{
-			fmt.Sprintf("cd %s", env.Dir),
-			fmt.Sprintf("[ -f %s.bak ] && mv %s.bak %s", binPath, binPath, binPath),
-			fmt.Sprintf("podman build -f %s -t %s .", dockerfile, env.Quadlet.Image),
-			fmt.Sprintf("systemctl --user restart %s.service", env.Quadlet.ServiceName),
-		}, " && ")
-		if rbErr := runSSH(env, rbScript); rbErr != nil {
-			logFatal("CRITICAL: Rollback failed! Error: %v", rbErr)
-		}
+		logError("Activation failed: %v", err)
+		rollback(env, binPath, dockerfile)
 		logFatal("Deployment failed but successfully rolled back.")
 	}
 
+	// --- NEW: Application Health Check ---
+	if env.Quadlet.HealthURL != "" {
+		logInfo("🩺 Performing Application Health Check (%s)...", env.Quadlet.HealthURL)
+		// Try for 30 seconds
+		checkScript := fmt.Sprintf(`
+			for i in {1..15}; do
+				if curl -s -f "%s" > /dev/null; then
+					echo "OK"
+					exit 0
+				fi
+				sleep 2
+			done
+			echo "Health check timed out"
+			exit 1
+		`, env.Quadlet.HealthURL)
+
+		if err := runSSH(env, checkScript); err != nil {
+			logError("Health Check failed!")
+			rollback(env, binPath, dockerfile)
+			logFatal("Deployment failed (Unhealthy) but successfully rolled back.")
+		}
+	}
+
 	logSuccess("✅ Deployed successfully.")
+}
+
+func rollback(env Environment, binPath, dockerfile string) {
+	logWarn("🔍 Diagnosing with remote logs (last 50 lines)...")
+	runSSHStream(env, fmt.Sprintf("journalctl --user -u %s.service -n 50 --no-pager", env.Quadlet.ServiceName))
+
+	logWarn("🚨 INITIATING AUTOMATIC ROLLBACK...")
+	rbScript := strings.Join([]string{
+		fmt.Sprintf("cd %s", env.Dir),
+		fmt.Sprintf("[ -f %s.bak ] && mv %s.bak %s", binPath, binPath, binPath),
+		fmt.Sprintf("podman build -f %s -t %s .", dockerfile, env.Quadlet.Image),
+		fmt.Sprintf("systemctl --user restart %s.service", env.Quadlet.ServiceName),
+	}, " && ")
+	if rbErr := runSSH(env, rbScript); rbErr != nil {
+		logFatal("CRITICAL: Rollback failed! Error: %v", rbErr)
+	}
 }
 
 // --- DB Operations ---
@@ -1061,6 +1098,10 @@ func runRsyncSafe(env Environment, sources []string, dest string, extraArgs ...s
 	args := []string{"-avz"}
 
 	sshCmd := "ssh"
+	// IMPROVEMENT: Reuse the multiplexed socket for rsync too!
+	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("deploy-%s-%s", env.User, env.Host))
+	sshCmd += fmt.Sprintf(" -o ControlMaster=auto -o ControlPath=%s -o ControlPersist=5m", socketPath)
+
 	needsE := false
 	if env.Port != 0 && env.Port != 22 {
 		sshCmd += fmt.Sprintf(" -p %d", env.Port)
@@ -1070,7 +1111,10 @@ func runRsyncSafe(env Environment, sources []string, dest string, extraArgs ...s
 		sshCmd += fmt.Sprintf(" -i %s", env.SSHKey)
 		needsE = true
 	}
-	if needsE {
+	// Always use -e to inject options (or just to be safe)
+	if !needsE {
+		args = append(args, "-e", sshCmd)
+	} else {
 		args = append(args, "-e", sshCmd)
 	}
 
@@ -1083,6 +1127,17 @@ func runRsyncSafe(env Environment, sources []string, dest string, extraArgs ...s
 
 func getSSHBaseArgs(env Environment) []string {
 	args := []string{}
+	// IMPROVEMENT: SSH Multiplexing
+	// Create a socket in /tmp/deploy-<user>-<host>
+	// - ControlMaster=auto: Try to use existing master, or become one.
+	// - ControlPersist=5m: Keep master connection open for 5 mins after last command.
+	// - ControlPath: Path to the socket.
+	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("deploy-%s-%s", env.User, env.Host))
+
+	args = append(args, "-o", "ControlMaster=auto")
+	args = append(args, "-o", "ControlPersist=5m")
+	args = append(args, "-o", fmt.Sprintf("ControlPath=%s", socketPath))
+
 	if env.SSHKey != "" {
 		args = append(args, "-i", env.SSHKey)
 	}
