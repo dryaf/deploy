@@ -40,11 +40,21 @@ func main() {
 			logFatal("Usage: deploy release [version] <env>")
 		}
 		doRelease(version, envName)
-	case "maintenance_page":
-		if len(args) < 2 {
-			logFatal("Usage: deploy maintenance_page <env>")
+	case "maintenance":
+		// Syntax: deploy maintenance <enable|disable> <env>
+		if len(args) < 3 {
+			logFatal("Usage: deploy maintenance <enable|disable> <env>")
 		}
-		doMaintenancePage(args[1])
+		action := args[1]
+		envName := args[2]
+
+		if action == "enable" {
+			doMaintenanceEnable(envName)
+		} else if action == "disable" {
+			doMaintenanceDisable(envName)
+		} else {
+			logFatal("Invalid maintenance action '%s'. Use 'enable' or 'disable'.", action)
+		}
 	case "traefik":
 		if len(args) < 2 {
 			logFatal("Usage: deploy traefik <env>")
@@ -139,7 +149,7 @@ func printUsage() {
 	fmt.Println("  init                     Generate deploy.yaml")
 	fmt.Println("  release [tag] <env>      Deploy to env. If tag omitted, auto-detects or prompts.")
 	fmt.Println("  status [env]             Show detailed system health. If env omitted, shows all.")
-	fmt.Println("  maintenance_page <env>   Setup/Update the standby maintenance page container")
+	fmt.Println("  maintenance <ac> <env>   Manage maintenance page (ac: enable|disable)")
 	fmt.Println("  system-updates <ac> <env> Manage unattended upgrades (status|enable|disable)")
 	fmt.Println("  start <env>              Start service")
 	fmt.Println("  stop <env>               Stop service")

@@ -120,6 +120,8 @@ environments:
     # Maintenance Page Configuration (Optional)
     # If enabled, a lightweight Nginx container runs in "standby" (Priority 1).
     # When the main app (Priority 100) stops, Traefik fails over to this page instantly.
+    # To enable: deploy maintenance enable prod
+    # To disable: deploy maintenance disable prod
     maintenance:
       enabled: true
       title: "Under Maintenance"

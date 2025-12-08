@@ -198,7 +198,7 @@ func doRelease(explicitVersion, envName string) {
 	logSuccess("✅ Deployed successfully.")
 }
 
-func doMaintenancePage(envName string) {
+func doMaintenanceEnable(envName string) {
 	_, env := loadEnv(envName)
 
 	// Removed the strict check. If the user invokes this command, they want it.
@@ -240,6 +240,31 @@ func doMaintenancePage(envName string) {
 
 	logSuccess("✅ Maintenance page is UP (Priority 1).")
 	logInfo("   It will be served automatically whenever '%s' (Priority 100) is stopped.", env.Quadlet.ServiceName)
+}
+
+func doMaintenanceDisable(envName string) {
+	_, env := loadEnv(envName)
+	serviceName := env.Quadlet.ServiceName + "-maint"
+
+	logInfo("🚧 Disabling Maintenance Page on %s...", env.Host)
+
+	script := strings.Join([]string{
+		// 1. Stop the service (ignore error if not running)
+		fmt.Sprintf("systemctl --user stop %s.service || true", serviceName),
+		// 2. Remove the manual persistent link
+		fmt.Sprintf("rm -f ~/.config/systemd/user/default.target.wants/%s.service", serviceName),
+		// 3. Remove the Quadlet definition so it's not regenerated
+		fmt.Sprintf("rm -f ~/.config/containers/systemd/%s.container", serviceName),
+		// 4. Reload systemd to reflect removal
+		"systemctl --user daemon-reload",
+	}, " && ")
+
+	if err := runSSH(env, script); err != nil {
+		logFatal("Failed to disable maintenance page: %v", err)
+	}
+
+	// Optional: We leave the HTML file in place as it's harmless and useful for future enables.
+	logSuccess("✅ Maintenance page disabled and removed.")
 }
 
 // resolveAndValidateVersion handles the logic for strict versioning and "lazy" tagging.
