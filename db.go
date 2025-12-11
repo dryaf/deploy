@@ -70,6 +70,10 @@ func doDBPull(envName string) {
 		os.Remove(local)
 		logFatal("Pull failed: %v", err)
 	}
+	// Explicitly remove potential WAL/SHM files to ensure clean state with new DB
+	os.Remove(local + "-wal")
+	os.Remove(local + "-shm")
+
 	logSuccess("Synced to %s", local)
 }
 
@@ -109,7 +113,20 @@ func doDBPush(envName string) {
 
 	// 4. Upload
 	logInfo("📤 Uploading...")
-	if err := runRsyncSafe(env, []string{local}, fmt.Sprintf("%s@%s:%s", env.User, env.Host, remote)); err != nil {
+
+	// Create a safe temporary backup for upload
+	tempBackup := local + ".temp_safecopy"
+	logInfo("⏳ Creating safe local snapshot...")
+	// cleanup existing temp file if any
+	os.Remove(tempBackup)
+	
+	backupCmd := exec.Command("sqlite3", local, fmt.Sprintf(".backup '%s'", tempBackup))
+	if out, err := backupCmd.CombinedOutput(); err != nil {
+		logFatal("Failed to create safe local backup: %v\nOutput: %s", err, string(out))
+	}
+	defer os.Remove(tempBackup)
+
+	if err := runRsyncSafe(env, []string{tempBackup}, fmt.Sprintf("%s@%s:%s", env.User, env.Host, remote)); err != nil {
 		logError("Rsync failed: %v", err)
 		logInfo("Restoring from backup...")
 		runSSH(env, fmt.Sprintf("mv %s.bak %s", remote, remote))
