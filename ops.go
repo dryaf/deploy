@@ -449,9 +449,7 @@ environments:
     target_dir: "/home/{{ .User }}/web/{{ .AppName }}"
     sync_env_file: ".env"
 
-    traefik:
-      email: "admin@example.com"
-      network_name: "traefik-net"
+    # Traefik configuration is now managed via 'deploy server init/provision' (server.yaml)
 
     quadlet:
       service_name: "{{ .AppName }}"

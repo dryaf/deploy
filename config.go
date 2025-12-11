@@ -15,6 +15,42 @@ type Config struct {
 	Environments map[string]Environment `yaml:"environments"`
 }
 
+type ServerConfig struct {
+	Host    string      `yaml:"host"`
+	User    string      `yaml:"user"`
+	SSHPort int         `yaml:"ssh_port"`
+	SSHKey  string      `yaml:"ssh_key"`
+	Stack   ServerStack `yaml:"stack"`
+}
+
+type ServerStack struct {
+	Traefik    TraefikStack     `yaml:"traefik"`
+	Authelia   AutheliaConfig   `yaml:"authelia"`
+	Watchtower WatchtowerConfig `yaml:"watchtower"`
+}
+
+type TraefikStack struct {
+	Version     string     `yaml:"version"`
+	Email       string     `yaml:"email"`
+	Dashboard   bool       `yaml:"dashboard"`
+	NetworkName string     `yaml:"network_name"`
+	Auth        AuthConfig `yaml:"auth"` // Global Auth
+}
+
+type AuthConfig struct {
+	Provider string `yaml:"provider"` // "basic" or "authelia"
+}
+
+type AutheliaConfig struct {
+	Subdomain string `yaml:"subdomain"`
+	UsersFile string `yaml:"users_file"`
+	// We can add SMTP, etc later as needed, keeping it simple for now
+}
+
+type WatchtowerConfig struct {
+	Schedule string `yaml:"schedule"`
+}
+
 type BuildConfig struct {
 	Arch    string `yaml:"arch"`
 	Ldflags string `yaml:"ldflags"`
@@ -37,7 +73,7 @@ type Environment struct {
 	Quadlet     Quadlet           `yaml:"quadlet"`
 	Maintenance MaintenanceConfig `yaml:"maintenance"` // Env Override
 	Database    DatabaseConfig    `yaml:"database"`
-	Traefik     TraefikConfig     `yaml:"traefik"`
+	// Traefik config removed from here, now in ServerConfig
 }
 
 type MaintenanceConfig struct {
@@ -61,16 +97,20 @@ type TraefikConfig struct {
 }
 
 type RouterConfig struct {
-	Enabled       bool              `yaml:"enabled"`
-	Host          string            `yaml:"host"`
-	Rule          string            `yaml:"rule"`
-	InternalPort  int               `yaml:"internal_port"`
-	EntryPoints   []string          `yaml:"entrypoints"`
-	CertResolver  string            `yaml:"cert_resolver"`
-	HTTPSRedirect bool              `yaml:"https_redirect"`
-	PathPrefix    string            `yaml:"path_prefix"`
-	StripPrefix   bool              `yaml:"strip_prefix"`
-	Compress      bool              `yaml:"compress"`
+	Enabled       bool     `yaml:"enabled"`
+	Domain        string   `yaml:"domain"` // Replaces Host/Rule simplicity
+	Host          string   `yaml:"host"`   // Legacy support
+	Rule          string   `yaml:"rule"`
+	InternalPort  int      `yaml:"internal_port"`
+	EntryPoints   []string `yaml:"entrypoints"`
+	CertResolver  string   `yaml:"cert_resolver"`
+	HTTPSRedirect bool     `yaml:"https_redirect"`
+	PathPrefix    string   `yaml:"path_prefix"`
+	StripPrefix   bool     `yaml:"strip_prefix"`
+	Compress      bool     `yaml:"compress"`
+	Auth          bool     `yaml:"auth"` // Boolean intent
+
+	// Legacy Header/RateLimit support kept for power users
 	BasicAuth     []string          `yaml:"basic_auth_users"`
 	BasicAuthFile string            `yaml:"basic_auth_file"`
 	IPAllowList   []string          `yaml:"ip_allowlist"`
@@ -127,6 +167,25 @@ func loadConfig() Config {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		logFatal("Parse error: %v", err)
+	}
+	return cfg
+}
+
+func loadServerConfig() ServerConfig {
+	data, err := os.ReadFile("server.yaml")
+	if err != nil {
+		logFatal("Read error (server.yaml): %v", err)
+	}
+	var cfg ServerConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		logFatal("Parse error (server.yaml): %v", err)
+	}
+	// Defaults
+	if cfg.SSHPort == 0 {
+		cfg.SSHPort = 22
+	}
+	if cfg.User == "" {
+		cfg.User = "root"
 	}
 	return cfg
 }

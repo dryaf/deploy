@@ -55,11 +55,18 @@ func main() {
 		} else {
 			logFatal("Invalid maintenance action '%s'. Use 'enable' or 'disable'.", action)
 		}
-	case "traefik":
+	case "server":
 		if len(args) < 2 {
-			logFatal("Usage: deploy traefik <env>")
+			logFatal("Usage: deploy server <init|provision>")
 		}
-		doTraefikSetup(args[1])
+		switch args[1] {
+		case "init":
+			doServerInit()
+		case "provision":
+			doServerProvision()
+		default:
+			logFatal("Invalid server command: %s", args[1])
+		}
 	case "logs":
 		logsCmd := flag.NewFlagSet("logs", flag.ExitOnError)
 		usePodman := logsCmd.Bool("podman", false, "Stream 'podman logs'")
@@ -157,7 +164,7 @@ func printUsage() {
 	fmt.Println("  enable <env>             Enable service at boot")
 	fmt.Println("  disable <env>            Disable service at boot")
 	fmt.Println("  prune <env>              Clean up unused images/builder cache")
-	fmt.Println("  traefik <env>            Setup Traefik infrastructure")
+	fmt.Println("  server <init|provision>  Manage Server Infrastructure (Traefik/Auth)")
 	fmt.Println("  logs <env>               Stream logs")
 	fmt.Println("  db pull <env>            Sync DB (Remote -> Local)")
 	fmt.Println("  db push <env>            Overwrite Remote DB (Service MUST be stopped first)")
