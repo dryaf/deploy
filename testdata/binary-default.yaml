@@ -1,0 +1,28 @@
+app_name: legacy
+binary_name: server
+build:
+  arch: amd64
+  dir: .
+  ldflags: "-s -w -X 'main.Version={{.Version}}' -X 'main.Commit={{.Commit}}'"
+artifacts:
+  include: [Dockerfile.vps, migrations, files]
+  exclude: [data, '*.db', .env, .git]
+environments:
+  prod:
+    host: example.com
+    user: deploy_user
+    target_dir: /home/deploy_user/web/legacy
+    sync_env_file: .env.prod
+    quadlet:
+      service_name: legacy
+      image: localhost/legacy:latest
+      network: traefik-net.network
+      auto_restart: true
+      exec: /server
+      cpu: '0.5'
+      memory: 512M
+      router:
+        host: legacy.example.com
+        internal_port: 8080
+      labels: [custom=preserved]
+      volumes: ['./data:/data:Z', './migrations:/migrations:ro,Z']

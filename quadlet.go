@@ -1,0 +1,49 @@
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"path"
+	"strconv"
+	"strings"
+	"text/template"
+)
+
+const imagePlaceholder = "__DEPLOY_RESOLVED_IMAGE__"
+
+// renderQuadlet has no filesystem or process side effects.
+func renderQuadlet(n NormalizedConfig, resolvedImage string) (string, error) {
+	q := n.Env.Quadlet
+	if resolvedImage != "" {
+		q.Image = resolvedImage
+	}
+	if q.Description == "" {
+		q.Description = q.ServiceName + " Service"
+	}
+	labels, err := mergeLabels(q.Labels, generateTraefikLabels(q.ServiceName, q.Router, "myresolver"))
+	if err != nil {
+		return "", err
+	}
+	q.Labels = labels
+	q.Volumes = append([]string(nil), q.Volumes...)
+	for i, v := range q.Volumes {
+		parts := strings.Split(v, ":")
+		if strings.HasPrefix(parts[0], "./") {
+			parts[0] = path.Join(n.Env.Dir, parts[0])
+			q.Volumes[i] = strings.Join(parts, ":")
+		}
+	}
+	data := TemplateData{Quadlet: q, TargetDir: n.Env.Dir, Routing: n.Routing, EnvFile: n.EnvFile, CPUQuota: n.CPUQuota, Pinned: n.Mode == ModeImage}
+	t, err := template.New("quadlet").Funcs(template.FuncMap{
+		"literal": func(s string) string { return strings.ReplaceAll(s, "%", "%%") },
+		"quote":   func(s string) string { return strconv.Quote(strings.ReplaceAll(s, "%", "%%")) },
+	}).Parse(quadletTemplate)
+	if err != nil {
+		return "", fmt.Errorf("parse Quadlet: %w", err)
+	}
+	var b bytes.Buffer
+	if err = t.Execute(&b, data); err != nil {
+		return "", fmt.Errorf("render Quadlet: %w", err)
+	}
+	return b.String(), nil
+}

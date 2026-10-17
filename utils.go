@@ -3,9 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -56,31 +56,19 @@ func getCmdOutput(name string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func genFile(path string, tmplStr string, data any) {
+func genFile(path string, tmplStr string, data any) error {
 	if dryRun {
-		return
+		return nil
 	}
-	t, _ := template.New("t").Parse(tmplStr)
-	f, _ := os.Create(path)
-	defer f.Close()
-	t.Execute(f, data)
-}
-
-func copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src)
+	t, err := template.New("t").Parse(tmplStr)
 	if err != nil {
 		return err
 	}
-	defer sourceFile.Close()
-
-	destFile, err := os.Create(dst)
-	if err != nil {
+	var b bytes.Buffer
+	if err := t.Execute(&b, data); err != nil {
 		return err
 	}
-	defer destFile.Close()
-
-	_, err = io.Copy(destFile, sourceFile)
-	return err
+	return os.WriteFile(path, b.Bytes(), 0600)
 }
 
 func runCommand(desc string, cmd *exec.Cmd) error {
@@ -119,8 +107,9 @@ func runCommandRaw(name string, args ...string) error {
 
 func getSSHBaseArgs(env Environment) []string {
 	args := []string{}
-	// SSH Multiplexing for performance
-	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("deploy-%s-%s", env.User, env.Host))
+	// Ports and identities distinguish environments behind the same hostname.
+	key := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s", env.User, env.Host, sshPort(env), env.SSHKey)))
+	socketPath := filepath.Join(sshControlDir(), fmt.Sprintf("%x", key[:12]))
 
 	args = append(args, "-o", "ControlMaster=auto")
 	args = append(args, "-o", "ControlPersist=5m")
@@ -129,9 +118,28 @@ func getSSHBaseArgs(env Environment) []string {
 	if env.SSHKey != "" {
 		args = append(args, "-i", env.SSHKey)
 	}
-	args = append(args, "-p", fmt.Sprintf("%d", env.Port))
+	args = append(args, "-p", fmt.Sprintf("%d", sshPort(env)))
 	args = append(args, fmt.Sprintf("%s@%s", env.User, env.Host))
 	return args
+}
+
+func sshControlDir() string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("deploy-ssh-%d", os.Getuid()))
+}
+
+func prepareSSHControlDir() error {
+	dir := sshControlDir()
+	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		return err
+	}
+	s, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !s.IsDir() || s.Mode().Perm() != 0700 {
+		return fmt.Errorf("SSH control directory must be a private directory: %s", dir)
+	}
+	return nil
 }
 
 func runSSH(env Environment, cmd string) error {
@@ -141,6 +149,9 @@ func runSSH(env Environment, cmd string) error {
 	if dryRun {
 		logDebug("[SSH] %s", cmd)
 		return nil
+	}
+	if err := prepareSSHControlDir(); err != nil {
+		return err
 	}
 	c := exec.Command("ssh", args...)
 	return runCommand("SSH", c)
@@ -152,6 +163,9 @@ func runSSHStream(env Environment, cmd string) error {
 	if dryRun {
 		logDebug("[SSH-STREAM] %s", cmd)
 		return nil
+	}
+	if err := prepareSSHControlDir(); err != nil {
+		return err
 	}
 	c := exec.Command("ssh", args...)
 	c.Stdout = os.Stdout
@@ -165,32 +179,58 @@ func runRsync(env Environment, sources []string, dest string, extraArgs ...strin
 	}
 }
 
+// shellQuote quotes a single POSIX shell argument, including empty strings.
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+
+func runSSHOutput(env Environment, script string) (string, error) {
+	if dryRun {
+		return "", nil
+	}
+	if err := prepareSSHControlDir(); err != nil {
+		return "", err
+	}
+	args := append(getSSHBaseArgs(env), "bash -c "+shellQuote(script))
+	cmd := exec.Command("ssh", args...)
+	var out, errs bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errs
+	if err := cmd.Run(); err != nil {
+		return out.String(), fmt.Errorf("SSH: %w: %s", err, strings.TrimSpace(errs.String()))
+	}
+	if errs.Len() > 0 {
+		fmt.Fprint(os.Stderr, errs.String())
+	}
+	return out.String(), nil
+}
+
 func runRsyncSafe(env Environment, sources []string, dest string, extraArgs ...string) error {
-	args := []string{"-avz"}
-
-	sshCmd := "ssh"
-	// Reuse multiplexed socket
-	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("deploy-%s-%s", env.User, env.Host))
-	sshCmd += fmt.Sprintf(" -o ControlMaster=auto -o ControlPath=%s -o ControlPersist=5m", socketPath)
-
-	needsE := false
-	if env.Port != 0 && env.Port != 22 {
-		sshCmd += fmt.Sprintf(" -p %d", env.Port)
-		needsE = true
+	// Secluded arguments bypass shell tilde expansion. Keep home-relative paths.
+	if colon := strings.Index(dest, "]:"); colon >= 0 {
+		dest = dest[:colon+2] + strings.TrimPrefix(dest[colon+2:], "~/")
+	} else if colon := strings.Index(dest, ":"); colon >= 0 {
+		dest = dest[:colon+1] + strings.TrimPrefix(dest[colon+1:], "~/")
 	}
-	if env.SSHKey != "" {
-		sshCmd += fmt.Sprintf(" -i %s", env.SSHKey)
-		needsE = true
+	args := []string{"-az", "--protect-args"}
+	sshArgs := getSSHBaseArgs(env)
+	transport := []string{"ssh"}
+	for _, a := range sshArgs[:len(sshArgs)-1] {
+		transport = append(transport, shellQuote(a))
 	}
-	if needsE || true { // Always valid to pass -e
-		args = append(args, "-e", sshCmd)
-	}
-
+	args = append(args, "-e", strings.Join(transport, " "))
 	args = append(args, extraArgs...)
+	args = append(args, "--")
 	args = append(args, sources...)
 	args = append(args, dest)
-
-	return runCommandRaw("rsync", args...)
+	// Never print payload contents or verbose rsync file listings.
+	if dryRun {
+		return nil
+	}
+	if err := prepareSSHControlDir(); err != nil {
+		return err
+	}
+	cmd := exec.Command("rsync", args...)
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func fetchLatestGitHubRelease(repo string) (string, error) {
@@ -206,4 +246,11 @@ func fetchLatestGitHubRelease(repo string) (string, error) {
 		return "", err
 	}
 	return r.TagName, nil
+}
+
+func sshPort(env Environment) int {
+	if env.Port == 0 {
+		return 22
+	}
+	return env.Port
 }

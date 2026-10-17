@@ -1,8 +1,8 @@
 # Deploy Tool 🚀
 
-**The "Platform Engineering in a Box" solution for Go applications on Linux VPS.**
+**Deploy Go applications and existing registry images to a Linux VPS with rootless Podman and Quadlet.**
 
-This tool replaces fragile Makefiles and complex Bash scripts with a single, declarative CLI. It leverages modern Linux standards (**Podman**, **Quadlets**, **Systemd**) to provide zero-downtime deployments, automatic rollbacks, and integrated infrastructure management.
+This tool replaces fragile Makefiles and complex Bash scripts with a single, declarative CLI. It uses **Podman**, **Quadlet**, and **systemd** for controlled service restarts, health checks, automatic rollback, and infrastructure management.
 
 ---
 
@@ -11,9 +11,9 @@ This tool replaces fragile Makefiles and complex Bash scripts with a single, dec
 *   **Declarative Infrastructure:** Define your environments (Prod, Test), build settings, and runtime configuration in one `deploy.yaml`.
 *   **Quadlet Native:** Automatically generates modern Systemd unit files for Podman, ensuring your containers start at boot and restart on failure.
 *   **Safety First:**
-    *   **Atomic Deployments:** Uses a blue-green style switch over via Systemd.
-    *   **Auto-Rollback:** If the new version fails health checks, the tool automatically restores the previous binary and restarts the service.
-    *   **Dry Run:** Preview every shell command before it executes.
+    *   **Image Transactions:** Stages and validates images before restarting a single service; this is a controlled restart with a brief interruption.
+    *   **Auto-Rollback:** Both modes restore the exact previous local image, Quadlet, managed files, environment file and original service activity.
+    *   **Dry Run:** Preview the release plan without builds, SSH, pulls, synchronization, Git publication, or candidate files.
 *   **Infrastructure Management:**
     *   **Traefik Bootstrap:** Installs and configures Traefik (with Let's Encrypt) on a fresh server with one command.
     *   **Maintenance Mode:** Automatic "Standby" container that serves a nice HTML page whenever your main app is stopped or restarting.
@@ -175,3 +175,258 @@ environments:
         - "APP_ENV=production"
         - "RUNNING_IN_CONTAINER=true"
 ```
+
+## Registry image projects
+
+`deploy init` still generates a Go binary project. Use `deploy init --mode=image`
+for a registry image project; existing `deploy.yaml` files are never overwritten.
+An image project needs Git, SSH and rsync locally, and needs no Go source, `go.mod`,
+binary, Dockerfile, local Podman, or Go toolchain.
+
+```yaml
+app_name: internal-service
+deployment:
+  mode: image
+# Optional: only these files are synchronized; there are no default artifacts.
+# artifacts:
+#   include: [config]
+#   exclude: ["*.bak"]
+environments:
+  prod:
+    host: vps.example.com
+    user: deploy_user
+    target_dir: /home/deploy_user/web/internal-service
+    quadlet:
+      service_name: internal-service
+      image: docker.io/library/nginx:1.28-alpine  # Pin a verified digest in production.
+      network: traefik-net.network
+      network_aliases: [internal-service-prod]
+      router:
+        enabled: false
+      env_file: ""
+      auto_restart: true
+      cpu: "0.5"
+      memory: 256M
+      health_cmd: "wget -q --spider http://127.0.0.1/"
+      health_timeout: 60s
+```
+
+Use the existing commands:
+
+```sh
+deploy --dry-run -v release prod
+deploy release prod
+deploy release v1.2.3 prod
+deploy status prod
+deploy logs --podman prod
+deploy restart prod
+deploy prune prod
+```
+
+The project Git tag identifies the configuration release. `quadlet.image` identifies
+upstream software. Image references require an explicit registry and tag or digest;
+short names and credentials in references are rejected. Production configurations
+should specify an exact version and `@sha256:...`. Registry authentication uses the
+remote SSH user's existing `podman login` configuration. Every release pulls the
+reference and pins the ID returned by that pull into `Image=sha256:...` with
+`Pull=never`. Mutable tags cannot change confirmed deployments or rollback images.
+
+`deployment.mode` defaults to `binary`. Image mode rejects `binary_name`, build
+options and `quadlet.dockerfile`. An omitted `exec` preserves image startup defaults.
+Mounted data ownership is managed separately; image mode rejects `chown_volumes`.
+
+### Remote prerequisites
+
+Both release modes require Bash, Podman, a running user systemd manager, rsync,
+flock, jq, GNU timeout and GNU coreutils including `sync -f`. Binary releases
+still build locally and build their container image remotely. Their uploads are
+staged before stopping the service. Rollback restores the saved image directly;
+it does not rebuild it with the failed candidate's Dockerfile.
+
+Image deployments require Linux, **rootless Podman >= 5.4.2**, **systemd >= 257**, cgroup
+v2, delegated CPU/memory controllers when limits are configured, a running user
+systemd manager, rsync, flock, jq, GNU timeout, and the usual GNU
+core utilities. Host URL checks additionally require curl. The Quadlet generator
+must be installed at `/usr/lib/systemd/system-generators/podman-system-generator`
+or `/usr/libexec/podman/quadlet`. Preflight reports missing requirements and never
+installs packages. User lingering is required if services must run after logout.
+
+The renderer uses `NetworkAlias`, `Pull`, and `HealthCmd` in `[Container]`, and
+`Restart`, `RestartSec`, `CPUQuota` and `MemoryMax` in `[Service]`, following the
+[Podman 5.4 Quadlet documentation](https://docs.podman.io/en/v5.4.2/markdown/podman-systemd.unit.5.html).
+The candidate is checked by the actual remote generator in an isolated unit
+directory before activation. This does not start services or create networks.
+The live integration suite passed on Podman 5.4.2 and systemd 257.5 in an isolated
+rootless test account on 2026-10-17. These versions define the supported floor.
+The local generator check also passed on Podman 5.7.0/systemd 259.
+
+Existing networks are reused. A `*.network` reference must resolve to an existing
+network Quadlet. Plain names refer to existing Podman networks. This feature does
+not provision networks. The container remains `systemd-<service_name>`; give each
+environment distinct service names, target directories and network aliases.
+
+### Routing, environment files and health
+
+| Setting | Behavior |
+| --- | --- |
+| `router.enabled` omitted | Infer routing from `domain`, `host` or `rule`, as before. |
+| `router.enabled: true` | Require one of those routing targets. |
+| `router.enabled: false` | Generate `traefik.enable=false`, no router labels or Traefik service dependency. |
+| `quadlet.env_file` omitted, binary mode | Use `<target_dir>/.env`. |
+| `quadlet.env_file` omitted, image mode | No file unless `sync_env_file` is configured. |
+| `quadlet.env_file: ""` | No file; incompatible with `sync_env_file`. |
+| Nonempty `quadlet.env_file` | Absolute remote path, or resolve relative to `target_dir`. |
+
+`sync_env_file` writes only `<target_dir>/.env`. A different `env_file` together with
+synchronization is rejected. Without synchronization, a referenced remote file
+must already exist and be readable; no empty replacement file is created.
+Environment contents are never placed in manifests or printed by dry runs.
+
+`health_cmd` runs **inside the container** through `podman healthcheck run`, with
+periodic Podman checks remaining enabled. `health_url` runs curl **on the VPS host**;
+it is never reinterpreted as a container URL. Both must pass when configured.
+`health_timeout` bounds the entire readiness loop, including individual probes:
+60 seconds by default for images, 30 seconds for binaries. A positive Go duration
+up to 24 hours is accepted. Without application checks, the result explicitly says
+that only service activity and image identity were verified.
+
+Custom labels are preserved and merged with generated labels; conflicting values
+for generated keys are configuration errors. `auto_restart: true` emits
+`Restart=on-failure` and `RestartSec=5s`. CPU values are counts (`0.5` → `50%`, `1` →
+`100%`) or explicit percentages. Memory is a systemd `MemoryMax` limit. Binary
+suffixes such as `512MiB` and `512MB` normalize to `512M`; overflowing values
+are rejected before any remote action.
+These corrections also apply to binary projects: **an explicit `router.enabled:
+false` is now respected**, restart rules now take effect, and CPU limits use the
+correct section. Review existing configurations for these intentional changes.
+
+### Transaction state and rollback
+
+State is private to the SSH user under `<target_dir>/.deploy/image/` or
+`<target_dir>/.deploy/binary/`:
+
+```text
+current.json                 # Atomic {current, previous} release pointers
+pending.json                 # Unfinished transaction
+releases/<release_id>/
+  manifest.json              # Git version/commit, reference, image ID, digests, checks
+  candidate.container        # Exact pinned Quadlet
+  before/                    # Previous files, commit record and service activity
+staging/<release_id>/         # Uploaded candidates
+```
+
+Locks under `~/.local/state/deploy/locks/` are keyed by both service and target
+directory. Releases, database replacements and service actions share these locks.
+A target directory belongs to one service and deployment mode; another service
+cannot overwrite its state. The next operation resolves pending recovery first.
+After an interrupted commit, matching committed pointers, Quadlet and readiness
+allow recovery to finish the commit; otherwise it restores the prior snapshot.
+Backups, pending records, installed files, image storage, unit replacements and commits are
+flushed with GNU `sync -f` before proceeding. This flushes file contents and
+directory metadata, including when units and project files use different
+filesystems. Storage must honor the operating system's durability requests.
+
+Pull and validation failures leave the running service untouched. Activation
+failures restore the byte-for-byte old Quadlet, exact retained image, overwritten
+artifacts, synchronized .env, old commit record and original active/inactive state.
+A failed first installation removes its new managed files and Quadlet. If rollback
+fails, both failures are reported and pending state/backups remain for recovery.
+File changes are tracked individually: unrelated files and mounted application
+data remain. Symlink artifacts, unsafe paths and `.deploy` overlaps are rejected;
+artifact directories are merged without deleting unrelated contents. This does
+not roll back database migrations or externally managed configuration changes.
+Directory modes are applied after their contents are installed, allowing
+read-only configuration trees to deploy and roll back. Binary artifact uploads
+also merge directories and honor `artifacts.exclude`; they no longer delete
+unlisted files. Binary volume ownership changes remain outside file rollback.
+
+Existing unmanaged Quadlets (including binary deployments) cannot be adopted
+implicitly. Use a new service name or carry out a separately reviewed migration.
+Image service actions reject a different `target_dir` for an already managed service,
+so changing directories cannot bypass recovery. `enable` and `disable` persist
+`WantedBy` through a managed Quadlet override, since generated systemd units cannot
+be enabled with `systemctl enable`. The override survives releases; interrupted
+changes are recovered using `boot-pending.json` before another mutation.
+
+Current, previous and unfinished images have local retention tags and survive
+`deploy prune` (`podman image prune -f`). Old releases and tags are retained;
+there is no automatic garbage collector in this version.
+
+Database pull downloads and validates a complete SQLite snapshot before replacing
+the local database, and backs up an existing local database with SQLite's backup
+API. Stop the local application first. Database push stages a local snapshot,
+requires a confirmed inactive remote service, and creates a consistent backup
+including committed WAL data before replacement. Backup or transfer failures
+abort the update. Interrupted replacements recover under the same deployment
+locks before the next release, database push or service action. Both database
+commands return before file writes or external commands when `--dry-run` is set.
+
+`server provision` checks every upload and service operation and reports success
+only after Traefik is active. Requests for the unimplemented global auth and
+Watchtower providers fail before provisioning starts. Configure authentication
+through existing middleware or application router settings.
+
+See [the Gotenberg example](examples/gotenberg/) for a private PDF service with no
+published host port. A separate infrastructure repository, actual VPS deployment,
+and PAM application integration follow outside this tool change.
+
+### Verification
+
+```sh
+make test
+```
+
+The normal suite executes the transaction shell script with fake Podman/systemd
+commands and real temporary files, including file restoration, failed rollback,
+read-only directories, write/flush failures, target lock contention, and
+interruptions around the commit. SQLite tests use the local `sqlite3` CLI; a
+Python fixture verifies recovery of committed WAL data. It also checks generated
+units against the locally installed Quadlet generator when available.
+
+For live integration, use an **isolated disposable Linux VM or test account** with
+rootless Podman and a user systemd manager, never a production account. Set a
+verified Gotenberg Chromium image with digest:
+
+```sh
+DEPLOY_IMAGE_INTEGRATION=isolated \
+DEPLOY_TEST_GOTENBERG_IMAGE='docker.io/gotenberg/gotenberg:VERSION-chromium@sha256:DIGEST' \
+make test-image-deploy-integration
+```
+
+This explicit opt-in target never reads a user's `deploy.yaml`, never uses SSH,
+and operates only on unique `deploy-it-*` services, network and temporary project
+directories. It tests a healthy HTTP image, failed rollout with rollback, image
+retention after prune, private Gotenberg DNS/health/restart, resource limits and
+HTML-to-PDF from a second container. It also deploys a real Go executable, verifies
+rollback of its image, read-only configuration and synchronized environment, and
+backs up/replaces SQLite data owned by a mapped container UID in a private
+directory. It pulls test images and reloads that test
+account's user manager. The suite was run on Podman 5.4.2/systemd 257.5; also run it against
+the versions installed on your target VPS before promoting a new runtime version. The tag-only HTTP and curl test clients
+are disposable fixtures; the Gotenberg service is explicitly pinned.
+
+To create that isolated environment automatically on an amd64 Linux development
+machine with rootless Podman, subordinate UID/GID ranges and Go installed:
+
+```sh
+make test-image-deploy-isolated
+```
+
+The harness uses a separate temporary Podman store and a disposable container
+with its own systemd, test user and nested rootless Podman. It installs test
+prerequisites **inside that disposable container** and removes the container and
+its store afterward. The outer container is privileged within the invoking
+user's rootless namespace; this is required for nested namespaces and systemd.
+The harness forces local Podman (`--remote=false`). No project `deploy.yaml`,
+existing container store or VPS is used. Base and
+Gotenberg fixtures are pinned by digest; override `DEPLOY_TEST_BASE_IMAGE` or
+`DEPLOY_TEST_GOTENBERG_IMAGE` to test another verified native image.
+
+The completed live run on 2026-10-17 used Podman 5.4.2, systemd 257.5 and
+Gotenberg Chromium 8.38.1 (`sha256:63545039126042c5df622675ccb3dd9efd8b5c1faa0ec5265b787737e6d6757e`
+for linux/amd64). It passed first installation, an HTTP image update, failed
+readiness with rollback, current/previous image retention after prune, boot
+enable/disable, private DNS, health checks, restart, CPU/memory limits, and
+HTML-to-PDF without a published Gotenberg port. Binary first installation with
+`stop_on_deploy: true`, complete binary configuration rollback, a normalized
+`128MiB` limit and SQLite backup/replacement under container UID 65532 also passed.

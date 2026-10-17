@@ -25,7 +25,13 @@ func main() {
 
 	switch args[0] {
 	case "init":
-		doInit()
+		initCmd := flag.NewFlagSet("init", flag.ExitOnError)
+		mode := initCmd.String("mode", "binary", "Deployment mode: binary or image")
+		initCmd.Parse(args[1:])
+		if initCmd.NArg() != 0 {
+			logFatal("Usage: deploy init [--mode=binary|image]")
+		}
+		doInitMode(DeploymentMode(*mode))
 	case "release":
 		// Syntax 1: deploy release <env> (Interactive/Auto)
 		// Syntax 2: deploy release <version> <env> (Explicit)
@@ -153,7 +159,7 @@ func main() {
 func printUsage() {
 	fmt.Println("Usage: deploy <command> [args]")
 	fmt.Println("Commands:")
-	fmt.Println("  init                     Generate deploy.yaml")
+	fmt.Println("  init [--mode=image]      Generate deploy.yaml")
 	fmt.Println("  release [tag] <env>      Deploy to env. If tag omitted, auto-detects or prompts.")
 	fmt.Println("  status [env]             Show detailed system health. If env omitted, shows all.")
 	fmt.Println("  maintenance <ac> <env>   Manage maintenance page (ac: enable|disable)")

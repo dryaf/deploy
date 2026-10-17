@@ -3,6 +3,10 @@ package main
 type TemplateData struct {
 	Quadlet
 	TargetDir string
+	Routing   bool
+	EnvFile   string
+	CPUQuota  string
+	Pinned    bool
 }
 
 type MaintenanceTemplateData struct {
@@ -88,51 +92,69 @@ Driver=bridge
 `
 
 const quadletTemplate = `[Unit]
-Description={{ if .Description }}{{ .Description }}{{ else }}{{ .ServiceName }} Service{{ end }}
+Description={{ literal .Description }}
+{{- if .Routing }}
 Requires=traefik.service
-After=network-online.target traefik.service
+After=traefik.service
+{{- end }}
+After=network-online.target
 Wants=network-online.target
 
 [Container]
 Image={{ .Image }}
+{{- if .Pinned }}
+Pull=never
+{{- end }}
 {{- if .Exec }}
-Exec={{ .Exec }}
+Exec={{ literal .Exec }}
 {{- end }}
 {{- if .Network }}
-Network={{ .Network }}
+Network={{ literal .Network }}
+{{- end }}
+{{- range .NetworkAliases }}
+NetworkAlias={{ literal . }}
 {{- end }}
 {{- if .Timezone }}
-Timezone={{ .Timezone }}
-{{- end }}
-{{- if .Memory }}
-Memory={{ .Memory }}
-{{- end }}
-{{- if .CPU }}
-CPUQuota={{ .CPU }}
+Timezone={{ quote .Timezone }}
 {{- end }}
 {{- if .ReadOnly }}
 ReadOnly=true
 {{- end }}
 {{- if .HealthCmd }}
-HealthCmd={{ .HealthCmd }}
+HealthCmd={{ quote .HealthCmd }}
 HealthInterval=60s
 HealthRetries=3
+HealthTimeout=5s
 {{- end }}
 {{- range .Ports }}
-PublishPort={{ . }}
+PublishPort={{ literal . }}
 {{- end }}
 {{- range .Volumes }}
-Volume={{ . }}
+Volume={{ literal . }}
 {{- end }}
 {{- range .EnvVars }}
-Environment={{ . }}
+Environment={{ quote . }}
 {{- end }}
 {{- range .PodmanArgs }}
-PodmanArgs={{ . }}
+PodmanArgs={{ literal . }}
 {{- end }}
-EnvironmentFile={{ .TargetDir }}/.env
+{{- if .EnvFile }}
+EnvironmentFile={{ quote .EnvFile }}
+{{- end }}
 {{- range .Labels }}
-Label="{{ . }}"
+Label={{ quote . }}
+{{- end }}
+
+[Service]
+{{- if .AutoRestart }}
+Restart=on-failure
+RestartSec=5s
+{{- end }}
+{{- if .CPUQuota }}
+CPUQuota={{ .CPUQuota }}
+{{- end }}
+{{- if .Memory }}
+MemoryMax={{ .Memory }}
 {{- end }}
 
 [Install]

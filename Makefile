@@ -19,3 +19,22 @@ install: build
 
 clean:
 	rm -f $(BINARY_NAME)
+.PHONY: test test-image-deploy-integration
+
+test:
+	go test ./...
+	go test -race ./...
+	go vet ./...
+
+# Run only inside a disposable rootless Podman/systemd Linux VM or test account.
+# Explicit environment opt-in and a verified Gotenberg digest are required.
+test-image-deploy-integration:
+	@test "$(DEPLOY_IMAGE_INTEGRATION)" = isolated || (echo 'Set DEPLOY_IMAGE_INTEGRATION=isolated in a disposable test environment'; exit 1)
+	@test -n "$(DEPLOY_TEST_GOTENBERG_IMAGE)" || (echo 'Set DEPLOY_TEST_GOTENBERG_IMAGE to a verified Chromium image with digest'; exit 1)
+	go test -tags=imageintegration -run '^TestRootlessImageDeploymentIntegration$$' -v -timeout=10m .
+
+.PHONY: test-image-deploy-isolated
+
+# Creates a separate rootless Podman store and a disposable systemd container.
+test-image-deploy-isolated:
+	./scripts/test-image-deploy-isolated.sh

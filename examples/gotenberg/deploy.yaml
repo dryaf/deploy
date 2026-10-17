@@ -1,0 +1,33 @@
+app_name: gotenberg
+
+deployment:
+  mode: image
+
+environments:
+  prod:
+    host: vps.example.com
+    user: deploy_user
+    ssh_port: 22
+    target_dir: /home/deploy_user/web/gotenberg
+    quadlet:
+      service_name: gotenberg
+      description: Internal PDF conversion service
+      # Replace both placeholders with a verified Chromium release and digest.
+      image: "docker.io/gotenberg/gotenberg:<VERSION>-chromium@sha256:<DIGEST>"
+      network: traefik-net.network
+      network_aliases: [gotenberg-prod]
+      router:
+        enabled: false
+      env_file: ""
+      auto_restart: true
+      timezone: Europe/Vienna
+      memory: 1G
+      cpu: "1"
+      health_cmd: >-
+        curl --fail --silent --show-error --max-time 3
+        http://127.0.0.1:3000/health
+      health_timeout: 60s
+      env_vars:
+        - CHROMIUM_AUTO_START=true
+        - CHROMIUM_MAX_CONCURRENCY=2
+        - CHROMIUM_MAX_QUEUE_SIZE=10

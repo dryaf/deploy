@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -23,124 +25,82 @@ stack:
     dashboard: true
     network_name: "traefik-net"
     
-    # Global Auth Provider
-    auth:
-      provider: "basic" # or "authelia"
-
-  authelia:
-    subdomain: "auth"
-    users_file: "users.yml"
-
-  watchtower:
-    schedule: "0 4 * * *" # Every day at 4am
+    # Global auth and Watchtower provisioning are not implemented.
+    # Configure authentication in the application router or existing middleware.
 `
+	if dryRun {
+		logInfo("[DRY] Create server.yaml")
+		return
+	}
 	if err := os.WriteFile("server.yaml", []byte(defaultConfig), 0644); err != nil {
 		logFatal("Failed to write server.yaml: %v", err)
 	}
 	logSuccess("Created server.yaml. Please edit it with your VPS details.")
 }
 
-// doServerProvision installs the stack defined in server.yaml
+// Provisioning returns every failure to the CLI; success means the service is active.
 func doServerProvision() {
-	cfg := loadServerConfig()
-	env := Environment{
-		Host:   cfg.Host,
-		User:   cfg.User,
-		Port:   cfg.SSHPort,
-		SSHKey: cfg.SSHKey,
-		Dir:    "/root", // Default to root home for infrastructure
+	if err := provisionServer(loadServerConfig(), commandRunner{}); err != nil {
+		logFatal("Server provisioning failed: %v", err)
 	}
-
-	logInfo("🚀 Provisioning Server Stack on %s...", env.Host)
-
-	// verify access
-	if err := runSSH(env, "id"); err != nil {
-		logFatal("SSH connection failed. Check host/user/key in server.yaml")
-	}
-
-	if !dryRun {
-		os.MkdirAll("build/stack", 0755)
-	}
-
-	// 1. Setup Traefik
-	provisionTraefik(env, cfg.Stack.Traefik)
-
-	// 2. Setup Authelia (if enabled)
-	if cfg.Stack.Traefik.Auth.Provider == "authelia" {
-		provisionAuthelia(env, cfg.Stack.Traefik, cfg.Stack.Authelia)
-	}
-
-	// 3. Setup Watchtower
-	provisionWatchtower(env, cfg.Stack.Watchtower)
-
-	logSuccess("✅ Server Provisioning Complete.")
+	logSuccess("Server provisioning complete.")
 }
 
-func provisionTraefik(env Environment, tCfg TraefikStack) {
-	logInfo("📦 Provisioning Traefik...")
-
-	netName := tCfg.NetworkName
-	if netName == "" {
-		netName = "traefik-net"
+func provisionServer(cfg ServerConfig, runner ReleaseRunner) error {
+	if !hostPattern.MatchString(cfg.Host) || !userPattern.MatchString(cfg.User) || cfg.SSHPort < 0 || cfg.SSHPort > 65535 {
+		return fmt.Errorf("invalid server SSH configuration")
 	}
-
-	// Ensure network exists (blindly try to create, ignore if exists)
-	// Actually better to use a systemd network unit or create it once.
-	// For simplicity, we'll generate a network unit.
-
-	data := TraefikTemplateData{
-		TraefikConfig: TraefikConfig{
-			Version:      tCfg.Version,
-			Email:        tCfg.Email,
-			Dashboard:    tCfg.Dashboard,
-			NetworkName:  netName,
-			CertResolver: "myresolver", // Hardcoded standard
-		},
-		HostUID: "0", // Infrastructure usually runs as root/podman
+	if cfg.Stack.Traefik.Auth.Provider != "" && cfg.Stack.Traefik.Auth.Provider != "none" {
+		return fmt.Errorf("global auth provisioning is not implemented; provision middleware separately or use router.basic_auth_users")
 	}
-	// We might need to check if user is root vs non-root for UID.
-	// For now assume root or we need to fetch UID.
-	if uid := getCmdOutput("ssh", append(getSSHBaseArgs(env), "id -u")...); uid != "" {
-		data.HostUID = uid
+	if cfg.Stack.Watchtower.Schedule != "" {
+		return fmt.Errorf("Watchtower provisioning is not implemented")
 	}
-
-	// Reuse existing templates from traefik.go (we will need to move/export them)
-	// For now assuming we refactor traefik.go to export templates or we move them here.
-	// I will assume we move the logic here or call a shared function.
-	// Let's implement the generation logic here, duplicating/adapting from traefik.go for now to be safe,
-	// then we delete traefik.go.
-
-	genFile("build/stack/traefik.yml", traefikYmlTmpl, data)
-	genFile("build/stack/traefik.container", strings.Replace(traefikContainerTmpl, "traefik-net", netName, -1), data)
-	genFile("build/stack/"+netName+".network", networkTmpl, nil)
-
-	// Sync
-	runSSH(env, "mkdir -p ~/traefik/dynamic_conf ~/traefik/letsencrypt ~/.config/containers/systemd")
-	runSSH(env, "touch ~/traefik/letsencrypt/acme.json && chmod 600 ~/traefik/letsencrypt/acme.json")
-
-	runRsync(env, []string{"build/stack/traefik.yml"}, fmt.Sprintf("%s@%s:~/traefik/", env.User, env.Host))
-
-	// Dashboard Auth (Basic)
-	// logic for dashboard auth... if basic?
-	// The new config doesn't explicitly allow setting dashboard auth hash in server.yaml yet for simplicity,
-	// but we can add it or just assume no auth for dashboard or basic.
-	// For now, skipping explicit dashboard auth setup to keep "zero-config" promise or add it later.
-
-	runRsync(env, []string{"build/stack/traefik.container", "build/stack/" + netName + ".network"},
-		fmt.Sprintf("%s@%s:~/.config/containers/systemd/", env.User, env.Host))
-
-	// Reload & Start
-	runSSH(env, "systemctl --user daemon-reload && systemctl --user restart traefik.service")
+	if dryRun {
+		logInfo("[DRY] Provision Traefik on %s", cfg.Host)
+		return nil
+	}
+	env := Environment{Host: cfg.Host, User: cfg.User, Port: sshPort(Environment{Port: cfg.SSHPort}), SSHKey: cfg.SSHKey}
+	return provisionTraefik(env, cfg.Stack.Traefik, runner)
 }
 
-func provisionAuthelia(env Environment, tCfg TraefikStack, aCfg AutheliaConfig) {
-	logInfo("🔐 Provisioning Authelia...")
-	// TODO: Generate authelia configuration.yml, users.yml, and container
-	// For this task, we will just create placeholders or basic setup.
-	logWarn("Authelia provisioning is a placeholder in this milestone.")
-}
-
-func provisionWatchtower(env Environment, wCfg WatchtowerConfig) {
-	logInfo("🔄 Provisioning Watchtower...")
-	// TODO: Watchtower container
+func provisionTraefik(env Environment, cfg TraefikStack, runner ReleaseRunner) error {
+	network := cfg.NetworkName
+	if network == "" {
+		network = "traefik-net"
+	}
+	if !servicePattern.MatchString(network) || cfg.Version == "" {
+		return fmt.Errorf("Traefik requires a version and a valid network name")
+	}
+	uid, err := runner.SSH(env, "id -u")
+	if err != nil {
+		return fmt.Errorf("read remote user: %w", err)
+	}
+	// UID is used in a generated unit path, so require an actual numeric response.
+	uid = strings.TrimSpace(uid)
+	if _, err := strconv.ParseUint(uid, 10, 32); err != nil {
+		return fmt.Errorf("invalid remote UID")
+	}
+	data := TraefikTemplateData{TraefikConfig: TraefikConfig{Version: cfg.Version, Email: cfg.Email, Dashboard: cfg.Dashboard, NetworkName: network, CertResolver: "myresolver"}, HostUID: uid}
+	if err := os.MkdirAll("build/stack", 0700); err != nil {
+		return err
+	}
+	for name, tmpl := range map[string]string{"traefik.yml": traefikYmlTmpl, "traefik.container": traefikContainerTmpl, network + ".network": networkTmpl} {
+		if err := genFile(filepath.Join("build/stack", name), tmpl, data); err != nil {
+			return fmt.Errorf("generate %s: %w", name, err)
+		}
+	}
+	if _, err := runner.SSH(env, "mkdir -p ~/traefik/dynamic_conf ~/traefik/letsencrypt ~/.config/containers/systemd && touch ~/traefik/letsencrypt/acme.json && chmod 600 ~/traefik/letsencrypt/acme.json"); err != nil {
+		return fmt.Errorf("prepare Traefik: %w", err)
+	}
+	if err := runner.Sync(env, []string{"build/stack/traefik.yml"}, remoteDestination(env, "traefik/")); err != nil {
+		return fmt.Errorf("upload Traefik configuration: %w", err)
+	}
+	if err := runner.Sync(env, []string{"build/stack/traefik.container", "build/stack/" + network + ".network"}, remoteDestination(env, ".config/containers/systemd/")); err != nil {
+		return fmt.Errorf("upload Traefik units: %w", err)
+	}
+	if _, err := runner.SSH(env, "systemctl --user daemon-reload && systemctl --user enable --now podman.socket && systemctl --user restart traefik.service && systemctl --user is-active --quiet traefik.service"); err != nil {
+		return fmt.Errorf("activate Traefik: %w", err)
+	}
+	return nil
 }

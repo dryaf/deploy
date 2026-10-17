@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"text/template"
-	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -44,7 +43,17 @@ func doStatus(envName string) {
 }
 
 func doSystemStats(envName string) {
-	_, env := loadEnv(envName)
+	cfg, env := loadEnv(envName)
+	if cfg.Deployment.Mode == ModeImage {
+		n, err := normalizeAndValidateConfig(cfg, envName)
+		if err != nil {
+			logFatal("Config: %v", err)
+		}
+		fmt.Printf("Configured image: %s\n", n.Env.Quadlet.Image)
+		if err := runSSHStream(env, imageStatusScript(n)); err != nil {
+			logWarn("Image state: %v", err)
+		}
+	}
 	logInfo("📊 Fetching sophisticated stats from %s (%s)...", envName, env.Host)
 
 	// We construct a robust shell script to run everything in one SSH session.
@@ -165,12 +174,9 @@ func doSystemStats(envName string) {
 			printf "${YELLOW}Container is NOT running.${NC}\n"
 		fi
 
-	`, env.Dir, env.Quadlet.ServiceName, env.Quadlet.ServiceName, env.Quadlet.ServiceName, containerName, containerName)
+	`, shellQuote(env.Dir), env.Quadlet.ServiceName, env.Quadlet.ServiceName, env.Quadlet.ServiceName, containerName, containerName)
 
-	c := exec.Command("ssh", append(getSSHBaseArgs(env), script)...)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	if err := c.Run(); err != nil {
+	if err := runSSHStream(env, script); err != nil {
 		logError("Failed to retrieve stats: %v", err)
 	}
 }
@@ -304,6 +310,13 @@ func doLogs(envName string, usePodman bool) {
 		cmd = fmt.Sprintf("podman logs -f systemd-%s", env.Quadlet.ServiceName)
 	}
 	logInfo("Streaming logs...")
+	if dryRun {
+		logInfo("[DRY] %s", cmd)
+		return
+	}
+	if err := prepareSSHControlDir(); err != nil {
+		logFatal("SSH: %v", err)
+	}
 
 	sshArgs := getSSHBaseArgs(env)
 	sshArgs = append(sshArgs, "-t", cmd)
@@ -312,38 +325,37 @@ func doLogs(envName string, usePodman bool) {
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	c.Stdin = os.Stdin
-	c.Run()
+	if err := c.Run(); err != nil {
+		logFatal("Logs: %v", err)
+	}
 }
 
 func doServiceAction(envName, action string) {
-	_, env := loadEnv(envName)
-	serviceName := env.Quadlet.ServiceName
-
-	valid := map[string]bool{
-		"start":   true,
-		"stop":    true,
-		"restart": true,
-		"enable":  true,
-		"disable": true,
+	cfg, err := readConfig("deploy.yaml")
+	if err != nil {
+		logFatal("Config: %v", err)
 	}
+	n, err := normalizeAndValidateConfig(cfg, envName)
+	if err != nil {
+		logFatal("Config: %v", err)
+	}
+	valid := map[string]bool{"start": true, "stop": true, "restart": true, "enable": true, "disable": true}
 	if !valid[action] {
-		logFatal("Invalid action '%s'. Use start, stop, restart, enable, or disable.", action)
+		logFatal("Invalid service action %q", action)
 	}
-
-	logInfo("⚙️  Executing '%s' on service '%s' (%s)...", action, serviceName, env.Host)
-
-	cmd := fmt.Sprintf("systemctl --user %s %s.service", action, serviceName)
-	if err := runSSH(env, cmd); err != nil {
-		logFatal("Action '%s' failed: %v", action, err)
+	if dryRun {
+		fmt.Printf("[DRY] %s %s.service (mode=%s; recover pending state under service lock for image mode)\n", action, n.Env.Quadlet.ServiceName, n.Mode)
+		return
 	}
-
-	if action == "start" || action == "restart" {
-		time.Sleep(2 * time.Second)
-		logInfo("Checking status...")
-		runSSHStream(env, fmt.Sprintf("systemctl --user is-active %s.service", serviceName))
+	if n.Mode == ModeImage {
+		err = executeImageServiceAction(n, action, commandRunner{})
+	} else {
+		err = executeDeploymentServiceAction(n, action, commandRunner{}, binaryTransactionScript)
 	}
-
-	logSuccess("Service action '%s' completed.", action)
+	if err != nil {
+		logFatal("Service action: %v", err)
+	}
+	logSuccess("Service action %s completed.", action)
 }
 
 // --- INIT LOGIC ---
@@ -354,7 +366,16 @@ type InitContext struct {
 	User       string
 }
 
-func doInit() {
+func doInit() { doInitMode(ModeBinary) }
+
+func doInitMode(mode DeploymentMode) {
+	if mode != ModeBinary && mode != ModeImage {
+		logFatal("mode must be binary or image")
+	}
+	if dryRun {
+		fmt.Printf("[DRY] Create %s deploy.yaml\n", mode)
+		return
+	}
 	if _, err := os.Stat("deploy.yaml"); err == nil {
 		logFatal("deploy.yaml already exists")
 	}
@@ -368,6 +389,9 @@ func doInit() {
 
 	// Normalize appName (lowercase, replace spaces)
 	appName = strings.ToLower(strings.ReplaceAll(appName, " ", "-"))
+	if !servicePattern.MatchString(appName) {
+		appName = "my-service"
+	}
 
 	// Detect User
 	userName := "deploy_user"
@@ -387,12 +411,16 @@ func doInit() {
 	logInfo("✨ Initializing deploy.yaml for app '%s' with user '%s'...", data.AppName, data.User)
 
 	// 2. Render Template
-	tmpl, err := template.New("init").Parse(defaultConfigTmpl)
+	configTemplate := defaultConfigTmpl
+	if mode == ModeImage {
+		configTemplate = imageConfigTmpl
+	}
+	tmpl, err := template.New("init").Parse(configTemplate)
 	if err != nil {
 		logFatal("Internal template error: %v", err)
 	}
 
-	f, err := os.Create("deploy.yaml")
+	f, err := os.OpenFile("deploy.yaml", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		logFatal("Failed to create file: %v", err)
 	}
@@ -431,7 +459,7 @@ build:
 artifacts:
   # Files to sync to the remote server.
   # Note: No trailing slash on directories unless you specifically want rsync contents-only behavior.
-  include: ["migrations", "Dockerfile"]
+  include: ["migrations", "Dockerfile.vps"]
   exclude: ["data", "*.db", ".env", ".git", ".idea", ".vscode"]
 
 # Global Maintenance Configuration (Optional)
@@ -476,4 +504,28 @@ environments:
       env_vars:
         - "APP_ENV=production"
         - "DATASTORE_TYPE=sqlite"
+`
+
+const imageConfigTmpl = `app_name: "{{ .AppName }}"
+deployment:
+  mode: image
+
+environments:
+  prod:
+    host: vps.example.com
+    user: "{{ .User }}"
+    ssh_port: 22
+    target_dir: "/home/{{ .User }}/web/{{ .AppName }}"
+    quadlet:
+      service_name: "{{ .AppName }}"
+      # Replace this reference with your verified version and production digest.
+      image: "docker.io/library/nginx:1.28-alpine"
+      network: traefik-net.network
+      network_aliases: ["{{ .AppName }}-prod"]
+      router:
+        enabled: false
+      env_file: ""
+      auto_restart: true
+      health_timeout: 60s
+      # health_cmd: "curl --fail --silent --max-time 3 http://127.0.0.1:80/"
 `

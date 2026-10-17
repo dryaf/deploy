@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -8,6 +9,7 @@ import (
 
 type Config struct {
 	AppName      string                 `yaml:"app_name"`
+	Deployment   DeploymentConfig       `yaml:"deployment"`
 	BinaryName   string                 `yaml:"binary_name"`
 	Build        BuildConfig            `yaml:"build"`
 	Artifacts    ArtifactsConfig        `yaml:"artifacts"`
@@ -97,7 +99,7 @@ type TraefikConfig struct {
 }
 
 type RouterConfig struct {
-	Enabled       bool     `yaml:"enabled"`
+	Enabled       *bool    `yaml:"enabled"`
 	Domain        string   `yaml:"domain"` // Replaces Host/Rule simplicity
 	Host          string   `yaml:"host"`   // Legacy support
 	Rule          string   `yaml:"rule"`
@@ -124,26 +126,29 @@ type RateLimitConfig struct {
 }
 
 type Quadlet struct {
-	ServiceName  string       `yaml:"service_name"`
-	Description  string       `yaml:"description"`
-	Image        string       `yaml:"image"`
-	Network      string       `yaml:"network"`
-	Labels       []string     `yaml:"labels"`
-	Router       RouterConfig `yaml:"router"`
-	Volumes      []string     `yaml:"volumes"`
-	EnvVars      []string     `yaml:"env_vars"`
-	Ports        []string     `yaml:"ports"`
-	AutoRestart  bool         `yaml:"auto_restart"`
-	StopOnDeploy bool         `yaml:"stop_on_deploy"`
-	Timezone     string       `yaml:"timezone"`
-	Memory       string       `yaml:"memory"`
-	CPU          string       `yaml:"cpu"`
-	ReadOnly     bool         `yaml:"read_only"`
-	HealthCmd    string       `yaml:"health_cmd"`
-	HealthURL    string       `yaml:"health_url"`
-	PodmanArgs   []string     `yaml:"podman_args"`
-	Exec         string       `yaml:"exec"`
-	Dockerfile   string       `yaml:"dockerfile"`
+	ServiceName    string       `yaml:"service_name"`
+	Description    string       `yaml:"description"`
+	Image          string       `yaml:"image"`
+	Network        string       `yaml:"network"`
+	NetworkAliases []string     `yaml:"network_aliases"`
+	EnvFile        *string      `yaml:"env_file"`
+	Labels         []string     `yaml:"labels"`
+	Router         RouterConfig `yaml:"router"`
+	Volumes        []string     `yaml:"volumes"`
+	EnvVars        []string     `yaml:"env_vars"`
+	Ports          []string     `yaml:"ports"`
+	AutoRestart    bool         `yaml:"auto_restart"`
+	StopOnDeploy   bool         `yaml:"stop_on_deploy"`
+	Timezone       string       `yaml:"timezone"`
+	Memory         string       `yaml:"memory"`
+	CPU            string       `yaml:"cpu"`
+	ReadOnly       bool         `yaml:"read_only"`
+	HealthCmd      string       `yaml:"health_cmd"`
+	HealthURL      string       `yaml:"health_url"`
+	HealthTimeout  string       `yaml:"health_timeout"`
+	PodmanArgs     []string     `yaml:"podman_args"`
+	Exec           string       `yaml:"exec"`
+	Dockerfile     string       `yaml:"dockerfile"`
 
 	ContainerUID int      `yaml:"container_uid"`
 	ContainerGID int      `yaml:"container_gid"`
@@ -159,14 +164,21 @@ type BuildMetadata struct {
 	GoVersion   string
 }
 
-func loadConfig() Config {
-	data, err := os.ReadFile("deploy.yaml")
-	if err != nil {
-		logFatal("Read error: %v", err)
-	}
+func readConfig(file string) (Config, error) {
 	var cfg Config
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return cfg, err
+	}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		logFatal("Parse error: %v", err)
+		return cfg, fmt.Errorf("parse config: %w", err)
+	}
+	return cfg, nil
+}
+func loadConfig() Config {
+	cfg, err := readConfig("deploy.yaml")
+	if err != nil {
+		logFatal("Config: %v", err)
 	}
 	return cfg
 }
@@ -192,18 +204,9 @@ func loadServerConfig() ServerConfig {
 
 func loadEnv(envName string) (Config, Environment) {
 	cfg := loadConfig()
-	env, ok := cfg.Environments[envName]
-	if !ok {
-		logFatal("Env %s not found", envName)
+	n, err := normalizeAndValidateConfig(cfg, envName)
+	if err != nil {
+		logFatal("Config: %v", err)
 	}
-
-	// Merge Global Maintenance Defaults into Environment
-	if env.Maintenance.Title == "" {
-		env.Maintenance.Title = cfg.Maintenance.Title
-	}
-	if env.Maintenance.Text == "" {
-		env.Maintenance.Text = cfg.Maintenance.Text
-	}
-
-	return cfg, env
+	return n.Config, n.Env
 }
