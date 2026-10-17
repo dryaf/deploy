@@ -431,6 +431,11 @@ const fakePodman = `#!/bin/bash
 set -eu
 echo "podman $*" >> "$FAKE_ROOT/calls"
 case "$1 $2" in
+ 'unshare chown')
+  shift 4
+  for owned; do
+   [ -e "$owned" ] || { echo "chown: $owned: No such file or directory" >&2; exit 1; }
+  done;;
  'build --iidfile')
   if [ -f "$FAKE_ROOT/fail-build" ]; then rm "$FAKE_ROOT/fail-build"; exit 1; fi
   image=$(cat "$FAKE_ROOT/registry-image")
@@ -439,6 +444,10 @@ case "$1 $2" in
   printf '%s' "$image" > "$FAKE_ROOT/tags/${7//\//_}"
   if [[ -f $FAKE_ROOT/mutate-build-tag ]]; then
    printf 'sha256:%064d' 0 > "$FAKE_ROOT/tags/${7//\//_}"
+  fi
+  if [[ -f $FAKE_ROOT/kill-after-build ]]; then
+   rm "$FAKE_ROOT/kill-after-build"
+   kill -KILL "$(cat "$FAKE_ROOT/txpid")"
   fi;;
  'pull --quiet')
   [ ! -f "$FAKE_ROOT/fail-pull" ] || exit 125
@@ -464,7 +473,7 @@ case "$1 $2" in
   if [ -f "$FAKE_ROOT/hang-probe" ]; then sleep 10; fi
   if [ -f "$FAKE_ROOT/fail-health" ] && grep -q bbbbbbbb "$FAKE_ROOT/running-image"; then exit 1; fi;;
  'info --format') case "$3" in *Store.GraphRoot*) echo "$FAKE_ROOT/images";; *Host.OS*) echo linux;; *Host.Arch*) echo amd64;; *Host.CgroupControllers*) if [ -f "$FAKE_ROOT/missing-controllers" ]; then echo '["pids"]'; else echo '["cpu","memory","pids"]'; fi;; esac;;
- *) if [ "$1" = tag ]; then [ ! -f "$FAKE_ROOT/fail-tag" ] || exit 1; mkdir -p "$FAKE_ROOT/tags"; printf '%s' "$2" > "$FAKE_ROOT/tags/${3//\//_}"; else echo 'unexpected podman invocation' >&2; exit 1; fi;;
+ *) if [ "$1" = tag ]; then [[ $3 != *@* ]] || exit 1; [ ! -f "$FAKE_ROOT/fail-tag" ] || exit 1; mkdir -p "$FAKE_ROOT/tags"; printf '%s' "$2" > "$FAKE_ROOT/tags/${3//\//_}"; else echo 'unexpected podman invocation' >&2; exit 1; fi;;
 esac
 `
 const fakeSystemctl = `#!/bin/bash

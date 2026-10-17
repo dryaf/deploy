@@ -367,10 +367,11 @@ restore_boot() {
  backup="$state/operations/$operation_id"
  check_path "$backup" || return
  check_path "$boot_file" || return
+ # The first boot change can crash before its override directory is created.
  if [[ $(jq -r .file_existed "$boot_pending") == true ]]; then
   [[ -f $backup/boot.conf ]] || return 1
   cat "$backup/boot.conf" | atomic_json "$boot_file" || return
- else durable_remove "$boot_file" || return; fi
+ elif [[ -d $boot_dir ]]; then durable_remove "$boot_file" || return; fi
  if [[ $(jq -r .record_existed "$boot_pending") == true ]]; then
   [[ -f $backup/boot.json ]] || return 1
   cat "$backup/boot.json" | atomic_json "$boot_record" || return

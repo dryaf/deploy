@@ -4,12 +4,28 @@ init_transaction binary "$stage"
 recover_database_update
 init_boot_state
 
+restore_binary_image_reference() {
+ local before="$1/before" old_image old_ref
+ old_image=$(jq -r .image_id "$before/snapshot.json") || return
+ old_ref=$(jq -r .image_reference "$before/snapshot.json") || return
+ # Digest references and image IDs are immutable and cannot be retagged.
+ if [[ -n $old_image && $old_ref != *@* && $old_ref != "$old_image" && $old_ref != "${old_image#sha256:}" ]]; then
+  podman tag "$old_image" "$old_ref" || return
+  sync_image_store || return
+ fi
+}
+
+discard_binary_prepared() {
+ # A build can move a legacy tag even when all managed files are unchanged.
+ restore_binary_image_reference "$1" || return
+ discard_prepared "$1"
+}
+
 restore_binary_deployment() {
- local release=$1 before="$1/before" restore_id=${1##*/} old_image old_ref active
+ local release=$1 before="$1/before" restore_id=${1##*/} old_image active
  [[ -f $before/snapshot.json ]] || return 1
  validate_managed_snapshot "$before" || return
  old_image=$(jq -r .image_id "$before/snapshot.json") || return
- old_ref=$(jq -r .image_reference "$before/snapshot.json") || return
  active=$(jq -r .active "$before/snapshot.json") || return
  if [[ -n $old_image ]]; then podman image exists "$old_image" || return; fi
  if ! systemctl --user stop "$service.service"; then
@@ -20,9 +36,7 @@ restore_binary_deployment() {
   check_path "$unit.deploy-restore-$restore_id" || return
   cp -p -- "$before/active.container" "$unit.deploy-restore-$restore_id" || return
   durable_move "$unit.deploy-restore-$restore_id" "$unit" || return
-  if [[ -n $old_image && $old_ref != "$old_image" && $old_ref != "${old_image#sha256:}" ]]; then
-   podman tag "$old_image" "$old_ref" || return
-  fi
+  restore_binary_image_reference "$release" || return
  else durable_remove "$unit" || return; fi
  rm -f -- "$unit.deploy-install-$restore_id" || return
  if [[ -f $before/current.json ]]; then
@@ -44,7 +58,7 @@ if [[ -f $pending ]]; then
  image=$(jq -r '.image_id // ""' "$release/manifest.json")
  if [[ -f $current && $(jq -r .current "$current") == "$pending_id" && -n $image ]] && cmp -s "$unit" "$release/candidate.container" && wait_health "$release/manifest.json" "$image"; then
   durable_remove "$pending"
- elif snapshot_unchanged "$release"; then discard_prepared "$release"
+ elif snapshot_unchanged "$release"; then discard_binary_prepared "$release"
  else restore_binary_deployment "$release"; fi
 fi
 validate_boot
@@ -124,7 +138,7 @@ transaction_exit() {
   if $changed || ! snapshot_unchanged "$release"; then
    if restore_binary_deployment "$release"; then echo 'Binary rollout failed; previous state restored' >&2
    else echo "ROLLBACK FAILED; pending state and backups preserved at $release" >&2; fi
-  else discard_prepared "$release" || echo 'Pending recovery required' >&2; fi
+  else discard_binary_prepared "$release" || echo 'Pending recovery required' >&2; fi
  fi
  exit "$status"
 }

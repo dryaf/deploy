@@ -59,7 +59,10 @@ func stageBinaryRelease(p ReleasePlan, containerPath string, runner ReleaseRunne
 		}
 	}
 	stage := path.Join(e.Dir, ".deploy/binary/staging", id)
-	if _, err := runner.SSH(e, "set -euo pipefail\numask 077\n"+safeRemoteMkdir(stage)+"\n"+safeRemoteMkdir(stage+"/artifacts")); err != nil {
+	setup := "set -euo pipefail\numask 077\n" + safeRemoteMkdir(stage) + "\n" + safeRemoteMkdir(stage+"/artifacts")
+	// Persistent data is excluded from artifacts but required by the default bind mount and chown_volumes.
+	setup += "\n" + safeRemoteMkdir(path.Join(e.Dir, "data"))
+	if _, err := runner.SSH(e, setup); err != nil {
 		return err
 	}
 	if err := runner.Sync(e, []string{filepath.Join(temp, "request.json"), filepath.Join(temp, "transaction.sh")}, remoteDestination(e, stage+"/")); err != nil {

@@ -138,6 +138,48 @@ func TestReadonlyArtifactDirectoriesInstallAndRollback(t *testing.T) {
 	}
 }
 
+func TestBootRecoveryBeforeOverrideDirectoryCreation(t *testing.T) {
+	syncPath, err := exec.LookPath("sync")
+	if err != nil {
+		t.Skip("requires sync")
+	}
+	for _, mode := range []DeploymentMode{ModeBinary, ModeImage} {
+		t.Run(string(mode), func(t *testing.T) {
+			f := newTransactionFixture(t)
+			stage := f.stage
+			state := f.state()
+			if mode == ModeBinary {
+				stage = func(id string, artifacts map[string]string, syncEnv bool) string {
+					return stageBinaryFixture(f, id, artifacts, syncEnv)
+				}
+				state = filepath.Join(f.target, ".deploy/binary")
+			}
+			f.success(stage("A", nil, false))
+			bootDir := filepath.Join(filepath.Dir(f.unit()), "pdf.container.d")
+			f.assertAbsent(bootDir)
+			if err := os.MkdirAll(filepath.Join(state, "operations", "enable"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			// Model a crash after journaling the first boot change, before mkdir.
+			f.write(filepath.Join(state, "boot-pending.json"), `{"schema":1,"operation_id":"enable","file_existed":false,"record_existed":false}`, 0600)
+			// Real sync detects missing directories that the fixture's stub accepts.
+			f.write(filepath.Join(f.bin, "sync"), "#!/bin/bash\nexec "+shellQuote(syncPath)+" \"$@\"\n", 0700)
+			if out, err := f.run("action", stage("recover", nil, false), "stop"); err != nil {
+				t.Fatal("boot recovery failed", err, out)
+			}
+			f.assertAbsent(filepath.Join(state, "boot-pending.json"))
+			f.assertAbsent(filepath.Join(state, "boot.json"))
+			f.assertAbsent(bootDir)
+			if out, err := f.run("action", stage("enable", nil, false), "enable"); err != nil {
+				t.Fatal("boot recovery left service actions blocked", err, out)
+			}
+			if f.read(filepath.Join(bootDir, "90-deploy-boot.conf")) != "[Install]\nWantedBy=\nWantedBy=default.target\n" {
+				t.Fatal("subsequent enable did not persist boot configuration")
+			}
+		})
+	}
+}
+
 func TestDifferentServicesCannotShareDeploymentTarget(t *testing.T) {
 	f := newTransactionFixture(t)
 	f.mark("hold-pull")

@@ -270,8 +270,9 @@ func doRights(envName, target string) {
 	var uid, gid string
 	if target == "user" {
 		logInfo("🔧 Reclaiming ownership for SSH User...")
-		uid = "$(id -u)"
-		gid = "$(id -g)"
+		// Namespace root maps to the invoking SSH user's host UID and GID.
+		uid = "0"
+		gid = "0"
 	} else if target == "container" {
 		logInfo("🔧 Setting ownership for Container (%d:%d)...", env.Quadlet.ContainerUID, env.Quadlet.ContainerGID)
 		if env.Quadlet.ContainerUID == 0 {
@@ -293,13 +294,13 @@ func changeOwnership(env Environment, uid, gid string) {
 		if strings.HasPrefix(p, "./") {
 			p = fmt.Sprintf("%s/%s", strings.TrimRight(env.Dir, "/"), strings.TrimPrefix(p, "./"))
 		}
-		paths = append(paths, p)
+		paths = append(paths, shellQuote(p))
 	}
 	if len(paths) == 0 {
 		return
 	}
 
-	cmd := fmt.Sprintf("podman unshare chown -R %s:%s %s", uid, gid, strings.Join(paths, " "))
+	cmd := fmt.Sprintf("podman unshare chown -R %s:%s -- %s", uid, gid, strings.Join(paths, " "))
 	runSSH(env, cmd)
 }
 

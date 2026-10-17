@@ -2,11 +2,92 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type localBinaryReleaseRunner struct {
+	fakeRunner
+	fixture *transactionFixture
+}
+
+func (r *localBinaryReleaseRunner) SSH(_ Environment, script string) (string, error) {
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = r.fixture.command("release", "unused").Env
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func (r *localBinaryReleaseRunner) Sync(e Environment, sources []string, destination string, extra ...string) error {
+	args := append([]string{"-a"}, extra...)
+	args = append(args, sources...)
+	args = append(args, strings.TrimPrefix(destination, remoteDestination(e, "")))
+	if out, err := exec.Command("rsync", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("local release sync: %w\n%s", err, out)
+	}
+	return nil
+}
+
+func TestBinaryReleasePreparesDataDirectory(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(map[bool]string{false: "fresh", true: "existing"}[existing], func(t *testing.T) {
+			f := newTransactionFixture(t)
+			t.Chdir(f.root)
+			data := filepath.Join(f.target, "data")
+			if existing {
+				f.write(filepath.Join(data, "keep.db"), "persistent data", 0600)
+				if err := os.Chmod(data, 0750); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				f.assertAbsent(f.target)
+			}
+			c := imageConfig()
+			c.Deployment.Mode = ModeBinary
+			c.BinaryName = "server"
+			c.Artifacts.Include = []string{"Dockerfile.vps"}
+			changeEnv(&c, func(e *Environment) {
+				e.Dir = f.target
+				e.Quadlet.EnvFile = ptr("")
+				e.Quadlet.Image = "localhost/pdf:latest"
+				e.Quadlet.ContainerUID = 65532
+				e.Quadlet.ContainerGID = 65532
+				e.Quadlet.ChownVolumes = []string{"./data"}
+				e.Quadlet.Volumes = []string{"./data:/data:Z"}
+			})
+			n, err := normalizeAndValidateConfig(c, "prod")
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := planBinaryRelease(n, "v1", "abc")
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.write(filepath.Join(f.root, "build/server"), "binary", 0755)
+			f.write(filepath.Join(f.root, "Dockerfile.vps"), "FROM scratch", 0600)
+			container := filepath.Join(f.root, "candidate.container")
+			f.write(container, p.Quadlet, 0600)
+			if err := stageBinaryRelease(p, container, &localBinaryReleaseRunner{fixture: f}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(f.read(filepath.Join(f.root, "calls")), "podman unshare chown -R 65532:65532 "+data) {
+				t.Fatal("default data directory ownership was not updated")
+			}
+			if existing {
+				if f.read(filepath.Join(data, "keep.db")) != "persistent data" {
+					t.Fatal("existing data changed")
+				}
+				if info, err := os.Stat(data); err != nil || info.Mode().Perm() != 0750 {
+					t.Fatal("existing data directory permissions changed", info, err)
+				}
+			}
+		})
+	}
+}
 
 func stageBinaryFixture(f *transactionFixture, id string, artifacts map[string]string, syncEnv bool) string {
 	f.t.Helper()
@@ -75,22 +156,93 @@ func TestBinaryTransactionFirstInstallAndRollback(t *testing.T) {
 }
 
 func TestBinaryLegacyQuadletAndInactiveStateRollback(t *testing.T) {
-	f := newTransactionFixture(t)
-	legacy := "[Container]\nImage=localhost/pdf:legacy\nHealthCmd=true\n[Install]\nWantedBy=default.target\n"
-	f.write(f.unit(), legacy, 0600)
-	f.write(filepath.Join(f.root, "images", imageA), "", 0600)
-	f.write(filepath.Join(f.root, "tags", "localhost_pdf:legacy"), imageA, 0600)
-	f.write(filepath.Join(f.target, "server"), "legacy", 0755)
-	f.write(filepath.Join(f.root, "registry-image"), imageB, 0600)
-	f.mark("fail-health")
-	out, err := f.run("release", stageBinaryFixture(f, "A", map[string]string{"server": "new"}, false))
-	if err == nil || strings.Contains(out, "ROLLBACK FAILED") {
-		t.Fatal(out, err)
+	for _, reference := range []string{"localhost/pdf:legacy", "localhost/pdf@" + imageA} {
+		t.Run(reference, func(t *testing.T) {
+			f := newTransactionFixture(t)
+			legacy := "[Container]\nImage=" + reference + "\nHealthCmd=true\n[Install]\nWantedBy=default.target\n"
+			f.write(f.unit(), legacy, 0600)
+			f.write(filepath.Join(f.root, "images", imageA), "", 0600)
+			f.write(filepath.Join(f.root, "tags", strings.ReplaceAll(reference, "/", "_")), imageA, 0600)
+			f.write(filepath.Join(f.target, "server"), "legacy", 0755)
+			f.write(filepath.Join(f.root, "registry-image"), imageB, 0600)
+			f.mark("fail-health")
+			out, err := f.run("release", stageBinaryFixture(f, "A", map[string]string{"server": "new"}, false))
+			if err == nil || strings.Contains(out, "ROLLBACK FAILED") {
+				t.Fatal(out, err)
+			}
+			if f.read(f.unit()) != legacy || f.read(filepath.Join(f.target, "server")) != "legacy" {
+				t.Fatal("legacy deployment not restored", out)
+			}
+			f.assertAbsent(filepath.Join(f.root, "active"))
+		})
 	}
-	if f.read(f.unit()) != legacy || f.read(filepath.Join(f.target, "server")) != "legacy" {
-		t.Fatal("legacy deployment not restored", out)
+}
+
+func TestBinaryLegacyTagRecoveryAfterBuildInterruption(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(map[bool]string{false: "inactive", true: "active"}[active], func(t *testing.T) {
+			f := newTransactionFixture(t)
+			reference := "localhost/pdf:legacy"
+			legacy := "[Container]\nImage=" + reference + "\nHealthCmd=true\n[Install]\nWantedBy=default.target\n"
+			f.write(f.unit(), legacy, 0600)
+			f.write(filepath.Join(f.root, "images", imageA), "", 0600)
+			tag := filepath.Join(f.root, "tags", "localhost_pdf:legacy")
+			f.write(tag, imageA, 0600)
+			if active {
+				f.write(filepath.Join(f.root, "running-image"), imageA, 0600)
+				f.mark("active")
+			}
+			artifacts := map[string]string{"server": "same binary", "Dockerfile.vps": "same dockerfile"}
+			for name, content := range artifacts {
+				f.write(filepath.Join(f.target, name), content, 0640)
+			}
+			f.write(filepath.Join(f.root, "registry-image"), imageB, 0600)
+			stage := stageBinaryFixture(f, "B", artifacts, false)
+			var request binaryReleaseRequest
+			if err := json.Unmarshal([]byte(f.read(filepath.Join(stage, "request.json"))), &request); err != nil {
+				t.Fatal(err)
+			}
+			request.Reference = reference
+			request.Stop = false
+			body, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.write(filepath.Join(stage, "request.json"), string(body), 0600)
+			f.mark("kill-after-build")
+			if out, err := f.run("release", stage); err == nil {
+				t.Fatal("build interruption was ignored", out)
+			}
+			if f.read(tag) != imageB {
+				t.Fatal("build did not change the legacy tag")
+			}
+			f.mark("fail-tag")
+			if out, err := f.run("action", stageBinaryFixture(f, "recover-fails", nil, false), "enable"); err == nil {
+				t.Fatal("failed image reference restoration was ignored", out)
+			}
+			pending := filepath.Join(f.target, ".deploy/binary/pending.json")
+			if _, err := os.Stat(pending); err != nil {
+				t.Fatal("failed recovery lost its pending state", err)
+			}
+			if err := os.Remove(filepath.Join(f.root, "fail-tag")); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := f.run("action", stageBinaryFixture(f, "recover", nil, false), "enable"); err != nil {
+				t.Fatal(out, err)
+			}
+			if f.read(tag) != imageA || f.read(f.unit()) != legacy {
+				t.Fatal("recovery did not restore the previous legacy image reference")
+			}
+			if active {
+				if _, err := os.Stat(filepath.Join(f.root, "active")); err != nil || f.read(filepath.Join(f.root, "running-image")) != imageA {
+					t.Fatal("recovery did not preserve the running service", err)
+				}
+			} else {
+				f.assertAbsent(filepath.Join(f.root, "active"))
+			}
+			f.assertAbsent(pending)
+		})
 	}
-	f.assertAbsent(filepath.Join(f.root, "active"))
 }
 
 func TestBinaryUIDWithoutOwnershipPaths(t *testing.T) {
