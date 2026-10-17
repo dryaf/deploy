@@ -2,3 +2,7 @@
 _prompt.txt
 _prompt_response.txt
 deploy
+.prompt/user_settings.yaml
+.prompt/cache/
+.prompt/benchmarks/
+PLAN.md
