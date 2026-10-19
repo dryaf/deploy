@@ -11,7 +11,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/template"
+	"time"
 )
 
 const (
@@ -52,7 +54,7 @@ func prompt(label string) string {
 }
 
 func getCmdOutput(name string, args ...string) string {
-	out, _ := exec.Command(name, args...).Output()
+	out, _ := boundedOutput(exec.Command(name, args...), 2*time.Minute)
 	return strings.TrimSpace(string(out))
 }
 
@@ -72,6 +74,10 @@ func genFile(path string, tmplStr string, data any) error {
 }
 
 func runCommand(desc string, cmd *exec.Cmd) error {
+	return runCommandBudget(desc, cmd, 15*time.Minute, 10*time.Second)
+}
+
+func runCommandBudget(desc string, cmd *exec.Cmd, duration, grace time.Duration) error {
 	if dryRun {
 		logDebug("[DRY] %s", cmd.String())
 		return nil
@@ -84,12 +90,12 @@ func runCommand(desc string, cmd *exec.Cmd) error {
 		var outBuf, errBuf bytes.Buffer
 		cmd.Stdout = &outBuf
 		cmd.Stderr = &errBuf
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("%s\nSTDOUT:\n%s\nSTDERR:\n%s", err, outBuf.String(), errBuf.String())
+		if err := runBounded(cmd, duration, grace); err != nil {
+			return fmt.Errorf("%s: %w\nSTDOUT:\n%s\nSTDERR:\n%s", desc, err, outBuf.String(), errBuf.String())
 		}
 		return nil
 	}
-	return cmd.Run()
+	return runBounded(cmd, duration, grace)
 }
 
 func runCommandRaw(name string, args ...string) error {
@@ -100,7 +106,7 @@ func runCommandRaw(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return runBounded(cmd, 2*time.Minute, 10*time.Second)
 }
 
 // --- SSH & Rsync with Multiplexing ---
@@ -108,12 +114,17 @@ func runCommandRaw(name string, args ...string) error {
 func getSSHBaseArgs(env Environment) []string {
 	args := []string{}
 	// Ports and identities distinguish environments behind the same hostname.
-	key := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s", env.User, env.Host, sshPort(env), env.SSHKey)))
+	key := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s\x00%s", env.User, env.Host, sshPort(env), env.SSHKey, env.KnownHostsFile)))
 	socketPath := filepath.Join(sshControlDir(), fmt.Sprintf("%x", key[:12]))
 
 	args = append(args, "-o", "ControlMaster=auto")
+	args = append(args, "-o", "BatchMode=yes")
+	args = append(args, "-o", fmt.Sprintf("ConnectTimeout=%d", max(1, int(budget(env.Timeouts.Connect, "10s").Seconds()))), "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=yes")
 	args = append(args, "-o", "ControlPersist=5m")
 	args = append(args, "-o", fmt.Sprintf("ControlPath=%s", socketPath))
+	if env.KnownHostsFile != "" {
+		args = append(args, "-o", "UserKnownHostsFile="+env.KnownHostsFile)
+	}
 
 	if env.SSHKey != "" {
 		args = append(args, "-i", env.SSHKey)
@@ -136,6 +147,9 @@ func prepareSSHControlDir() error {
 	if err != nil {
 		return err
 	}
+	if owner, ok := s.Sys().(*syscall.Stat_t); !ok || owner.Uid != uint32(os.Getuid()) {
+		return fmt.Errorf("SSH control directory belongs to another user")
+	}
 	if !s.IsDir() || s.Mode().Perm() != 0700 {
 		return fmt.Errorf("SSH control directory must be a private directory: %s", dir)
 	}
@@ -154,7 +168,7 @@ func runSSH(env Environment, cmd string) error {
 		return err
 	}
 	c := exec.Command("ssh", args...)
-	return runCommand("SSH", c)
+	return runCommandBudget("SSH", c, sshBudget(env), budget(env.Timeouts.ShutdownGrace, "10s"))
 }
 
 func runSSHStream(env Environment, cmd string) error {
@@ -170,7 +184,7 @@ func runSSHStream(env Environment, cmd string) error {
 	c := exec.Command("ssh", args...)
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
-	return c.Run()
+	return runBounded(c, sshBudget(env), budget(env.Timeouts.ShutdownGrace, "10s"))
 }
 
 func runRsync(env Environment, sources []string, dest string, extraArgs ...string) {
@@ -186,6 +200,10 @@ func runSSHOutput(env Environment, script string) (string, error) {
 	if dryRun {
 		return "", nil
 	}
+	return runSSHOutputRead(env, script)
+}
+
+func runSSHOutputRead(env Environment, script string) (string, error) {
 	if err := prepareSSHControlDir(); err != nil {
 		return "", err
 	}
@@ -194,7 +212,7 @@ func runSSHOutput(env Environment, script string) (string, error) {
 	var out, errs bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errs
-	if err := cmd.Run(); err != nil {
+	if err := runBounded(cmd, sshBudget(env), budget(env.Timeouts.ShutdownGrace, "10s")); err != nil {
 		return out.String(), fmt.Errorf("SSH: %w: %s", err, strings.TrimSpace(errs.String()))
 	}
 	if errs.Len() > 0 {
@@ -230,11 +248,12 @@ func runRsyncSafe(env Environment, sources []string, dest string, extraArgs ...s
 	}
 	cmd := exec.Command("rsync", args...)
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return runBounded(cmd, budget(env.Timeouts.Transfer, "10m"), budget(env.Timeouts.ShutdownGrace, "10s"))
 }
 
 func fetchLatestGitHubRelease(repo string) (string, error) {
-	resp, err := http.Get(fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo))
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo))
 	if err != nil {
 		return "", err
 	}

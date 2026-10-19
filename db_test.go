@@ -129,7 +129,8 @@ func TestDatabasePullPublishesOnlyCompleteSnapshots(t *testing.T) {
 			}
 			os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0700)
 			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-			env := Environment{User: "deploy", Host: "example.com", Dir: remote, Database: DatabaseConfig{Driver: "sqlite", Source: "app.db"}}
+			t.Setenv("HOME", filepath.Join(root, "home"))
+			env := Environment{User: "deploy", Host: "example.com", Dir: remote, Quadlet: Quadlet{ServiceName: "pdf"}, Database: DatabaseConfig{Driver: "sqlite", Source: "app.db"}}
 			err := pullDatabase(env)
 			if failure {
 				if err == nil {

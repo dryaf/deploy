@@ -18,27 +18,51 @@ var transactionCommonScript string
 var imageTransactionScript = transactionCommonScript + "\n" + imageTransactionBody
 
 type imageReleaseRequest struct {
-	Schema           int     `json:"schema"`
-	ReleaseID        string  `json:"release_id"`
-	Version          string  `json:"git_version"`
-	Commit           string  `json:"git_commit"`
-	Service          string  `json:"service"`
-	Target           string  `json:"target"`
-	Reference        string  `json:"configured_reference"`
-	EnvFile          string  `json:"env_file"`
-	SyncEnv          bool    `json:"sync_env"`
-	HealthCommand    bool    `json:"health_command"`
-	HealthURL        string  `json:"health_url"`
-	HealthSeconds    float64 `json:"health_seconds"`
-	Stop             bool    `json:"stop_on_deploy"`
-	Environment      string  `json:"environment"`
-	Database         string  `json:"database,omitempty"`
-	DatabaseRollback string  `json:"database_rollback,omitempty"`
-	UID              int     `json:"container_uid"`
-	GID              int     `json:"container_gid"`
+	Schema                int             `json:"schema"`
+	ReleaseID             string          `json:"release_id"`
+	Version               string          `json:"git_version"`
+	Commit                string          `json:"git_commit"`
+	TagObject             string          `json:"git_tag_object,omitempty"`
+	PayloadChecksums      bool            `json:"payload_checksums,omitempty"`
+	Service               string          `json:"service"`
+	Target                string          `json:"target"`
+	Reference             string          `json:"configured_reference"`
+	EnvFile               string          `json:"env_file"`
+	SyncEnv               bool            `json:"sync_env"`
+	HealthCommand         bool            `json:"health_command"`
+	HealthURL             string          `json:"health_url"`
+	HealthSeconds         float64         `json:"health_seconds"`
+	HealthStableSeconds   float64         `json:"health_stable_seconds,omitempty"`
+	HealthIntervalSeconds float64         `json:"health_interval_seconds,omitempty"`
+	HealthSuccesses       int             `json:"health_successes,omitempty"`
+	Timeouts              operationLimits `json:"timeouts"`
+	MinFreeBytes          int64           `json:"min_free_bytes,omitempty"`
+	MinFreeInodes         int64           `json:"min_free_inodes,omitempty"`
+	ImageReserveBytes     int64           `json:"image_reserve_bytes,omitempty"`
+	Stop                  bool            `json:"stop_on_deploy"`
+	Environment           string          `json:"environment"`
+	Database              string          `json:"database,omitempty"`
+	DatabaseRollback      string          `json:"database_rollback,omitempty"`
+	UID                   int             `json:"container_uid"`
+	GID                   int             `json:"container_gid"`
 }
 
 func executeImageRelease(p ReleasePlan, runner ReleaseRunner) error {
+	lock := p.projectLock
+	if lock == nil {
+		var err error
+		lock, err = lockProject()
+		if err != nil {
+			return err
+		}
+	}
+	defer lock.Close()
+	payload, err := captureRelease(p, "")
+	if err != nil {
+		return err
+	}
+	defer payload.Close()
+	lock.Close()
 	n, e := p.Config, p.Config.Env
 	if err := checkLocalReleaseTools(); err != nil {
 		return err
@@ -55,6 +79,9 @@ func executeImageRelease(p ReleasePlan, runner ReleaseRunner) error {
 		HealthSeconds: n.HealthTimeout.Seconds(), Stop: e.Quadlet.StopOnDeploy,
 	}
 	configureReleaseDatabase(&request, e)
+	configureReleasePolicy(&request, n)
+	request.TagObject = p.TagObject
+	request.PayloadChecksums = true
 	body, err := json.Marshal(request)
 	if err != nil {
 		return err
@@ -81,16 +108,8 @@ func executeImageRelease(p ReleasePlan, runner ReleaseRunner) error {
 	if err = runner.Sync(e, sources, remoteDestination(e, stage+"/")); err != nil {
 		return fmt.Errorf("stage release: %w", err)
 	}
-	if len(n.Config.Artifacts.Include) > 0 {
-		args := append([]string{"--relative"}, excludeArgs(n.Config.Artifacts.Exclude)...)
-		if err = runner.Sync(e, cleanArtifactSources(n.Config.Artifacts.Include), remoteDestination(e, stage+"/artifacts/"), args...); err != nil {
-			return fmt.Errorf("stage artifacts: %w", err)
-		}
-	}
-	if e.SyncEnvFile != "" {
-		if err = runner.Sync(e, []string{e.SyncEnvFile}, remoteDestination(e, stage+"/env"), "--chmod=F600"); err != nil {
-			return fmt.Errorf("stage environment: %w", err)
-		}
+	if err = runner.Sync(e, []string{payload.Dir + "/"}, remoteDestination(e, stage+"/"), "--checksum", "--exclude=/.active.lock"); err != nil {
+		return fmt.Errorf("stage captured payload: %w", err)
 	}
 	out, err := runner.SSH(e, "bash "+shellQuote(stage+"/transaction.sh")+" release "+shellQuote(stage))
 	if out != "" {
@@ -109,7 +128,7 @@ func safeRemoteMkdir(dir string) string {
 
 const imageRemotePreflight = `set -euo pipefail
 umask 077
-for tool in bash podman systemctl rsync flock jq timeout realpath find stat cmp sha256sum grep sed sort cut dirname date cp mv chmod mkdir rm rmdir awk id sync cat; do
+for tool in bash podman systemctl rsync flock jq timeout realpath find stat cmp sha256sum grep sed sort cut dirname date cp mv chmod mkdir rm rmdir awk id sync cat du; do
  command -v "$tool" >/dev/null || { echo "Missing remote prerequisite: $tool" >&2; exit 1; }
 done
 version=$(podman version --format '{{.Client.Version}}')
@@ -158,6 +177,7 @@ func executeDeploymentServiceAction(n NormalizedConfig, action string, runner Re
 	defer os.RemoveAll(temp)
 	e := n.Env
 	req := imageReleaseRequest{Schema: 1, ReleaseID: p, Service: e.Quadlet.ServiceName, Target: e.Dir}
+	req.Timeouts = limitsFor(e)
 	body, err := json.Marshal(req)
 	if err != nil {
 		return err
@@ -182,13 +202,15 @@ func executeDeploymentServiceAction(n NormalizedConfig, action string, runner Re
 }
 
 func imageStatusScript(n NormalizedConfig) string {
-	state := path.Join(n.Env.Dir, ".deploy/image")
+	state := path.Join(n.Env.Dir, ".deploy", string(n.Mode))
 	return "state=" + shellQuote(state) + `;
 if [ -f "$state/current.json" ]; then
  id=$(jq -er .current "$state/current.json") || exit
  case "$id" in *[!a-zA-Z0-9_-]*|'') echo 'Invalid current release ID' >&2; exit 1;; esac
- jq '{release_id,git_version,configured_reference,image_id,registry_digests,check_result}' "$state/releases/$id/manifest.json"
-else echo 'No confirmed image deployment'; fi
+ actual=$(podman container inspect --format '{{.Image}}' ` + shellQuote("systemd-"+n.Env.Quadlet.ServiceName) + ` 2>/dev/null) || actual=''
+ if [[ $actual =~ ^(sha256:)?[0-9a-f]{64}$ ]]; then actual="sha256:${actual#sha256:}"; else actual=''; fi
+ jq --arg actual "$actual" '{release_id,git_version,git_commit,git_tag_object,configured_reference,image_id,registry_digests,check_result,running_image_id:(if $actual == "" then null else $actual end),image_matches:($actual == .image_id)}' "$state/releases/$id/manifest.json"
+else echo 'No confirmed deployment'; fi
 if [ -f "$state/pending.json" ]; then echo 'PENDING RECOVERY:'; jq '{schema,release_id}' "$state/pending.json"; else echo 'Pending recovery: none'; fi
 if [ -f "$state/boot.json" ]; then jq '{enabled}' "$state/boot.json"; fi
 if [ -f "$state/boot-pending.json" ]; then echo 'PENDING BOOT RECOVERY:'; jq '{schema,operation_id}' "$state/boot-pending.json"; fi`

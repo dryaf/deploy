@@ -38,7 +38,7 @@ func TestBinaryReleaseUploadsBuiltBinaryDespiteArtifactExclusions(t *testing.T) 
 			f := newTransactionFixture(t)
 			t.Chdir(f.root)
 			f.write("compiled-server", "new binary", 0755)
-			f.write("server", "old binary", 0755)
+			f.write("server", "old binary", 0644)
 			info, err := os.Stat("compiled-server")
 			if err != nil {
 				t.Fatal(err)
@@ -80,6 +80,10 @@ func TestBinaryReleaseUploadsBuiltBinaryDespiteArtifactExclusions(t *testing.T) 
 			if got := f.read(filepath.Join(f.target, "server")); got != "new binary" {
 				t.Fatalf("deployed %q instead of the newly built binary", got)
 			}
+			if info, err := os.Stat(filepath.Join(f.target, "server")); err != nil || info.Mode().Perm() != 0755 {
+				t.Fatal("compiled binary lost executable permissions", info, err)
+			}
+
 			if got := f.read(filepath.Join(f.target, "assets/keep.txt")); got != "included" {
 				t.Fatalf("included artifact changed: %q", got)
 			}
@@ -238,7 +242,7 @@ func TestBinaryLegacyQuadletAndInactiveStateRollback(t *testing.T) {
 	}
 }
 
-func TestBinaryLegacyTagRecoveryAfterBuildInterruption(t *testing.T) {
+func TestBinaryLegacyTagRecoveryAfterReferenceInterruption(t *testing.T) {
 	for _, active := range []bool{false, true} {
 		t.Run(map[bool]string{false: "inactive", true: "active"}[active], func(t *testing.T) {
 			f := newTransactionFixture(t)
@@ -269,7 +273,7 @@ func TestBinaryLegacyTagRecoveryAfterBuildInterruption(t *testing.T) {
 				t.Fatal(err)
 			}
 			f.write(filepath.Join(stage, "request.json"), string(body), 0600)
-			f.mark("kill-after-build")
+			f.mark("kill-after-reference")
 			if out, err := f.run("release", stage); err == nil {
 				t.Fatal("build interruption was ignored", out)
 			}

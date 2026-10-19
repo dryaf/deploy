@@ -241,7 +241,8 @@ func TestPullRetainsHistoryAndRestoresWALDatabaseTransactionally(t *testing.T) {
 	}
 	f.write(filepath.Join(f.bin, "ssh"), "#!/bin/bash\nexec bash -c \"${!#}\"\n", 0700)
 	t.Setenv("PATH", f.bin+":"+os.Getenv("PATH"))
-	e := Environment{Name: "prod", User: "deploy", Host: "example.com", Dir: remote, Database: DatabaseConfig{Driver: "sqlite", Source: "app.db"}}
+	t.Setenv("HOME", f.home)
+	e := Environment{Name: "prod", User: "deploy", Host: "example.com", Dir: remote, Quadlet: Quadlet{ServiceName: "pdf"}, Database: DatabaseConfig{Driver: "sqlite", Source: "app.db"}}
 	for i := 0; i < 2; i++ {
 		if err := pullDatabase(e); err != nil {
 			t.Fatal(err)
@@ -299,7 +300,8 @@ func TestPullRestoreFailurePreservesCommittedWALData(t *testing.T) {
 	}
 	f.write(filepath.Join(f.bin, "ssh"), "#!/bin/bash\nexec bash -c \"${!#}\"\n", 0700)
 	t.Setenv("PATH", f.bin+":"+os.Getenv("PATH"))
-	e := Environment{Name: "prod", User: "deploy", Host: "example.com", Dir: remote, Database: DatabaseConfig{Driver: "sqlite", Source: "app.db"}}
+	t.Setenv("HOME", f.home)
+	e := Environment{Name: "prod", User: "deploy", Host: "example.com", Dir: remote, Quadlet: Quadlet{ServiceName: "pdf"}, Database: DatabaseConfig{Driver: "sqlite", Source: "app.db"}}
 	if err := pullDatabase(e); err == nil {
 		t.Fatal("restore succeeded while another writer held the database")
 	}

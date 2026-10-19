@@ -24,6 +24,17 @@ func main() {
 	}
 
 	switch args[0] {
+	case "validate":
+		validateCmd := flag.NewFlagSet("validate", flag.ExitOnError)
+		server := validateCmd.Bool("server", false, "Validate server.yaml")
+		validateCmd.Parse(args[1:])
+		if (*server && validateCmd.NArg() != 0) || (!*server && validateCmd.NArg() != 1) {
+			logFatal("Usage: deploy validate <env> | deploy validate --server")
+		}
+		if err := validateConfiguration(validateCmd.Arg(0), *server); err != nil {
+			logFatal("Validation: %v", err)
+		}
+		logSuccess("Configuration valid.")
 	case "init":
 		initCmd := flag.NewFlagSet("init", flag.ExitOnError)
 		mode := initCmd.String("mode", "binary", "Deployment mode: binary or image")
@@ -132,6 +143,34 @@ func main() {
 			doDBPull(args[2])
 		} else if args[1] == "push" {
 			doDBPush(args[2])
+		} else if args[1] == "prune-local" {
+			pruneCmd := flag.NewFlagSet("db prune-local", flag.ExitOnError)
+			list := pruneCmd.Bool("list", false, "Preview local database backup cleanup")
+			pruneCmd.Parse(args[2:])
+			if pruneCmd.NArg() != 1 {
+				logFatal("Usage: deploy db prune-local [--list] <env>")
+			}
+			_, e := loadEnv(pruneCmd.Arg(0))
+			if err := pruneLocalDatabase(e, *list || dryRun); err != nil {
+				logFatal("Local backup prune: %v", err)
+			}
+		} else if args[1] == "backup" {
+			_, e := loadEnv(args[2])
+			id, err := backupOffHost(e)
+			if err != nil {
+				logFatal("Off-host backup: %v", err)
+			}
+			if !dryRun {
+				logSuccess("Verified off-host backup: %s", id)
+			}
+		} else if args[1] == "restore-check" && len(args) == 4 {
+			_, e := loadEnv(args[2])
+			if err := verifyOffHostRestore(e, args[3]); err != nil {
+				logFatal("Restore check: %v", err)
+			}
+			if !dryRun {
+				logSuccess("SQLite integrity and application restore check passed.")
+			}
 		} else {
 			logFatal("Invalid db action: %s", args[1])
 		}
@@ -146,10 +185,25 @@ func main() {
 		}
 		doRights(args[1], args[2])
 	case "prune":
-		if len(args) < 2 {
-			logFatal("Usage: deploy prune <env>")
+		pruneCmd := flag.NewFlagSet("prune", flag.ExitOnError)
+		history := pruneCmd.Bool("history", false, "Prune configured release and database backup history")
+		list := pruneCmd.Bool("list", false, "Preview history cleanup")
+		pruneCmd.Parse(args[1:])
+		if pruneCmd.NArg() != 1 || (*list && !*history) {
+			logFatal("Usage: deploy prune [--history [--list]] <env>")
 		}
-		doPrune(args[1])
+		if *history {
+			cfg, e := loadEnv(pruneCmd.Arg(0))
+			n, err := normalizeAndValidateConfig(cfg, e.Name)
+			if err == nil {
+				err = pruneHistory(n, *list || dryRun)
+			}
+			if err != nil {
+				logFatal("History prune: %v", err)
+			}
+		} else {
+			doPrune(pruneCmd.Arg(0))
+		}
 	default:
 		printUsage()
 		os.Exit(1)
@@ -159,6 +213,7 @@ func main() {
 func printUsage() {
 	fmt.Println("Usage: deploy <command> [args]")
 	fmt.Println("Commands:")
+	fmt.Println("  validate <env>|--server  Validate configuration locally")
 	fmt.Println("  init [--mode=image]      Generate deploy.yaml")
 	fmt.Println("  release [tag] <env>      Deploy to env. If tag omitted, auto-detects or prompts.")
 	fmt.Println("  status [env]             Show detailed system health. If env omitted, shows all.")
@@ -174,6 +229,8 @@ func printUsage() {
 	fmt.Println("  logs <env>               Stream logs")
 	fmt.Println("  db pull <env>            Sync DB (Remote -> Local)")
 	fmt.Println("  db push <env>            Overwrite Remote DB (Service MUST be stopped first)")
+	fmt.Println("  db backup <env>          Create and verify an off-host snapshot")
+	fmt.Println("  db restore-check <env> <id> Verify off-host backup with application check")
 	fmt.Println("  gen-auth <u?> <p?>       Generate Basic Auth string")
 	fmt.Println("  rights <env> <target>    Manual permission fix (target: 'user' or 'container')")
 }

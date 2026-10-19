@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -44,7 +46,7 @@ func doStatus(envName string) {
 
 func doSystemStats(envName string) {
 	cfg, env := loadEnv(envName)
-	if cfg.Deployment.Mode == ModeImage {
+	if cfg.Deployment.Mode == ModeImage || cfg.Deployment.Mode == ModeBinary {
 		n, err := normalizeAndValidateConfig(cfg, envName)
 		if err != nil {
 			logFatal("Config: %v", err)
@@ -245,63 +247,82 @@ func doGenAuth(user, password string) {
 
 func doPrune(envName string) {
 	_, env := loadEnv(envName)
-	logInfo("🧹 Pruning unused resources on %s (%s)...", envName, env.Host)
-
-	logInfo("   - Pruning dangling images...")
-	if err := runSSH(env, "podman image prune -f"); err != nil {
-		logWarn("Image prune warning: %v", err)
+	if err := pruneImages(env); err != nil {
+		logFatal("Prune: %v", err)
 	}
-
-	logInfo("   - Pruning build cache...")
-	if err := runSSH(env, "podman builder prune -f"); err != nil {
-		logWarn("Builder prune warning: %v", err)
+	if dryRun {
+		logInfo("[DRY] Prune dangling images and build cache under the storage lock")
+		return
 	}
+	logSuccess("Prune complete.")
+}
 
-	logSuccess("✅ Prune complete.")
+func pruneImages(env Environment) error {
+	limits, _ := json.Marshal(struct {
+		Timeouts operationLimits `json:"timeouts"`
+	}{limitsFor(env)})
+	script := transactionCommonScript + "\nconfigure_timeouts <(printf '%s' " + shellQuote(string(limits)) + ")\nstore_lock -x\npodman image prune -f\npodman image prune --build-cache -f\n"
+	_, err := runSSHOutput(env, script)
+	return err
 }
 
 func doRights(envName, target string) {
 	_, env := loadEnv(envName)
-	if len(env.Quadlet.ChownVolumes) == 0 {
-		logWarn("No 'chown_volumes' configured for this environment.")
+	if err := rights(env, target); err != nil {
+		logFatal("Permissions: %v", err)
+	}
+	if dryRun {
+		logInfo("[DRY] Require an inactive service and update configured ownership while preserving backups")
 		return
 	}
-
-	var uid, gid string
-	if target == "user" {
-		logInfo("🔧 Reclaiming ownership for SSH User...")
-		// Namespace root maps to the invoking SSH user's host UID and GID.
-		uid = "0"
-		gid = "0"
-	} else if target == "container" {
-		logInfo("🔧 Setting ownership for Container (%d:%d)...", env.Quadlet.ContainerUID, env.Quadlet.ContainerGID)
-		if env.Quadlet.ContainerUID == 0 {
-			logFatal("container_uid not set in config")
-		}
-		uid = fmt.Sprintf("%d", env.Quadlet.ContainerUID)
-		gid = fmt.Sprintf("%d", env.Quadlet.ContainerGID)
-	} else {
-		logFatal("Invalid target. Use 'user' or 'container'")
-	}
-
-	changeOwnership(env, uid, gid)
 	logSuccess("Permissions updated.")
 }
 
-func changeOwnership(env Environment, uid, gid string) {
-	var paths []string
-	for _, p := range env.Quadlet.ChownVolumes {
-		if strings.HasPrefix(p, "./") {
-			p = fmt.Sprintf("%s/%s", strings.TrimRight(env.Dir, "/"), strings.TrimPrefix(p, "./"))
+func rights(env Environment, target string) error {
+	uid, gid := "0", "0"
+	switch target {
+	case "user":
+	case "container":
+		if env.Quadlet.ContainerUID <= 0 {
+			return fmt.Errorf("container_uid not set in config")
 		}
-		paths = append(paths, shellQuote(p))
+		uid, gid = fmt.Sprint(env.Quadlet.ContainerUID), fmt.Sprint(env.Quadlet.ContainerGID)
+	default:
+		return fmt.Errorf("invalid target; use user or container")
 	}
-	if len(paths) == 0 {
-		return
-	}
+	return changeOwnership(env, uid, gid)
+}
 
-	cmd := fmt.Sprintf("podman unshare chown -R %s:%s -- %s", uid, gid, strings.Join(paths, " "))
-	runSSH(env, cmd)
+func changeOwnership(env Environment, uid, gid string) error {
+	if len(env.Quadlet.ChownVolumes) == 0 {
+		return fmt.Errorf("no chown_volumes configured")
+	}
+	script := remoteOperationGuard(env) + `
+if service_is_active; then fail 'Stop the service before changing ownership'
+else [[ $? == 1 ]] || exit 1; fi
+`
+	backup := ""
+	if env.Database.Driver == "sqlite" {
+		backup = path.Join(env.Dir, path.Dir(env.Database.Source), "backup")
+	}
+	for _, owned := range env.Quadlet.ChownVolumes {
+		if !path.IsAbs(owned) {
+			owned = path.Join(env.Dir, owned)
+		}
+		owned = path.Clean(owned)
+		if backup != "" && (owned == backup || strings.HasPrefix(owned, backup+"/")) {
+			return fmt.Errorf("chown_volumes cannot target the database backup directory")
+		}
+		script += "check_path " + shellQuote(owned) + "\n"
+		// find's default physical traversal and chown --no-dereference preserve links.
+		script += "podman unshare find " + shellQuote(owned)
+		if backup != "" {
+			script += " -path " + shellQuote(backup) + " -prune -o"
+		}
+		script += " -exec chown --no-dereference " + shellQuote(uid+":"+gid) + " -- '{}' + || { echo " + shellQuote("Ownership change failed at "+owned+"; earlier paths may have changed; retry after correcting the error") + " >&2; exit 1; }\n"
+	}
+	_, err := runSSHOutput(env, script)
+	return err
 }
 
 func doLogs(envName string, usePodman bool) {
@@ -487,6 +508,9 @@ environments:
       auto_restart: true
       timezone: "Europe/Vienna"
       exec: "/{{ .BinaryName }}"
+      # Adjust this endpoint to your application's readiness check.
+      health_required: true
+      health_cmd: "wget -q -O /dev/null http://127.0.0.1:8080/health"
       # stop_on_deploy: true
 
       container_uid: 65532
@@ -528,5 +552,6 @@ environments:
       env_file: ""
       auto_restart: true
       health_timeout: 60s
-      # health_cmd: "curl --fail --silent --max-time 3 http://127.0.0.1:80/"
+      health_required: true
+      health_cmd: "wget -q -O /dev/null http://127.0.0.1:80/"
 `

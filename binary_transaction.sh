@@ -1,7 +1,8 @@
 mode=${1:?missing operation}
 stage=${2:?missing staging path}
 init_transaction binary "$stage"
-recover_database_update
+store_lock -s
+if [[ -f $target/.deploy/db/pending.json ]]; then bounded_recovery recover_database_update; fi
 init_boot_state
 
 restore_binary_image_reference() {
@@ -57,10 +58,10 @@ if [[ -f $pending ]]; then
  pending_id=$(jq -er .release_id "$pending")
  release="$state/releases/$pending_id"
  image=$(jq -r '.image_id // ""' "$release/manifest.json")
- if [[ -f $current && $(jq -r .current "$current") == "$pending_id" && -n $image ]] && cmp -s "$unit" "$release/candidate.container" && wait_health "$release/manifest.json" "$image"; then
+ if [[ -f $current && $(jq -r .current "$current") == "$pending_id" && -n $image ]] && cmp -s "$unit" "$release/candidate.container" && resume_committed_release "$release/manifest.json" "$image"; then
   durable_remove "$pending"
  elif snapshot_unchanged "$release"; then discard_binary_prepared "$release"
- else restore_binary_deployment "$release"; fi
+ else bounded_recovery restore_binary_deployment "$release"; fi
 fi
 validate_boot
 
@@ -79,9 +80,11 @@ fi
 [[ ! -e $state/releases/$id ]] || fail 'Release ID already exists'
 make_dir "$units"
 check_path "$unit"
+check_release_capacity
 release="$state/releases/$id"
 before="$release/before"
 mkdir -m 700 -- "$release" "$before" "$before/files"
+jq --arg timestamp "$(date -u +%FT%TZ)" '. + {created_at:$timestamp}' "$request" | atomic_json "$release/manifest.json"
 old_active=false old_image='' old_ref='' old_id='' old_unit=false
 if service_is_active; then old_active=true; else [[ $? == 1 ]] || exit 1; fi
 if [[ -f $current ]]; then
@@ -134,7 +137,18 @@ if [[ -n $env_file && $(jq -r .sync_env "$request") != true ]]; then
  check_path "$env_file"
  [[ -r $env_file && -f $env_file ]] || fail 'Referenced environment file is missing or unreadable'
 fi
-cp -- "$request" "$release/manifest.json"
+reference=$(jq -er .configured_reference "$request")
+dockerfile=$(jq -er .dockerfile "$request")
+cd -- "$stage/artifacts"
+podman build --iidfile "$release/built-image-id" -f "$dockerfile" -t "localhost/deploy-retain/$key:$id" .
+# Capture this build's ID directly: another service may reuse the mutable tag.
+image=$(canonical_id "$(cat -- "$release/built-image-id")")
+podman tag "$image" "localhost/deploy-retain/$key:$id"
+sync_image_store
+[[ $(grep -c '^Image=' "$stage/candidate.container") == 1 ]] || fail 'Candidate has no unique image reference'
+sed "s/^Image=.*$/Image=$image\nPull=never/" "$stage/candidate.container" > "$release/candidate.container"
+validate_candidate_quadlet
+jq --arg retention "localhost/deploy-retain/$key:$id" --arg image "$image" ' . + {retention_tag:$retention,image_id:$image}' "$release/manifest.json" | atomic_json "$release/manifest.json"
 sync -f -- "$release"
 changed=false
 transaction_exit() {
@@ -142,7 +156,7 @@ transaction_exit() {
  trap - EXIT HUP INT TERM
  if (( status != 0 )); then
   if $changed || ! snapshot_unchanged "$release"; then
-   if restore_binary_deployment "$release"; then echo 'Binary rollout failed; previous state restored' >&2
+   if bounded_recovery restore_binary_deployment "$release"; then echo 'Binary rollout failed; previous state restored' >&2
    else echo "ROLLBACK FAILED; pending state and backups preserved at $release" >&2; fi
   else discard_binary_prepared "$release" || echo 'Pending recovery required' >&2; fi
  fi
@@ -154,16 +168,12 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 bind_service
 jq -n --arg id "$id" '{schema:1,release_id:$id}' | atomic_json "$pending"
+phase_checkpoint pending
 if $old_active && [[ $(jq -r .stop_on_deploy "$request") == true ]]; then systemctl --user stop "$service.service"; changed=true; fi
+check_release_capacity
 prepare_release_database
 install_managed_files "$before" "$stage/artifacts"
-reference=$(jq -er .configured_reference "$request")
-dockerfile=$(jq -er .dockerfile "$request")
-cd -- "$stage/artifacts"
-podman build --iidfile "$release/built-image-id" -f "$dockerfile" -t "$reference" .
-# Capture this build's ID directly: another service may reuse the mutable tag.
-image=$(canonical_id "$(cat -- "$release/built-image-id")")
-podman tag "$image" "localhost/deploy-retain/$key:$id"
+podman tag "$image" "$reference"
 sync_image_store
 uid=$(jq -r .container_uid "$request")
 gid=$(jq -r .container_gid "$request")
@@ -179,19 +189,21 @@ if (( uid > 0 )); then
   else podman unshare chown -R "$uid:$gid" "$owned"; fi
  done < "$release/chown-paths"
 fi
-[[ $(grep -c '^Image=' "$stage/candidate.container") == 1 ]] || fail 'Candidate has no unique image reference'
-sed "s/^Image=.*$/Image=$image\nPull=never/" "$stage/candidate.container" > "$release/candidate.container"
 check_path "$unit.deploy-install-$id"
 cp -- "$release/candidate.container" "$unit.deploy-install-$id"
 chmod 600 "$unit.deploy-install-$id"
 durable_move "$unit.deploy-install-$id" "$unit"
+phase_checkpoint candidate-activation
 changed=true
 systemctl --user daemon-reload
 if [[ -f $before/database.json ]]; then printf '{}\n' | atomic_json "$release/database-started.json"; fi
 systemctl --user restart "$service.service"
+phase_checkpoint candidate-started
 wait_health "$release/manifest.json" "$image" || fail 'Binary readiness deadline exceeded'
 jq --arg image "$image" '.image_id=$image | .check_result="confirmed"' "$release/manifest.json" | atomic_json "$release/manifest.json"
 jq -n --arg id "$id" --arg previous "$old_id" --arg service "$service" --arg target "$target" '{schema:1,current:$id,previous:(if $previous == "" then null else $previous end),service:$service,target:$target}' | atomic_json "$current"
+phase_checkpoint commit
 changed=false
 durable_remove "$pending"
-echo 'Binary deployment confirmed'
+phase_checkpoint pending-cleared
+printf 'Confirmed release %s; commit %s; image %s; readiness: %s\n' "$id" "$(jq -r .git_commit "$request")" "$image" "$(jq -r .check_result "$release/manifest.json")"

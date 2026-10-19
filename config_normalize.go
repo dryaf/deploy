@@ -30,13 +30,16 @@ type DeploymentConfig struct {
 }
 
 type NormalizedConfig struct {
-	Config        Config
-	Env           Environment
-	Mode          DeploymentMode
-	EnvFile       string
-	Routing       bool
-	CPUQuota      string
-	HealthTimeout time.Duration
+	Config          Config
+	Env             Environment
+	Mode            DeploymentMode
+	EnvFile         string
+	Routing         bool
+	CPUQuota        string
+	HealthTimeout   time.Duration
+	HealthStableFor time.Duration
+	HealthInterval  time.Duration
+	HealthSuccesses int
 }
 
 var servicePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
@@ -59,6 +62,35 @@ func normalizeAndValidateConfig(cfg Config, envName string) (NormalizedConfig, e
 	}
 	n.Env = env
 	n.Env.Name = envName
+	var err error
+	n.Env.Timeouts, err = normalizeTimeouts(env.Timeouts)
+	if err != nil {
+		return n, err
+	}
+	if err := validateRetention("database.retention", env.Database.Retention); err != nil {
+		return n, err
+	}
+	if err := validateRetention("storage.releases", env.Storage.Releases); err != nil {
+		return n, err
+	}
+	if env.Storage.MinFreeBytes < 0 || env.Storage.MinFreeInodes < 0 || env.Storage.ImageReserveBytes < 0 {
+		return n, fmt.Errorf("storage capacity limits must be nonnegative")
+	}
+	if n.Env.Storage.MinFreeBytes == 0 {
+		n.Env.Storage.MinFreeBytes = 64 << 20
+	}
+	if n.Env.Storage.MinFreeInodes == 0 {
+		n.Env.Storage.MinFreeInodes = 1024
+	}
+	if n.Env.Storage.ImageReserveBytes == 0 {
+		n.Env.Storage.ImageReserveBytes = 256 << 20
+	}
+	if err := validateOffHost(env.Database.OffHost); err != nil {
+		return n, err
+	}
+	if env.Database.OffHost.Host != "" && env.Database.OffHost.Host == env.Host {
+		return n, fmt.Errorf("database.off_host.host must identify another machine")
+	}
 	if env.Database != (DatabaseConfig{}) {
 		if _, _, err := databasePaths(n.Env); err != nil {
 			return n, err
@@ -145,6 +177,30 @@ func normalizeAndValidateConfig(cfg Config, envName string) (NormalizedConfig, e
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
 			return n, fmt.Errorf("health_url must be an HTTP(S) URL without credentials")
 		}
+	}
+	if q.HealthRequired && q.HealthCmd == "" && q.HealthURL == "" {
+		return n, fmt.Errorf("health_required needs health_cmd or health_url")
+	}
+	n.HealthStableFor = 5 * time.Second
+	n.HealthInterval = time.Second
+	n.HealthSuccesses = q.HealthSuccesses
+	if n.HealthSuccesses == 0 {
+		n.HealthSuccesses = 3
+	}
+	for _, item := range []struct {
+		name, value string
+		target      *time.Duration
+	}{{"health_stable_for", q.HealthStableFor, &n.HealthStableFor}, {"health_interval", q.HealthInterval, &n.HealthInterval}} {
+		if item.value != "" {
+			d, err := time.ParseDuration(item.value)
+			if err != nil || d <= 0 || d > 24*time.Hour {
+				return n, fmt.Errorf("%s must be a positive duration of at most 24h", item.name)
+			}
+			*item.target = d
+		}
+	}
+	if n.HealthSuccesses < 1 || n.HealthSuccesses > 10000 || n.HealthStableFor >= n.HealthTimeout || time.Duration(n.HealthSuccesses-1)*n.HealthInterval >= n.HealthTimeout {
+		return n, fmt.Errorf("health_timeout must accommodate health_stable_for, health_interval and health_successes")
 	}
 	n.Routing = routerEnabled(q.Router)
 	if q.Router.Enabled != nil && *q.Router.Enabled && q.Router.Domain == "" && q.Router.Host == "" && q.Router.Rule == "" {

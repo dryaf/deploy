@@ -13,12 +13,16 @@ import (
 )
 
 type ReleasePlan struct {
-	Config    NormalizedConfig
-	Version   string
-	Commit    string
-	ReleaseID string
-	Quadlet   string
-	Steps     []string
+	Config      NormalizedConfig
+	Version     string
+	Commit      string
+	ReleaseID   string
+	Quadlet     string
+	Steps       []string
+	CheckSource bool
+	TagObject   string
+	projectLock *localLock
+	payload     *releasePayload
 }
 
 // Runner is the process/transport boundary. Planning never calls it.
@@ -34,6 +38,9 @@ func (commandRunner) Sync(e Environment, s []string, d string, a ...string) erro
 	return runRsyncSafe(e, s, d, a...)
 }
 func (commandRunner) Local(c *exec.Cmd) error { return runCommand("local command", c) }
+func (commandRunner) LocalTimeout(c *exec.Cmd, duration, grace time.Duration) error {
+	return runCommandBudget("build", c, duration, grace)
+}
 
 func planImageRelease(n NormalizedConfig, version, commit string) (ReleasePlan, error) {
 	p := ReleasePlan{Config: n, Version: version, Commit: commit}
@@ -49,6 +56,7 @@ func planImageRelease(n NormalizedConfig, version, commit string) (ReleasePlan, 
 		return p, err
 	}
 	p.Quadlet, err = renderQuadlet(n, imagePlaceholder)
+	p.Quadlet = releaseLabels(p.Quadlet, p.Commit, p.ReleaseID)
 	if err != nil {
 		return p, err
 	}
@@ -91,7 +99,12 @@ func newReleaseID(version string) (string, error) {
 func planBinaryRelease(n NormalizedConfig, version, commit string) (ReleasePlan, error) {
 	p := ReleasePlan{Config: n, Version: version, Commit: commit}
 	var err error
+	p.ReleaseID, err = newReleaseID(version)
+	if err != nil {
+		return p, err
+	}
 	p.Quadlet, err = renderQuadlet(n, "")
+	p.Quadlet = releaseLabels(p.Quadlet, p.Commit, p.ReleaseID)
 	p.Steps = []string{"Build Go binary (or build.cmd)", "Stage binary, artifacts, optional .env and Quadlet before changing the service", "Acquire service and target locks; recover pending state; snapshot managed files, Quadlet, image and activity", "Install files, build and pin remote image, daemon-reload and restart", "Verify readiness and commit; restore the exact previous image, configuration, files and activity on failure"}
 	return p, err
 }
@@ -111,6 +124,7 @@ func (p ReleasePlan) Print(w io.Writer) {
 	if n.Env.Database.Driver == "sqlite" {
 		fmt.Fprintf(w, "Database: %s; stop service and retain snapshot before startup; changed-database rollback: %s\n", n.Env.Database.Source, displayDefault(n.Env.Database.Rollback, "manual"))
 	}
+	fmt.Fprintf(w, "Readiness stability: %s, interval: %s, consecutive successes: %d\nTimeouts: connect=%s transfer=%s build=%s pull=%s database=%s service=%s recovery=%s grace=%s\n", n.HealthStableFor, n.HealthInterval, n.HealthSuccesses, n.Env.Timeouts.Connect, n.Env.Timeouts.Transfer, n.Env.Timeouts.Build, n.Env.Timeouts.Pull, n.Env.Timeouts.Database, n.Env.Timeouts.Service, n.Env.Timeouts.Recovery, n.Env.Timeouts.ShutdownGrace)
 }
 func displayDefault(s, fallback string) string {
 	if s == "" {

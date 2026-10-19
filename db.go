@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 //go:embed db_transaction.sh
@@ -23,15 +24,20 @@ sqlite3 :memory: '.help dump' | grep -q -- '--preserve-rowids' || { echo 'SQLite
 `
 
 type databaseRequest struct {
-	Schema      int            `json:"schema"`
-	ReleaseID   string         `json:"release_id"`
-	Service     string         `json:"service"`
-	Target      string         `json:"target"`
-	Mode        DeploymentMode `json:"deployment_mode"`
-	Database    string         `json:"database"`
-	UID         int            `json:"container_uid"`
-	GID         int            `json:"container_gid"`
-	Environment string         `json:"environment"`
+	Schema            int             `json:"schema"`
+	ReleaseID         string          `json:"release_id"`
+	Service           string          `json:"service"`
+	Target            string          `json:"target"`
+	Mode              DeploymentMode  `json:"deployment_mode"`
+	Database          string          `json:"database"`
+	UID               int             `json:"container_uid"`
+	GID               int             `json:"container_gid"`
+	Environment       string          `json:"environment"`
+	Timeouts          operationLimits `json:"timeouts"`
+	MinFreeBytes      int64           `json:"min_free_bytes,omitempty"`
+	MinFreeInodes     int64           `json:"min_free_inodes,omitempty"`
+	ImageReserveBytes int64           `json:"image_reserve_bytes,omitempty"`
+	UploadSHA256      string          `json:"upload_sha256,omitempty"`
 }
 
 func configureReleaseDatabase(req *imageReleaseRequest, env Environment) {
@@ -90,7 +96,14 @@ func doDBPush(envName string) {
 	logSuccess("Database pushed; service remains stopped.")
 }
 
-func sqliteSnapshot(source, destination string) error {
+func sqliteDuration(limits []time.Duration) time.Duration {
+	if len(limits) > 0 && limits[0] > 0 {
+		return limits[0]
+	}
+	return 5 * time.Minute
+}
+
+func sqliteSnapshot(source, destination string, limits ...time.Duration) error {
 	s, err := os.Lstat(source)
 	if err != nil {
 		return err
@@ -98,21 +111,24 @@ func sqliteSnapshot(source, destination string) error {
 	if !s.Mode().IsRegular() {
 		return fmt.Errorf("database source must be a regular file")
 	}
-	out, err := exec.Command("sqlite3", "-readonly", source, ".backup "+strconv.Quote(destination)).CombinedOutput()
+	out, err := boundedOutput(exec.Command("sqlite3", "-readonly", source, ".backup "+strconv.Quote(destination)), sqliteDuration(limits))
 	if err != nil {
 		return fmt.Errorf("SQLite snapshot: %w: %s", err, out)
 	}
 	if err := os.Chmod(destination, 0600); err != nil {
 		return err
 	}
-	if err := validateSQLiteSnapshot(destination); err != nil {
+	if err := validateSQLiteSnapshot(destination, limits...); err != nil {
 		return err
 	}
 	return syncFile(destination)
 }
 
-func validateSQLiteSnapshot(file string) error {
-	out, err := exec.Command("sqlite3", "-readonly", file, "PRAGMA quick_check;").CombinedOutput()
+func validateSQLiteSnapshot(file string, limits ...time.Duration) error {
+	out, err := boundedOutput(exec.Command("sqlite3", "-readonly", file, "PRAGMA quick_check;"), sqliteDuration(limits))
+	if err != nil {
+		return fmt.Errorf("SQLite integrity check: %w", err)
+	}
 	if err != nil || strings.TrimSpace(string(out)) != "ok" {
 		return fmt.Errorf("SQLite snapshot failed integrity validation: %s", out)
 	}
@@ -132,7 +148,7 @@ func filenameLabel(value string) string {
 	return value
 }
 
-func backupLocalDatabase(database, environment, operation string) (string, error) {
+func backupLocalDatabase(database, environment, operation string, limits ...time.Duration) (string, error) {
 	dir := filepath.Join(filepath.Dir(database), "backup")
 	if info, err := os.Lstat(dir); err == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
@@ -159,7 +175,7 @@ func backupLocalDatabase(database, environment, operation string) (string, error
 	}
 	temp.Close()
 	defer os.Remove(temp.Name())
-	if err := sqliteSnapshot(database, temp.Name()); err != nil {
+	if err := sqliteSnapshot(database, temp.Name(), limits...); err != nil {
 		return "", err
 	}
 	if err := os.Rename(temp.Name(), backup); err != nil {
@@ -169,6 +185,9 @@ func backupLocalDatabase(database, environment, operation string) (string, error
 		return "", err
 	}
 	if err := syncFile(filepath.Dir(dir)); err != nil {
+		return "", err
+	}
+	if err := recordLocalBackup(database, backup, environment, operation); err != nil {
 		return "", err
 	}
 	logInfo("Database backup: %s", backup)
@@ -189,7 +208,7 @@ func syncFile(file string) error {
 }
 
 func pullDatabase(env Environment) error {
-	local, remote, err := databasePaths(env)
+	local, _, err := databasePaths(env)
 	if err != nil {
 		return err
 	}
@@ -211,46 +230,32 @@ func pullDatabase(env Environment) error {
 	}
 	defer os.RemoveAll(dir)
 	download := filepath.Join(dir, "download.db")
-	f, err := os.OpenFile(download, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err := downloadRemoteSnapshot(env, download); err != nil {
+		return err
+	}
+	lock, err := acquireLocalLock("database", local)
 	if err != nil {
 		return err
 	}
-	// Fixed relative output avoids interpolating a path into SQLite's dot-command grammar.
-	sqlite := "sqlite3"
-	remoteTest := "test"
-	if env.Quadlet.ContainerUID > 0 {
-		sqlite = "podman unshare sqlite3"
-		remoteTest = "podman unshare test"
+	defer lock.Close()
+	localBytes, err := databaseDiskBytes(local)
+	if err != nil {
+		return err
 	}
-	script := "set -euo pipefail\numask 077\nsource=" + shellQuote(remote) + "\n" + remoteTest + " -f \"$source\" || { echo 'Remote database does not exist' >&2; exit 1; }\n" + `temp=$(mktemp -d)
-trap 'rm -rf -- "$temp"' EXIT
-cd -- "$temp"
-` + sqlite + " -readonly \"$source\" '.backup backup.db'\ncat -- backup.db\n"
-	cmd := exec.Command("ssh", append(getSSHBaseArgs(env), "bash -c "+shellQuote(script))...)
-	cmd.Stdout = f
-	cmd.Stderr = os.Stderr
-	runErr := cmd.Run()
-	syncErr := f.Sync()
-	closeErr := f.Close()
-	if runErr != nil {
-		return fmt.Errorf("download snapshot: %w", runErr)
+	downloadInfo, err := os.Stat(download)
+	if err != nil {
+		return err
 	}
-	if syncErr != nil {
-		return syncErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if err := validateSQLiteSnapshot(download); err != nil {
+	if err := checkLocalCapacity(local, 4*localBytes+2*downloadInfo.Size(), env.Storage); err != nil {
 		return err
 	}
 	if _, err := os.Lstat(local); err == nil {
-		backup, err := backupLocalDatabase(local, "local", "before-pull-from-"+filenameLabel(env.Name))
+		backup, err := backupLocalDatabase(local, "local", "before-pull-from-"+env.Name, budget(env.Timeouts.Database, "5m"))
 		if err != nil {
 			return err
 		}
 		// Keep the legacy latest-backup file, while retaining every unique snapshot.
-		if err := sqliteSnapshot(backup, filepath.Join(dir, "latest.db")); err != nil {
+		if err := sqliteSnapshot(backup, filepath.Join(dir, "latest.db"), budget(env.Timeouts.Database, "5m")); err != nil {
 			return err
 		}
 		if err := os.Rename(filepath.Join(dir, "latest.db"), local+".bak"); err != nil {
@@ -261,7 +266,7 @@ cd -- "$temp"
 		}
 		// SQLite's backup API publishes the replacement in a database transaction.
 		// Its journal/WAL handles process crashes; never detach sidecars by hand.
-		out, err := exec.Command("sqlite3", "-cmd", ".timeout 5000", local, ".restore "+strconv.Quote(download)).CombinedOutput()
+		out, err := boundedOutput(exec.Command("sqlite3", "-cmd", ".timeout 5000", local, ".restore "+strconv.Quote(download)), budget(env.Timeouts.Database, "5m"))
 		if err != nil {
 			return fmt.Errorf("restore downloaded snapshot: %w: %s", err, out)
 		}
@@ -283,6 +288,50 @@ cd -- "$temp"
 	return syncFile(filepath.Dir(local))
 }
 
+func downloadRemoteSnapshot(env Environment, destination string) error {
+	_, remote, err := databasePaths(env)
+	if err != nil {
+		return err
+	}
+	if err := prepareSSHControlDir(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	// Fixed relative output avoids interpolating a path into SQLite's dot-command grammar.
+	sqlite := "sqlite3"
+	remoteTest := "test"
+	if env.Quadlet.ContainerUID > 0 {
+		sqlite = "podman unshare sqlite3"
+		remoteTest = "podman unshare test"
+	}
+	script := remoteOperationGuard(env) + "\nsource=" + shellQuote(remote) + "\n" + remoteTest + " -f \"$source\" || { echo 'Remote database does not exist' >&2; exit 1; }\n" + `temp=$(mktemp -d)
+trap 'rm -rf -- "$temp"' EXIT
+cd -- "$temp"
+` + sqlite + " -readonly \"$source\" '.backup backup.db'\ncat -- backup.db\n"
+	cmd := exec.Command("ssh", append(getSSHBaseArgs(env), "bash -c "+shellQuote(script))...)
+	cmd.Stdout = f
+	cmd.Stderr = os.Stderr
+	runErr := runBounded(cmd, sshBudget(env), budget(env.Timeouts.ShutdownGrace, "10s"))
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if runErr != nil {
+		return fmt.Errorf("destination snapshot: %w", runErr)
+	}
+	if syncErr != nil {
+		return syncErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := validateSQLiteSnapshot(destination, budget(env.Timeouts.Database, "5m")); err != nil {
+		return err
+	}
+	return nil
+}
+
 func pushDatabase(env Environment, mode DeploymentMode, runner ReleaseRunner) error {
 	local, remote, err := databasePaths(env)
 	if err != nil {
@@ -297,7 +346,7 @@ func pushDatabase(env Environment, mode DeploymentMode, runner ReleaseRunner) er
 	}
 	defer os.RemoveAll(temp)
 	snapshot := filepath.Join(temp, "upload.db")
-	if err := sqliteSnapshot(local, snapshot); err != nil {
+	if err := sqliteSnapshot(local, snapshot, budget(env.Timeouts.Database, "5m")); err != nil {
 		return err
 	}
 	id, err := newReleaseID("database")
@@ -308,6 +357,12 @@ func pushDatabase(env Environment, mode DeploymentMode, runner ReleaseRunner) er
 		mode = ModeBinary
 	}
 	req := databaseRequest{Schema: 1, ReleaseID: id, Service: env.Quadlet.ServiceName, Target: env.Dir, Mode: mode, Database: remote, UID: env.Quadlet.ContainerUID, GID: env.Quadlet.ContainerGID, Environment: env.Name}
+	req.Timeouts = limitsFor(env)
+	req.MinFreeBytes, req.MinFreeInodes, req.ImageReserveBytes = env.Storage.MinFreeBytes, env.Storage.MinFreeInodes, env.Storage.ImageReserveBytes
+	req.UploadSHA256, err = fileChecksum(snapshot)
+	if err != nil {
+		return err
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return err

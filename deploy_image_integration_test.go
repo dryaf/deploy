@@ -9,13 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// This runner deliberately has no SSH capability: the integration suite runs only
-// inside an explicitly selected disposable Linux account/VM. It never reads deploy.yaml.
+// SSH transport is enabled only by the disposable harness's generated connection
+// settings. Manual isolated runs can retain the fast local transport.
 type integrationRunner struct{}
 
 type integrationBinaryRunner struct{ integrationRunner }
@@ -38,7 +39,23 @@ func TestBinaryHelperServer(t *testing.T) {
 	}
 }
 
-func (integrationRunner) SSH(_ Environment, script string) (string, error) {
+func integrationSSHEnvironment(e Environment) (Environment, bool) {
+	port := os.Getenv("DEPLOY_TEST_SSH_PORT")
+	if port == "" {
+		return e, false
+	}
+	e.Host = "127.0.0.1"
+	e.User = "podman"
+	e.Port, _ = strconv.Atoi(port)
+	e.SSHKey = os.Getenv("DEPLOY_TEST_SSH_KEY")
+	e.KnownHostsFile = os.Getenv("DEPLOY_TEST_SSH_KNOWN_HOSTS")
+	return e, true
+}
+
+func (integrationRunner) SSH(e Environment, script string) (string, error) {
+	if transport, enabled := integrationSSHEnvironment(e); enabled {
+		return runSSHOutput(transport, "export XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\n"+script)
+	}
 	cmd := exec.Command("bash", "-c", script)
 	var out, errs bytes.Buffer
 	cmd.Stdout = &out
@@ -49,10 +66,13 @@ func (integrationRunner) SSH(_ Environment, script string) (string, error) {
 	}
 	return out.String(), nil
 }
-func (integrationRunner) Sync(_ Environment, sources []string, dest string, args ...string) error {
+func (integrationRunner) Sync(e Environment, sources []string, dest string, args ...string) error {
 	_, local, ok := strings.Cut(dest, ":")
 	if !ok {
 		return fmt.Errorf("invalid test destination")
+	}
+	if transport, enabled := integrationSSHEnvironment(e); enabled {
+		return runRsyncSafe(transport, sources, remoteDestination(transport, local), args...)
 	}
 	a := append([]string{"-a"}, args...)
 	a = append(a, "--")
@@ -77,6 +97,14 @@ func TestRootlessImageDeploymentIntegration(t *testing.T) {
 		t.Fatal("DEPLOY_TEST_GOTENBERG_IMAGE must be a verified Chromium image pinned by digest")
 	}
 	r := integrationRunner{}
+	if os.Getenv("DEPLOY_TEST_REQUIRE_SSH") == "1" {
+		if _, enabled := integrationSSHEnvironment(Environment{}); !enabled {
+			t.Fatal("release gate requires real SSH transport")
+		}
+		if _, err := r.SSH(Environment{}, "exit 42"); err == nil {
+			t.Fatal("SSH lost remote exit status")
+		}
+	}
 	if _, err := r.SSH(Environment{}, imageRemotePreflight); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +199,13 @@ func TestRootlessImageDeploymentIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	changeEnv(&c, func(e *Environment) { e.Quadlet.HealthCmd = "false"; e.Quadlet.HealthTimeout = "2s" })
+	changeEnv(&c, func(e *Environment) {
+		e.Quadlet.HealthCmd = "false"
+		e.Quadlet.HealthTimeout = "2s"
+		e.Quadlet.HealthStableFor = "100ms"
+		e.Quadlet.HealthInterval = "20ms"
+		e.Quadlet.HealthSuccesses = 2
+	})
 	if _, err := deploy(c); err == nil {
 		t.Fatal("unhealthy rollout unexpectedly succeeded")
 	}
@@ -179,7 +213,11 @@ func TestRootlessImageDeploymentIntegration(t *testing.T) {
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("commit changed after failed rollout: %v", err)
 	}
-	if _, err := r.SSH(Environment{}, "podman image prune -f"); err != nil {
+	if connection, realSSH := integrationSSHEnvironment(Environment{}); realSSH {
+		if err := pruneImages(connection); err != nil {
+			t.Fatal(err)
+		}
+	} else if _, err := r.SSH(Environment{}, transactionCommonScript+"\nstore_lock -x\npodman image prune -f\npodman image prune --build-cache -f\n"); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []ReleasePlan{first, second} {
@@ -307,7 +345,13 @@ func TestRootlessImageDeploymentIntegration(t *testing.T) {
 		if err := os.WriteFile(".env.prod", []byte("DEPLOY_TEST_VERSION=new\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		changeEnv(&c, func(e *Environment) { e.Quadlet.HealthCmd = "false"; e.Quadlet.HealthTimeout = "2s" })
+		changeEnv(&c, func(e *Environment) {
+			e.Quadlet.HealthCmd = "false"
+			e.Quadlet.HealthTimeout = "2s"
+			e.Quadlet.HealthStableFor = "100ms"
+			e.Quadlet.HealthInterval = "20ms"
+			e.Quadlet.HealthSuccesses = 2
+		})
 		if err := deployBinary(); err == nil {
 			t.Fatal("unhealthy binary release succeeded")
 		}

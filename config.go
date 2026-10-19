@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 )
@@ -66,16 +69,19 @@ type ArtifactsConfig struct {
 }
 
 type Environment struct {
-	Name        string            `yaml:"-"`
-	Host        string            `yaml:"host"`
-	User        string            `yaml:"user"`
-	Port        int               `yaml:"ssh_port"`
-	SSHKey      string            `yaml:"ssh_key"`
-	Dir         string            `yaml:"target_dir"`
-	SyncEnvFile string            `yaml:"sync_env_file"`
-	Quadlet     Quadlet           `yaml:"quadlet"`
-	Maintenance MaintenanceConfig `yaml:"maintenance"` // Env Override
-	Database    DatabaseConfig    `yaml:"database"`
+	Name           string            `yaml:"-"`
+	Host           string            `yaml:"host"`
+	User           string            `yaml:"user"`
+	Port           int               `yaml:"ssh_port"`
+	SSHKey         string            `yaml:"ssh_key"`
+	KnownHostsFile string            `yaml:"ssh_known_hosts"`
+	Dir            string            `yaml:"target_dir"`
+	SyncEnvFile    string            `yaml:"sync_env_file"`
+	Quadlet        Quadlet           `yaml:"quadlet"`
+	Maintenance    MaintenanceConfig `yaml:"maintenance"` // Env Override
+	Database       DatabaseConfig    `yaml:"database"`
+	Timeouts       TimeoutConfig     `yaml:"timeouts"`
+	Storage        StorageConfig     `yaml:"storage"`
 	// Traefik config removed from here, now in ServerConfig
 }
 
@@ -86,9 +92,11 @@ type MaintenanceConfig struct {
 }
 
 type DatabaseConfig struct {
-	Driver   string `yaml:"driver"`
-	Source   string `yaml:"source"`
-	Rollback string `yaml:"rollback"` // manual (default), or restore with possible loss of candidate writes
+	Driver    string          `yaml:"driver"`
+	Source    string          `yaml:"source"`
+	Rollback  string          `yaml:"rollback"` // manual (default), or restore with possible loss of candidate writes
+	Retention RetentionConfig `yaml:"retention"`
+	OffHost   OffHostConfig   `yaml:"off_host"`
 }
 
 type TraefikConfig struct {
@@ -128,29 +136,33 @@ type RateLimitConfig struct {
 }
 
 type Quadlet struct {
-	ServiceName    string       `yaml:"service_name"`
-	Description    string       `yaml:"description"`
-	Image          string       `yaml:"image"`
-	Network        string       `yaml:"network"`
-	NetworkAliases []string     `yaml:"network_aliases"`
-	EnvFile        *string      `yaml:"env_file"`
-	Labels         []string     `yaml:"labels"`
-	Router         RouterConfig `yaml:"router"`
-	Volumes        []string     `yaml:"volumes"`
-	EnvVars        []string     `yaml:"env_vars"`
-	Ports          []string     `yaml:"ports"`
-	AutoRestart    bool         `yaml:"auto_restart"`
-	StopOnDeploy   bool         `yaml:"stop_on_deploy"`
-	Timezone       string       `yaml:"timezone"`
-	Memory         string       `yaml:"memory"`
-	CPU            string       `yaml:"cpu"`
-	ReadOnly       bool         `yaml:"read_only"`
-	HealthCmd      string       `yaml:"health_cmd"`
-	HealthURL      string       `yaml:"health_url"`
-	HealthTimeout  string       `yaml:"health_timeout"`
-	PodmanArgs     []string     `yaml:"podman_args"`
-	Exec           string       `yaml:"exec"`
-	Dockerfile     string       `yaml:"dockerfile"`
+	ServiceName     string       `yaml:"service_name"`
+	Description     string       `yaml:"description"`
+	Image           string       `yaml:"image"`
+	Network         string       `yaml:"network"`
+	NetworkAliases  []string     `yaml:"network_aliases"`
+	EnvFile         *string      `yaml:"env_file"`
+	Labels          []string     `yaml:"labels"`
+	Router          RouterConfig `yaml:"router"`
+	Volumes         []string     `yaml:"volumes"`
+	EnvVars         []string     `yaml:"env_vars"`
+	Ports           []string     `yaml:"ports"`
+	AutoRestart     bool         `yaml:"auto_restart"`
+	StopOnDeploy    bool         `yaml:"stop_on_deploy"`
+	Timezone        string       `yaml:"timezone"`
+	Memory          string       `yaml:"memory"`
+	CPU             string       `yaml:"cpu"`
+	ReadOnly        bool         `yaml:"read_only"`
+	HealthCmd       string       `yaml:"health_cmd"`
+	HealthURL       string       `yaml:"health_url"`
+	HealthTimeout   string       `yaml:"health_timeout"`
+	HealthRequired  bool         `yaml:"health_required"`
+	HealthStableFor string       `yaml:"health_stable_for"`
+	HealthInterval  string       `yaml:"health_interval"`
+	HealthSuccesses int          `yaml:"health_successes"`
+	PodmanArgs      []string     `yaml:"podman_args"`
+	Exec            string       `yaml:"exec"`
+	Dockerfile      string       `yaml:"dockerfile"`
 
 	ContainerUID int      `yaml:"container_uid"`
 	ContainerGID int      `yaml:"container_gid"`
@@ -172,8 +184,8 @@ func readConfig(file string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("parse config: %w", err)
+	if err := decodeConfig(file, data, &cfg); err != nil {
+		return cfg, err
 	}
 	return cfg, nil
 }
@@ -186,13 +198,21 @@ func loadConfig() Config {
 }
 
 func loadServerConfig() ServerConfig {
-	data, err := os.ReadFile("server.yaml")
+	cfg, err := readServerConfig("server.yaml")
 	if err != nil {
-		logFatal("Read error (server.yaml): %v", err)
+		logFatal("Config: %v", err)
 	}
+	return cfg
+}
+
+func readServerConfig(file string) (ServerConfig, error) {
 	var cfg ServerConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		logFatal("Parse error (server.yaml): %v", err)
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return cfg, err
+	}
+	if err := decodeConfig(file, data, &cfg); err != nil {
+		return cfg, err
 	}
 	// Defaults
 	if cfg.SSHPort == 0 {
@@ -201,7 +221,78 @@ func loadServerConfig() ServerConfig {
 	if cfg.User == "" {
 		cfg.User = "root"
 	}
-	return cfg
+	if !hostPattern.MatchString(cfg.Host) || !userPattern.MatchString(cfg.User) || cfg.SSHPort < 1 || cfg.SSHPort > 65535 {
+		return cfg, fmt.Errorf("%s: invalid SSH host, user or port", file)
+	}
+	return cfg, nil
+}
+
+// A second decode is required: Decoder.Decode otherwise accepts trailing YAML.
+var yamlTypeValuePattern = regexp.MustCompile(`(?s)cannot unmarshal .* into`)
+
+func decodeConfig(file string, data []byte, destination any) error {
+	var document yaml.Node
+	check := yaml.NewDecoder(bytes.NewReader(data))
+	if err := check.Decode(&document); err != nil {
+		return fmt.Errorf("%s: %w", file, err)
+	}
+	if len(document.Content) == 0 || document.Content[0].Tag == "!!null" {
+		return fmt.Errorf("%s: configuration must be a nonempty mapping", file)
+	}
+	if document.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("%s: configuration must be a mapping", file)
+	}
+	var extra yaml.Node
+	if err := check.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("%s: expected exactly one YAML document", file)
+	}
+	if _, ok := destination.(*Config); ok {
+		root := document.Content[0]
+		for i := 0; i < len(root.Content); i += 2 {
+			if root.Content[i].Value != "environments" {
+				continue
+			}
+			envs := root.Content[i+1]
+			for j := 0; j+1 < len(envs.Content); j += 2 {
+				env := envs.Content[j+1]
+				for k := 0; k+1 < len(env.Content); k += 2 {
+					if env.Content[k].Value == "traefik" {
+						return fmt.Errorf("%s: line %d: environments.%s.traefik was previously ignored; move infrastructure settings to server.yaml stack.traefik and application network/router settings to quadlet", file, env.Content[k].Line, envs.Content[j].Value)
+					}
+				}
+			}
+		}
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(destination); err != nil {
+		if typed, ok := err.(*yaml.TypeError); ok {
+			redacted := make([]string, len(typed.Errors))
+			for i, message := range typed.Errors {
+				redacted[i] = yamlTypeValuePattern.ReplaceAllString(message, "value has incompatible type for")
+			}
+			err = &yaml.TypeError{Errors: redacted}
+		}
+		return fmt.Errorf("%s: %w", file, err)
+	}
+	return nil
+}
+
+func validateConfiguration(env string, server bool) error {
+	if server {
+		_, err := readServerConfig("server.yaml")
+		return err
+	}
+	cfg, err := readConfig("deploy.yaml")
+	if err != nil {
+		return err
+	}
+	n, err := normalizeAndValidateConfig(cfg, env)
+	if err != nil {
+		return err
+	}
+	_, err = renderQuadlet(n, "")
+	return err
 }
 
 func loadEnv(envName string) (Config, Environment) {

@@ -3,6 +3,65 @@
 set -Eeuo pipefail
 umask 077
 
+phase_build_seconds=900 phase_pull_seconds=900 phase_database_seconds=300 phase_service_seconds=60 recovery_seconds=300 shutdown_grace=10
+configure_timeouts() {
+ local limits file=${1:-${request:-}}
+ limits=$(jq -er '[.timeouts.build // 900, .timeouts.pull // 900, .timeouts.database // 300, .timeouts.service // 60, .timeouts.recovery // 300, .timeouts.grace // 10] | if all(.[]; type == "number" and . > 0 and . <= 86400) then @tsv else error("Invalid timeout budget") end' "$file") || return
+ IFS=$'\t' read -r phase_build_seconds phase_pull_seconds phase_database_seconds phase_service_seconds recovery_seconds shutdown_grace <<< "$limits"
+}
+run_phase() {
+ local seconds=$1; shift
+ if [[ ${recovery_scope:-false} == true ]]; then timeout --foreground -k "$shutdown_grace" "$seconds" "$@"
+ else timeout -k "$shutdown_grace" "$seconds" "$@"; fi
+}
+podman() {
+ local seconds=$phase_service_seconds
+ case ${1:-} in build) seconds=$phase_build_seconds;; pull) seconds=$phase_pull_seconds;; unshare) seconds=$phase_database_seconds;; esac
+ if [[ ${1:-} == image && ${2:-} == prune ]]; then seconds=$phase_build_seconds; fi
+ run_phase "$seconds" podman "$@"
+}
+systemctl() { run_phase "$phase_service_seconds" systemctl "$@"; }
+sqlite3() { run_phase "$phase_database_seconds" sqlite3 "$@"; }
+
+# Each background job gets its own process group. Recovery keeps the parent's
+# locks but has a fresh watchdog, independent of a failed forward phase.
+bounded_recovery() {
+ local worker watchdog worker_start status=0
+ set -m
+ ( trap - EXIT HUP INT TERM; recovery_scope=true; "$@" ) & worker=$!
+ worker_start=$(awk '{print $22}' "/proc/$worker/stat" 2>/dev/null) || worker_start=''
+ (
+  trap - EXIT HUP INT TERM
+  exec 7>&- 8>&- 9>&-
+  [[ -n $worker_start ]] || exit 0
+  start_ms=$(awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime)
+  limit_ms=$(awk -v seconds="$recovery_seconds" 'BEGIN {printf "%.0f\n", seconds * 1000}')
+  while true; do
+   read -r worker_state current_start < <(awk '{print $3, $22}' "/proc/$worker/stat" 2>/dev/null) || exit 0
+   [[ $current_start == "$worker_start" && $worker_state != Z ]] || exit 0
+   now_ms=$(awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime)
+   (( now_ms - start_ms < limit_ms )) || break
+   sleep .05
+  done
+  kill -TERM -- "-$worker" 2>/dev/null || exit 0
+  sleep "$shutdown_grace"
+  kill -KILL -- "-$worker" 2>/dev/null || true
+ ) </dev/null >/dev/null 2>&1 & watchdog=$!
+ wait "$worker" || status=$?
+ # The worker can exit on TERM while a child ignores it. Finish that group
+ # before cancelling its watchdog or releasing any of the parent's locks.
+ if kill -0 -- "-$worker" 2>/dev/null; then
+  kill -TERM -- "-$worker" 2>/dev/null || true
+  sleep "$shutdown_grace"
+  kill -KILL -- "-$worker" 2>/dev/null || true
+ fi
+ kill -TERM -- "-$watchdog" 2>/dev/null || true
+ wait "$watchdog" 2>/dev/null || true
+ set +m
+ if (( status >= 128 )); then echo 'Recovery interrupted or deadline exceeded; pending state retained' >&2; fi
+ return "$status"
+}
+
 canonical_id() {
  local value=$1
  [[ $value == sha256:* ]] || value="sha256:$value"
@@ -12,19 +71,35 @@ canonical_id() {
 
 # Called in its own timeout process group so every probe shares the same deadline.
 if [[ ${1:-} == health ]]; then
- service=$2 expected=$3 command_check=$4 url=$5
+ service=$2 expected=$3 command_check=$4 url=$5 stable_ms=${6:-0} interval=${7:-0.2} minimum=${8:-1}
+ started=0 successes=0 previous='' last_reason=''
  while true; do
+  reason='service activity'
   if timeout --foreground -s KILL 5 systemctl --user is-active --quiet "$service.service"; then
    actual=$(timeout --foreground -s KILL 5 podman container inspect --format '{{.Image}}' "systemd-$service" 2>/dev/null) || actual=''
    actual=$(canonical_id "$actual") || actual=''
+   reason='image identity'
    if [[ -z $expected || $actual == "$expected" ]]; then
-    ready=true
-    if [[ $command_check == true ]]; then timeout --foreground -s KILL 5 podman healthcheck run "systemd-$service" >/dev/null 2>&1 || ready=false; fi
-    if [[ -n $url ]]; then timeout --foreground -s KILL 5 curl --fail --silent --show-error --max-time 5 -- "$url" >/dev/null 2>&1 || ready=false; fi
-    if $ready; then exit 0; fi
-   fi
-  fi
-  sleep 0.2
+    identity=$(timeout --foreground -s KILL 5 podman container inspect --format '{{.Id}} {{.RestartCount}}' "systemd-$service" 2>/dev/null) || identity=''
+    reason='container identity'
+    if [[ -n $identity ]]; then
+     if [[ $identity != "$previous" ]]; then started=0; successes=0; fi
+     previous=$identity
+     ready=true
+     if [[ $command_check == true ]]; then timeout --foreground -s KILL 5 podman healthcheck run "systemd-$service" >/dev/null 2>&1 || { ready=false; reason='application command'; }; fi
+     if [[ -n $url ]]; then timeout --foreground -s KILL 5 curl --fail --silent --show-error --max-time 5 -- "$url" >/dev/null 2>&1 || { ready=false; reason='application URL'; }; fi
+     if $ready; then
+      now=$(awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime)
+      (( successes += 1 ))
+      if (( started == 0 )); then started=$now; fi
+      if (( successes >= minimum && now - started >= stable_ms )); then exit 0; fi
+      reason='stability interval'
+     else started=0; successes=0; fi
+    else started=0; successes=0; fi
+   else started=0; successes=0; fi
+  else started=0; successes=0; fi
+  if [[ $reason != "$last_reason" ]]; then echo "Waiting for readiness: $reason" >&2; last_reason=$reason; fi
+  sleep "$interval"
  done
 fi
 
@@ -70,23 +145,10 @@ sync_image_store() {
  [[ $storage == /* && -d $storage ]] || { fail 'Cannot flush Podman image storage'; return 1; }
  sync -f -- "$storage"
 }
-init_transaction() {
- deployment_mode=$1
- stage=$2
- script=$(realpath -- "$0") || return
- request="$stage/request.json"
- [[ -f $request && ! -L $request ]] || { fail 'Missing release request'; return 1; }
- jq -e '.schema == 1' "$request" >/dev/null || return
- service=$(jq -er .service "$request") || return
- target=$(jq -er .target "$request") || return
- id=$(jq -er .release_id "$request") || return
- [[ $service =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ && $service != *..* ]] || return 1
- [[ $id =~ ^[a-zA-Z0-9_-]+$ ]] || return 1
- [[ $target == /* && $target != / ]] || return 1
+acquire_scope_locks() {
+ [[ $service =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ && $service != *..* ]] || { fail 'Invalid service name'; return 1; }
+ [[ $target == /* && $target != / ]] || { fail 'Invalid target directory'; return 1; }
  check_path "$target" || return
- units="${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
- check_path "$units" || return
- unit="$units/$service.container"
  key=$(printf '%s' "$service" | sha256sum | cut -d' ' -f1) || return
  target_key=$(printf '%s' "$target" | sha256sum | cut -d' ' -f1) || return
  locks="$HOME/.local/state/deploy/locks"
@@ -102,6 +164,62 @@ init_transaction() {
  target_owner="$locks/target-$target_key.owner.json"
  check_path "$owner" || return
  check_path "$target_owner" || return
+}
+
+# Read/administrative operations inspect state under the same locks without replaying
+# a deployment. In particular a database pull never changes the source service.
+guard_operation() {
+ acquire_scope_locks || return
+ local record mode file
+ for record in "$owner" "$target_owner"; do
+  if [[ -f $record ]]; then
+   jq -e --arg service "$service" --arg target "$target" '.schema == 1 and .service == $service and .target == $target' "$record" >/dev/null || { fail 'Service or target belongs to another deployment'; return 1; }
+  fi
+ done
+ for mode in image binary db; do
+  for file in pending.json boot-pending.json; do
+   check_path "$target/.deploy/$mode/$file" || return
+   [[ ! -e $target/.deploy/$mode/$file ]] || { fail "Recover pending state before this operation: $target/.deploy/$mode/$file"; return 1; }
+  done
+ done
+}
+
+store_lock() {
+ local mode=$1 storage store_key
+ storage=$(podman info --format '{{.Store.GraphRoot}}') || return
+ [[ $storage == /* && -d $storage ]] || { fail 'Cannot locate Podman storage'; return 1; }
+ store_key=$(printf '%s' "$storage" | sha256sum | cut -d' ' -f1) || return
+ locks="$HOME/.local/state/deploy/locks"
+ make_dir "$locks" || return
+ chmod 700 "$locks" || return
+ check_path "$locks/store-$store_key.lock" || return
+ exec 7>"$locks/store-$store_key.lock"
+ flock -n "$mode" 7 || { fail 'Podman storage is busy; retry after the current operation'; return 1; }
+}
+
+init_transaction() {
+ deployment_mode=$1
+ stage=$2
+ script=$(realpath -- "$0") || return
+ request="$stage/request.json"
+ [[ -f $request && ! -L $request ]] || { fail 'Missing release request'; return 1; }
+ jq -e '.schema == 1' "$request" >/dev/null || return
+ configure_timeouts || return
+ if [[ $(jq -r '.payload_checksums // false' "$request") == true ]]; then
+  [[ -f $stage/payload.sha256 && ! -L $stage/payload.sha256 ]] || { fail 'Missing payload checksums'; return 1; }
+  ( cd -- "$stage" && sha256sum --check --quiet --strict payload.sha256 ) || { fail 'Uploaded release payload checksum mismatch'; return 1; }
+ fi
+ service=$(jq -er .service "$request") || return
+ target=$(jq -er .target "$request") || return
+ id=$(jq -er .release_id "$request") || return
+ [[ $service =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$ && $service != *..* ]] || return 1
+ [[ $id =~ ^[a-zA-Z0-9_-]+$ ]] || return 1
+ [[ $target == /* && $target != / ]] || return 1
+ check_path "$target" || return
+ units="${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
+ check_path "$units" || return
+ unit="$units/$service.container"
+ acquire_scope_locks || return
  if [[ -f $owner ]]; then
   jq -e --arg service "$service" --arg target "$target" '.schema == 1 and .service == $service and .target == $target' "$owner" >/dev/null || { fail 'This service belongs to another target_dir; recover it using its original project configuration'; return 1; }
   jq -e --arg mode "$deployment_mode" '(.mode // "image") == $mode' "$owner" >/dev/null || { fail 'Changing deployment mode requires an explicit migration'; return 1; }
@@ -120,16 +238,52 @@ init_transaction() {
  # Older installations have no target owner record. Validate their identity before
  # recovery so another service can never restore somebody else's snapshot.
  if [[ -f $current ]]; then
-  jq -e --arg service "$service" --arg target "$target" '.service == $service and .target == $target' "$current" >/dev/null || { fail 'target_dir contains another service deployment'; return 1; }
+  jq -e --arg service "$service" --arg target "$target" '.schema == 1 and .service == $service and .target == $target' "$current" >/dev/null || { fail 'target_dir contains another service deployment'; return 1; }
  fi
  if [[ -f $pending ]]; then
   local pending_id
   pending_id=$(jq -er .release_id "$pending") || return
   [[ $pending_id =~ ^[a-zA-Z0-9_-]+$ ]] || return 1
   check_path "$state/releases/$pending_id/manifest.json" || return
-  jq -e --arg service "$service" --arg target "$target" '.service == $service and .target == $target' "$state/releases/$pending_id/manifest.json" >/dev/null || { fail 'Pending deployment belongs to another service'; return 1; }
+  jq -e --arg service "$service" --arg target "$target" '.schema == 1 and .service == $service and .target == $target' "$state/releases/$pending_id/manifest.json" >/dev/null || { fail 'Pending deployment belongs to another service'; return 1; }
  fi
+ authorize_activation || return
 }
+
+# A new boot never trusts a stale activation lease. During a live transaction the
+# rootless user's unit can start only while that exact process still owns its lock.
+authorize_activation() {
+ local boot_id start_ticks transaction_pid=$BASHPID gate="$state/activation-check.sh"
+ boot_id=$(cat /proc/sys/kernel/random/boot_id) || return
+ start_ticks=$(awk '{print $22}' "/proc/$transaction_pid/stat") || return
+ jq -n --arg boot "$boot_id" --argjson pid "$transaction_pid" --arg ticks "$start_ticks" --arg lock "$locks/$key.lock" '{schema:1,boot_id:$boot,pid:$pid,start_ticks:$ticks,lock:$lock}' | atomic_json "$state/activation-lease.json" || return
+ check_path "$gate.tmp" || return
+ cat > "$gate.tmp" <<'ACTIVATION_GATE'
+#!/usr/bin/env bash
+set -euo pipefail
+state=$(dirname -- "$0")
+target=$(dirname -- "$(dirname -- "$state")")
+if [[ ! -e $state/pending.json && ! -e $state/boot-pending.json && ! -e $target/.deploy/db/pending.json ]]; then exit 0; fi
+refuse() { echo 'Pending deployment requires recovery before startup; run deploy start with the original configuration' >&2; exit 1; }
+[[ -f $state/activation-lease.json && ! -L $state/activation-lease.json ]] || refuse
+lease=$(cat -- "$state/activation-lease.json")
+boot=$(jq -er .boot_id <<< "$lease")
+[[ $boot == "$(cat /proc/sys/kernel/random/boot_id)" ]] || refuse
+pid=$(jq -er .pid <<< "$lease")
+[[ $pid =~ ^[0-9]+$ ]] || refuse
+ticks=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null) || refuse
+[[ $ticks == "$(jq -er .start_ticks <<< "$lease")" ]] || refuse
+lock=$(jq -er .lock <<< "$lease")
+[[ -f $lock && ! -L $lock ]] || refuse
+if flock -n -E 73 "$lock" true; then refuse
+else [[ $? == 73 ]] || refuse; fi
+ACTIVATION_GATE
+ chmod 700 "$gate.tmp" || return
+ durable_move "$gate.tmp" "$gate"
+}
+
+# Disposable integration tests replace this no-op in their staged copy.
+phase_checkpoint() { :; }
 
 # Database updates share deployment locks. Recovery leaves the service stopped,
 # matching the mandatory precondition for publishing a database replacement.
@@ -183,8 +337,56 @@ retain_database_backup() {
  db_fileop "$uid" sync -f -- "$temporary" || return
  db_fileop "$uid" mv -fT -- "$temporary" "$database_backup" || return
  db_fileop "$uid" sync -f -- "$directory" || return
+ local metadata="$snapshot.retention.json" checksum
+ checksum=$(sha256sum -- "$database_backup" 2>/dev/null | cut -d' ' -f1) || checksum=$(db_fileop "$uid" sha256sum -- "$database_backup" | cut -d' ' -f1) || return
+ jq -n --arg database "$database" --arg snapshot "${database_backup##*/}" --arg environment "$4" --arg operation "$operation" --arg checksum "$checksum" --arg timestamp "$(date -u +%FT%TZ)" '{schema:1,database:$database,snapshot:$snapshot,environment:$environment,operation:$operation,sha256:$checksum,created_at:$timestamp}' | atomic_json "$metadata" || return
+ db_check_path "$uid" "$database_backup.meta.json" || return
+ db_check_path "$uid" "$database_backup.meta.json.tmp" || return
+ db_fileop "$uid" cp -- "$metadata" "$database_backup.meta.json.tmp" || return
+ db_fileop "$uid" chmod 600 -- "$database_backup.meta.json.tmp" || return
+ db_fileop "$uid" sync -f -- "$database_backup.meta.json.tmp" || return
+ db_fileop "$uid" mv -fT -- "$database_backup.meta.json.tmp" "$database_backup.meta.json" || return
+ db_fileop "$uid" sync -f -- "$directory" || return
  echo "Database backup: $database_backup" >&2
 }
+check_capacity() {
+ local path=$1 required=$2 inodes=$3 available block free_files total_files
+ while [[ ! -d $path ]]; do [[ $path != / ]] || break; path=$(dirname -- "$path") || return; done
+ read -r available block free_files total_files < <(stat -f -c '%a %S %d %c' -- "$path")
+ [[ $available =~ ^[0-9]+$ && $block =~ ^[0-9]+$ && $free_files =~ ^[0-9]+$ ]] || { fail 'Cannot determine disk capacity'; return 1; }
+ (( available * block >= required )) || { fail "Insufficient disk space before activation: $path"; return 1; }
+ (( total_files == 0 || free_files >= inodes )) || { fail "Insufficient free inodes before activation: $path"; return 1; }
+}
+check_release_capacity() {
+ local reserve inodes image_reserve bytes=0 database uid staged storage amount file
+ reserve=$(jq -r '.min_free_bytes // 67108864' "$request") || return
+ inodes=$(jq -r '.min_free_inodes // 1024' "$request") || return
+ image_reserve=$(jq -r '.image_reserve_bytes // 268435456' "$request") || return
+ for amount in "$reserve" "$inodes" "$image_reserve"; do [[ $amount =~ ^[0-9]+$ && ${#amount} -le 15 ]] || { fail 'Invalid capacity requirement'; return 1; }; done
+ staged=$(du -sb -- "$stage" | cut -f1) || return
+ bytes=$(( staged * 3 + reserve + image_reserve ))
+ database=$(jq -r '.database // ""' "$request") || return
+ uid=$(jq -r '.container_uid // 0' "$request") || return
+ if [[ -n $database ]]; then
+  validate_database_path "$database" || return
+  db_check_path "$uid" "$database" || return
+  for file in "$database" "$database-wal" "$database-journal"; do
+   if db_fileop "$uid" test -e "$file"; then
+    amount=$(db_fileop "$uid" stat -c %s -- "$file") || return
+    [[ $amount =~ ^[0-9]+$ && ${#amount} -le 15 ]] || return 1
+    bytes=$(( bytes + amount * 6 ))
+   fi
+  done
+ fi
+ check_capacity "$target" "$bytes" "$inodes" || return
+ if [[ -n $database ]]; then
+  # Namespace-mapped database paths can be inaccessible to the SSH host UID.
+  db_fileop "$uid" bash -c "$(declare -f fail check_capacity); check_capacity \"\$1\" \"\$2\" \"\$3\"" -- "$(dirname -- "$database")" "$bytes" "$inodes" || return
+ fi
+ storage=$(podman info --format '{{.Store.GraphRoot}}') || return
+ check_capacity "$storage" "$bytes" "$inodes"
+}
+
 prepare_release_database() {
  local database uid environment existed=false old_mode=600 old_owner='' checksum='' backup=''
  database=$(jq -r '.database // ""' "$request") || return
@@ -210,10 +412,11 @@ prepare_release_database() {
   retain_database_backup "$database" "$uid" "$before/database.db" "$environment" before-release || return
   backup=$database_backup
  fi
- jq --argjson existed "$existed" --arg checksum "$checksum" --arg mode "$old_mode" --arg owner "$old_owner" --arg backup "$backup" '. + {existed:$existed,sha256:$checksum,old_mode:$mode,old_owner:$owner,backup:$backup}' "$request" | atomic_json "$before/database.json"
+ jq --argjson existed "$existed" --arg checksum "$checksum" --arg mode "$old_mode" --arg owner "$old_owner" --arg backup "$backup" '. + {existed:$existed,sha256:$checksum,old_mode:$mode,old_owner:$owner,backup:$backup}' "$request" | atomic_json "$before/database.json" || return
+ phase_checkpoint database-snapshot
 }
 restore_release_database() {
- local release=$1 metadata="$1/before/database.json" database uid existed unchanged=false saved checksum temporary environment old_contents new_contents
+ local release=$1 metadata="$1/before/database.json" database uid existed unchanged=false saved checksum temporary environment old_contents new_contents candidate_backup=''
  [[ -f $release/database-started.json ]] || return 0
  [[ -f $metadata ]] || { fail 'Missing pre-release database snapshot'; return 1; }
  database=$(jq -er .database "$metadata") || return
@@ -248,10 +451,12 @@ restore_release_database() {
    sqlite_snapshot "$uid" "$database" "$release/after-database.db" || return
    environment=$(jq -r '.environment // "unknown"' "$metadata") || return
    retain_database_backup "$database" "$uid" "$release/after-database.db" "$environment" before-rollback || return
+   candidate_backup=$database_backup
   fi
   # Recovery must finish the same rewind after a crash, without reinterpreting a
   # database whose sidecars were already removed by the interrupted restore.
-  printf '{}\n' | atomic_json "$release/database-restoring.json" || return
+  jq -n --arg backup "$candidate_backup" '{schema:1,candidate_backup:$backup}' | atomic_json "$release/database-restoring.json" || return
+  phase_checkpoint database-restoring || return
  fi
  db_fileop "$uid" rm -f -- "$database-wal" "$database-shm" "$database-journal" || return
  if [[ $existed == true ]]; then
@@ -287,6 +492,16 @@ recover_database_update() {
  fi
  if service_is_active; then systemctl --user stop "$service.service" || return
  else [[ $? == 1 ]] || return 1; fi
+ if [[ ! -f $op/restoring.json ]]; then
+  local candidate_backup='' environment
+  if db_fileop "$uid" test -f "$database"; then
+   sqlite_snapshot "$uid" "$database" "$op/candidate.db" || return
+   environment=$(jq -r '.environment // "unknown"' <<< "$metadata") || return
+   retain_database_backup "$database" "$uid" "$op/candidate.db" "$environment" before-push-rollback || return
+   candidate_backup=$database_backup
+  fi
+  jq -n --arg backup "$candidate_backup" '{schema:1,candidate_backup:$backup}' | atomic_json "$op/restoring.json" || return
+ fi
  db_fileop "$uid" rm -f -- "$database-wal" "$database-shm" || return
  if [[ $existed == true ]]; then
   db_fileop "$uid" cp -- "$op/before.db" "$temp" || return
@@ -296,6 +511,7 @@ recover_database_update() {
   db_fileop "$uid" mv -fT -- "$temp" "$database" || return
  else db_fileop "$uid" rm -f -- "$database" || return; fi
  db_fileop "$uid" sync -f -- "$(dirname -- "$database")" || return
+ if [[ -f $op/manifest.json ]]; then jq '.operation_state="rolled-back"' "$op/manifest.json" | atomic_json "$op/manifest.json" || return; fi
  durable_remove "$journal" || return
  echo 'Previous database restored; service remains stopped' >&2
 }
@@ -311,13 +527,61 @@ service_is_active() {
  case "$status" in 3|4) return 1;; *) fail 'Cannot determine service activity'; return 2;; esac
 }
 wait_health() {
- local manifest=$1 image=$2
- local seconds command_check url
- seconds=$(jq -er .health_seconds "$manifest")
- command_check=$(jq -r .health_command "$manifest")
- url=$(jq -r '.health_url // ""' "$manifest")
- timeout -s KILL "$seconds" bash "$script" health "$service" "$image" "$command_check" "$url" 8>&- 9>&- >/dev/null 2>&1
+ local manifest=$1 image=$2 seconds command_check url stable_ms interval minimum
+ seconds=$(jq -er .health_seconds "$manifest") || return
+ command_check=$(jq -r .health_command "$manifest") || return
+ url=$(jq -r '.health_url // ""' "$manifest") || return
+ # Missing additive fields preserve recovery of manifests from older releases.
+ stable_ms=$(jq -r '((.health_stable_seconds // 0) * 1000) | floor' "$manifest") || return
+ interval=$(jq -r '.health_interval_seconds // 0.2' "$manifest") || return
+ minimum=$(jq -r '.health_successes // 1' "$manifest") || return
+ local -a foreground=()
+ if [[ ${recovery_scope:-false} == true ]]; then foreground=(--foreground); fi
+ timeout "${foreground[@]}" -k 1 "$seconds" bash "$script" health "$service" "$image" "$command_check" "$url" "$stable_ms" "$interval" "$minimum" 7>&- 8>&- 9>&- >/dev/null
 }
+resume_committed_release() {
+ local manifest=$1 image=$2 status
+ if service_is_active; then :
+ else
+  status=$?
+  [[ $status == 1 ]] || return 1
+  # Boot deliberately blocked a pending candidate. The new transaction's live
+  # lease now permits verifying the release whose commit was already durable.
+  systemctl --user start "$service.service" || return
+ fi
+ wait_health "$manifest" "$image"
+}
+
+validate_candidate_quadlet() {
+ local validate_dir network found base generator
+validate_dir="$release/validate"
+mkdir -m 700 -- "$validate_dir"
+cp -- "$release/candidate.container" "$validate_dir/$service.container"
+if [[ -f $boot_file ]]; then
+ mkdir -m 700 -- "$validate_dir/$service.container.d"
+ cp -- "$boot_file" "$validate_dir/$service.container.d/90-deploy-boot.conf"
+fi
+# Network Quadlets are existing infrastructure. Copy definitions solely for validation.
+sed -n 's/^Network="\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' "$release/candidate.container" > "$release/networks"
+while IFS= read -r network; do
+ [[ $network == *.network ]] || continue
+ [[ $network =~ ^[a-zA-Z0-9_.-]+\.network$ ]] || fail 'Invalid network Quadlet reference'
+ found=false
+ for base in "$units" "/run/user/$(id -u)/containers/systemd" "/etc/containers/systemd/users/$(id -u)" /etc/containers/systemd/users /usr/share/containers/systemd; do
+  if [[ -f $base/$network ]]; then cp -- "$base/$network" "$validate_dir/$network"; found=true; break; fi
+ done
+ $found || fail "Referenced network Quadlet missing: $network"
+done < "$release/networks"
+generator=/usr/lib/systemd/system-generators/podman-system-generator
+[[ -x $generator ]] || generator=/usr/libexec/podman/quadlet
+# Tests may supply an isolated generator, the production CLI does not set this.
+generator=${DEPLOY_TEST_GENERATOR:-$generator}
+mkdir -m 700 -- "$release/generated"
+QUADLET_UNIT_DIRS="$validate_dir" "$generator" --user "$release/generated" > "$release/generator-output.txt" 2> "$release/generator-errors.txt"
+[[ ! -s $release/generator-errors.txt ]] || { cat "$release/generator-errors.txt" >&2; fail 'Quadlet generator rejected candidate'; }
+[[ -s $release/generated/$service.service ]] || fail 'Quadlet generator did not generate requested service'
+}
+
 record_path() {
  local rel=$1 kind=$2 dest="$target/$1" existed=false mode_value='' checksum=''
  [[ $rel != /* && /$rel/ != */../* && /$rel/ != */.deploy/* ]] || { fail "Unsafe managed artifact: $rel"; return 1; }

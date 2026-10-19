@@ -109,15 +109,7 @@ environments:
       # rollback: "manual" # Default: stop on changed DB after failed startup.
       # rollback: "restore" # Opt in to restoring the pre-release DB; can discard new writes.
 
-    # Infrastructure (for 'deploy traefik')
-    traefik:
-      version: "latest" # Or "v3.0"
-      email: "admin@example.com" # For Let's Encrypt
-      cert_resolver: "myresolver"
-      network_name: "traefik-net"
-      dashboard: true
-      # Basic Auth for Dashboard (user:hash). Generate via 'deploy gen-auth'
-      dashboard_auth: "admin:$2y$05$..."
+    # Infrastructure is configured in server.yaml using deploy server init/provision.
 
     # Maintenance Page Configuration (Optional)
     # If enabled, a lightweight Nginx container runs in "standby" (Priority 1).
@@ -390,7 +382,7 @@ data/backup/app.local.before-pull-from-prod.20261019T193100-...db
 Pull protects the existing **local** database; push protects the existing **remote**
 database. The backup directory is mode `0700`, snapshots are `0600`, and failures
 abort the operation. Pull and push still update a latest `.bak` for compatibility, but unique
-backups are never overwritten or automatically deleted. Copy them off the server
+backups are never overwritten or automatically deleted. Explicit history cleanup is available when a retention policy is configured. Copy them off the server
 for protection against storage failure.
 
 When `database.driver: sqlite` and `database.source` are configured, both release
@@ -443,7 +435,7 @@ DEPLOY_TEST_GOTENBERG_IMAGE='docker.io/gotenberg/gotenberg:VERSION-chromium@sha2
 make test-image-deploy-integration
 ```
 
-This explicit opt-in target never reads a user's `deploy.yaml`, never uses SSH,
+This explicit opt-in target never reads a user's `deploy.yaml`, uses a local runner unless invoked through the disposable harness,
 and operates only on unique `deploy-it-*` services, network and temporary project
 directories. It tests a healthy HTTP image, failed rollout with rollback, image
 retention after prune, private Gotenberg DNS/health/restart, resource limits and
@@ -462,7 +454,7 @@ machine with rootless Podman, subordinate UID/GID ranges and Go installed:
 make test-image-deploy-isolated
 ```
 
-The harness uses a separate temporary Podman store and a disposable container
+The harness generates test SSH keys and known-host entries inside its disposable container and exercises real SSH and rsync. It uses a separate temporary Podman store and a disposable container
 with its own systemd, test user and nested rootless Podman. It installs test
 prerequisites **inside that disposable container** and removes the container and
 its store afterward. The outer container is privileged within the invoking
@@ -480,3 +472,178 @@ enable/disable, private DNS, health checks, restart, CPU/memory limits, and
 HTML-to-PDF without a published Gotenberg port. Binary first installation with
 `stop_on_deploy: true`, complete binary configuration rollback, a normalized
 `128MiB` limit and SQLite backup/replacement under container UID 65532 also passed.
+
+
+### Configuration validation and migration
+
+Run `deploy validate prod` before upgrading a project, and `deploy validate --server`
+for infrastructure configuration. Validation is local and runs without Git publication,
+SSH or a build. Both YAML files reject unknown settings, duplicate keys, empty input
+and extra documents. Supported aliases such as `router.host` continue to work.
+
+The obsolete `environments.<name>.traefik` block was previously ignored. Remove it
+from `deploy.yaml`: infrastructure version, email and network settings belong under
+`server.yaml`'s `stack.traefik`; application network and routing settings belong under
+`quadlet.network` and `quadlet.router`. Preserve the application's configured
+`quadlet.router.cert_resolver` when migrating. Unused old options have no automatic
+replacement. The validator reports this migration explicitly.
+
+SSH commands use batch authentication and strict host-key verification. Establish
+and verify the host key and load your private key into an SSH agent before deploying.
+`ssh_known_hosts` can select a dedicated local known-hosts file for an environment.
+A remote Git tag must match the local tag object and commit, including annotated
+tags; deployment refuses a different remote target and never force-pushes tags.
+Release names start with a letter or digit and use letters, digits, dot, underscore,
+slash, plus or hyphen, so metadata substitution cannot introduce shell operators.
+
+### Stable readiness and execution budgets
+
+Readiness samples service activity, pinned image identity, container identity,
+restart count and every configured application check. A failed check or a container
+restart resets stabilization. The following settings are available under `quadlet`:
+
+```yaml
+health_required: true
+health_cmd: "wget -q -O /dev/null http://127.0.0.1:8080/health"
+health_timeout: 60s
+health_stable_for: 5s
+health_interval: 1s
+health_successes: 3
+```
+
+Use an endpoint implemented by your application that checks its dependencies,
+including its database. New generated production templates require an application
+check and include an endpoint to adapt. Existing configurations default
+`health_required` to false and report when only service/image checks are available.
+Stabilization defaults to five seconds, one-second samples and three consecutive
+successes. The total timeout must accommodate the stabilization settings.
+
+Each environment accepts operation budgets:
+
+```yaml
+timeouts:
+  connect: 10s
+  transfer: 10m
+  build: 15m
+  pull: 15m
+  database: 5m
+  service: 60s
+  recovery: 5m
+  shutdown_grace: 10s
+```
+
+These are the defaults. Larger builds and databases need suitable overrides. Remote
+phases retain deployment locks after SSH loss until the worker and any recovery
+finish. Recovery has an independent watchdog; an expired recovery leaves its pending
+state intact. Finite local subprocesses terminate as process groups. Streaming logs
+remain open until interrupted.
+
+Binary images are built and their Quadlets validated before the application stops.
+Each release captures local inputs in a private directory under a project lock;
+subsequent uploads use that captured payload and verify its checksums. Database
+pulls serialize backup and replacement by destination path, including across source
+environments. Stop local application writers before an intentional local replacement.
+`rights` requires an inactive service, shares deployment locks and preserves the
+private database backup directory. A failed ownership or prune step exits nonzero.
+
+Successful releases and status report release, commit and image identity. New managed
+units also contain an activation gate: after a reboot or process death, unresolved
+pending state blocks automatic startup until `deploy start <env>` performs recovery
+under the original configuration. A committed candidate can resume verification;
+uncommitted candidates follow the configured database rollback policy.
+
+### Capacity and explicit history cleanup
+
+Environments accept `storage.min_free_bytes` (default 67108864),
+`storage.min_free_inodes` (1024), and `storage.image_reserve_bytes` (268435456).
+Before stopping a service or replacing data, preflight checks space for staged files,
+database/WAL snapshots, restoration and the reserve. Image expansion and unrelated
+storage use can still exhaust a filesystem after preflight; write failures preserve
+recovery state. Local database pulls check capacity before replacing local data.
+
+Retention is disabled by default. To enable it explicitly:
+
+```yaml
+database:
+  driver: sqlite
+  source: data/app.db
+  rollback: manual
+  retention:
+    keep_last: 10
+    max_age: 720h
+storage:
+  releases:
+    keep_last: 5
+    max_age: 720h
+```
+
+`keep_last` is a minimum recent count; when both options are set, an entry must also
+be older than `max_age` to qualify for deletion. Preview exact remote candidates with
+`deploy prune --history --list prod` or `deploy --dry-run prune --history prod`.
+Apply the configured policy with `deploy prune --history prod`. Local pull snapshots
+can be previewed with `deploy db prune-local --list prod` and cleaned with
+`deploy db prune-local prod`; this uses the same policy and local destination lock.
+Off-host bundles are retained separately and are not deleted by these commands.
+Preview reads remote
+inventory under coordination locks and creates only temporary inventory/lock metadata.
+The release policy also controls completed database-operation archives. Cleanup
+protects current and previous releases and all retained history backup references; pending
+recovery or corrupt inventory stops cleanup. Older snapshots without managed metadata
+and unrelated files are retained. Ordinary `deploy prune prod` continues to prune
+unused image/cache data under the shared Podman storage lock.
+
+Database push recovery retains the published incoming database in a separate
+`before-push-rollback` snapshot before rewinding it. Recovery markers keep the same
+candidate snapshot across interruptions. For applications that must not access
+backups through their writable data mount, use a nonzero `container_uid`; container
+UID zero maps to the SSH user in a rootless deployment.
+
+### Off-host database snapshots and restore drills
+
+Configure a destination on a separate machine explicitly:
+
+```yaml
+database:
+  driver: sqlite
+  source: data/app.db
+  off_host:
+    host: backup.example.com
+    user: backup
+    ssh_port: 22
+    ssh_key: /home/sal/.ssh/backup
+    target_dir: /home/backup/foodlog
+    # Point your application check at the disposable database from this variable.
+    restore_check: './scripts/check-restored-database "$DEPLOY_RESTORE_DATABASE"'
+```
+
+`deploy db backup prod` downloads a consistent source snapshot under deployment
+locks, validates SQLite integrity, transfers it to the configured host, verifies its
+checksum and SQLite integrity again, and publishes an immutable bundle containing
+`database.db` and `receipt.json`. A receipt is recorded on the source only after the
+remote bundle is confirmed. Interrupted incoming directories are not completed
+backups. The destination requires SSH, rsync, SQLite and the standard GNU file tools;
+configure its storage access controls and verify its SSH host key.
+
+The command prints a backup ID. Run `deploy db restore-check prod <id>` to retrieve
+that bundle into a private disposable directory, verify its checksum and SQLite
+integrity, then execute `restore_check` with `DEPLOY_RESTORE_DATABASE` pointing to the
+retrieved database. The check must exercise an application read. Command output is
+suppressed to avoid logging database records. An off-host copy is useful recovery
+protection only after its restore procedure has been tested.
+
+### Release verification
+
+`make release-check` requires the normal/race/vet suite, real SSH/rootless Podman
+integration and the VM interruption matrix. CI runs local checks on Linux and macOS,
+real transport against the pinned runtime floor and a freshly resolved current
+runtime digest, and VM recovery before the `release-gate` job succeeds. Configure
+repository branch/release protections to require that job before publishing.
+
+`make test-deploy-vm-crash` builds a disposable bootable VM from the pinned integration
+base, using a temporary disk and generated credentials. It power-cuts and reboots
+both deployment modes after pending publication, database snapshot, candidate
+activation, database-rewind journaling, commit and pending removal, then verifies
+files, database contents, application responses and deployment identity. QEMU uses
+KVM when available and otherwise uses software emulation. This test requires the
+QEMU tools and enough temporary storage; it never boots or modifies a user's VM or
+accesses production configuration.

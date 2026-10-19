@@ -59,7 +59,7 @@ func TestImagePlanAndRunner(t *testing.T) {
 			t.Fatalf("unexpected %q in %s", bad, calls)
 		}
 	}
-	if len(r.calls) != 3 {
+	if len(r.calls) != 4 {
 		t.Fatal(r.calls)
 	}
 	var b bytes.Buffer
@@ -67,7 +67,7 @@ func TestImagePlanAndRunner(t *testing.T) {
 	if !strings.Contains(b.String(), "<resolved-image-id>") {
 		t.Fatal(b.String())
 	}
-	for i := 1; i <= 3; i++ {
+	for i := 1; i <= 4; i++ {
 		r := &fakeRunner{failAt: i}
 		if err := executeImageRelease(p, r); err == nil {
 			t.Fatal("expected failure")
@@ -106,7 +106,7 @@ deployment: {mode: image}
 environments:
   prod:
     host: example.com
-    user: sal
+    user: bob
     target_dir: /srv/pdf
     quadlet:
       service_name: pdf
@@ -139,7 +139,13 @@ func TestBinaryBuildOrder(t *testing.T) {
 			if custom {
 				c.Build.Cmd = "echo {{.Version}}"
 			}
-			c.Artifacts.Include = []string{"static"}
+			c.Artifacts.Include = []string{"static", "Dockerfile.vps"}
+			if err := os.WriteFile("Dockerfile.vps", []byte("FROM scratch"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile("static", []byte("artifact"), 0600); err != nil {
+				t.Fatal(err)
+			}
 			n, err := normalizeAndValidateConfig(c, "prod")
 			if err != nil {
 				t.Fatal(err)
@@ -157,7 +163,7 @@ func TestBinaryBuildOrder(t *testing.T) {
 				if strings.HasPrefix(s, "local ") {
 					buildIndex = i
 				}
-				if strings.HasPrefix(s, "sync build/server") {
+				if strings.HasPrefix(s, "sync ") && strings.Contains(s, "deploy-payload-") {
 					syncIndex = i
 				}
 				if strings.HasPrefix(s, "ssh bash ") && strings.Contains(s, "transaction.sh") {
@@ -167,8 +173,8 @@ func TestBinaryBuildOrder(t *testing.T) {
 			if !(buildIndex >= 0 && syncIndex > buildIndex && activationIndex > syncIndex) {
 				t.Fatal(r.calls)
 			}
-			if _, err := os.Stat(filepath.Join("build", "pdf.container")); err != nil {
-				t.Fatal(err)
+			if _, err := os.Stat(filepath.Join("build", "pdf.container")); !os.IsNotExist(err) {
+				t.Fatal("Quadlet must be private to the release payload", err)
 			}
 		})
 	}

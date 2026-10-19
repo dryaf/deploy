@@ -4,7 +4,7 @@ request="$stage/request.json"
 deployment_mode=$(jq -er .deployment_mode "$request")
 case "$deployment_mode" in image|binary) ;; *) fail 'Invalid deployment mode';; esac
 init_transaction "$deployment_mode" "$stage"
-recover_database_update
+if [[ -f $target/.deploy/db/pending.json ]]; then bounded_recovery recover_database_update; fi
 [[ ! -f $pending && ! -f $state/boot-pending.json ]] || fail 'Recover the pending deployment before pushing a database'
 if service_is_active; then fail 'Service is running; stop it before pushing a database'
 else [[ $? == 1 ]] || exit 1; fi
@@ -19,9 +19,14 @@ command -v sqlite3 >/dev/null
 db_fileop "$uid" test -d "$(dirname -- "$database")" || fail 'Remote database parent directory does not exist'
 [[ -f $stage/upload.db && ! -L $stage/upload.db ]] || fail 'Missing staged database'
 [[ $(sqlite3 -readonly "$stage/upload.db" 'PRAGMA quick_check;') == ok ]] || fail 'Staged database failed integrity validation'
+expected_upload=$(jq -r '.upload_sha256 // ""' "$request")
+if [[ -n $expected_upload ]]; then [[ $expected_upload =~ ^[0-9a-f]{64}$ && $expected_upload == "$(sha256sum -- "$stage/upload.db" | cut -d' ' -f1)" ]] || fail 'Uploaded database checksum mismatch'; fi
+
+check_release_capacity
 op="$target/.deploy/db/operations/$id"
 make_dir "$op"
 chmod 700 "$op"
+jq --arg timestamp "$(date -u +%FT%TZ)" '. + {created_at:$timestamp,operation_state:"prepared"}' "$request" | atomic_json "$op/manifest.json"
 existed=false checksum='' old_mode=600 old_owner=''
 if db_fileop "$uid" test -e "$database"; then
  db_fileop "$uid" test -f "$database" || fail 'Remote database is not a regular file'
@@ -29,6 +34,7 @@ if db_fileop "$uid" test -e "$database"; then
  # A SQLite backup includes committed WAL data; copying only the main file does not.
  sqlite_snapshot "$uid" "$database" "$op/before.db"
  retain_database_backup "$database" "$uid" "$op/before.db" "$(jq -r '.environment // "unknown"' "$request")" before-push
+ jq --arg backup "$database_backup" '.before_backup=$backup' "$op/manifest.json" | atomic_json "$op/manifest.json"
  checksum=$(sha256sum -- "$op/before.db" | cut -d' ' -f1)
  old_mode=$(db_fileop "$uid" stat -c '%a' -- "$database")
  old_owner=$(db_fileop "$uid" stat -c '%u:%g' -- "$database")
@@ -56,7 +62,7 @@ db_exit() {
  local status=$?
  trap - EXIT HUP INT TERM
  if (( status != 0 )); then
-  if ! recover_database_update; then echo "DATABASE ROLLBACK FAILED; pending state and backups preserved at $op" >&2; fi
+  if ! bounded_recovery recover_database_update; then echo "DATABASE ROLLBACK FAILED; pending state and backups preserved at $op" >&2; fi
  fi
  db_fileop "$uid" rm -f -- "$temp" || true
  exit "$status"
@@ -68,6 +74,7 @@ trap 'exit 143' TERM
 db_fileop "$uid" rm -f -- "$database-wal" "$database-shm"
 db_fileop "$uid" mv -fT -- "$temp" "$database"
 db_fileop "$uid" sync -f -- "$(dirname -- "$database")"
+jq '.operation_state="committed"' "$op/manifest.json" | atomic_json "$op/manifest.json"
 jq '.committed=true' "$db_pending" | atomic_json "$db_pending"
 durable_remove "$db_pending"
 echo 'Database pushed successfully; service remains stopped'

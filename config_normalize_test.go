@@ -9,7 +9,7 @@ import (
 )
 
 func imageConfig() Config {
-	return Config{AppName: "pdf", Deployment: DeploymentConfig{Mode: ModeImage}, Environments: map[string]Environment{"prod": {Host: "vps.example.com", User: "sal", Dir: "/srv/pdf", Quadlet: Quadlet{ServiceName: "pdf", Image: "docker.io/gotenberg/gotenberg:8-chromium"}}}}
+	return Config{AppName: "pdf", Deployment: DeploymentConfig{Mode: ModeImage}, Environments: map[string]Environment{"prod": {Host: "vps.example.com", User: "user", Dir: "/srv/pdf", Quadlet: Quadlet{ServiceName: "pdf", Image: "docker.io/gotenberg/gotenberg:8-chromium"}}}}
 }
 func ptr[T any](v T) *T { return &v }
 func changeEnv(c *Config, f func(*Environment)) {
@@ -166,7 +166,7 @@ func TestRenderModes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, want := range []string{"NetworkAlias=pdf-prod", "Restart=on-failure", "RestartSec=5s", "[Service]\nRestart=on-failure\nRestartSec=5s\nCPUQuota=50%\nMemoryMax=1G", `Label="custom=quote\" and $dollar"`} {
+			for _, want := range []string{"NetworkAlias=pdf-prod", "Restart=on-failure", "RestartSec=5s", "[Service]\nExecStartPre=/bin/bash \"/srv/pdf/.deploy/" + string(mode) + "/activation-check.sh\"\nRestart=on-failure\nRestartSec=5s\nCPUQuota=50%\nMemoryMax=1G", `Label="custom=quote\" and $dollar"`} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("missing %q:\n%s", want, out)
 				}

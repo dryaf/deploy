@@ -51,8 +51,8 @@ func TestRsyncTransportQuotesSSHKey(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	t.Setenv("ARG_LOG", log)
-	env := Environment{User: "sal", Host: "example.com", Port: 2222, SSHKey: "/tmp/a key'$(false)"}
-	if err := runRsyncSafe(env, []string{"./file with spaces"}, "sal@example.com:/tmp/remote dir/"); err != nil {
+	env := Environment{User: "bob", Host: "example.com", Port: 2222, SSHKey: "/tmp/a key'$(false)"}
+	if err := runRsyncSafe(env, []string{"./file with spaces"}, "bob@example.com:/tmp/remote dir/"); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(log)
@@ -80,7 +80,7 @@ func TestSSHOutputSeparatesDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	e := Environment{User: "sal", Host: "example.com"}
+	e := Environment{User: "bob", Host: "example.com"}
 	out, err := runSSHOutput(e, "true")
 	if err != nil || out != "machine-result" {
 		t.Fatal(out, err)

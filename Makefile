@@ -38,3 +38,11 @@ test-image-deploy-integration:
 # Creates a separate rootless Podman store and a disposable systemd container.
 test-image-deploy-isolated:
 	./scripts/test-image-deploy-isolated.sh
+
+.PHONY: test-deploy-vm-crash release-check
+
+test-deploy-vm-crash:
+	./scripts/test-deploy-vm-crash.sh
+
+# Required before publishing a deploy binary. The CI release-gate has the same dependencies.
+release-check: test test-image-deploy-isolated test-deploy-vm-crash

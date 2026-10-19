@@ -11,6 +11,10 @@ import (
 
 const imagePlaceholder = "__DEPLOY_RESOLVED_IMAGE__"
 
+func releaseLabels(unit, commit, id string) string {
+	return strings.Replace(unit, "[Container]\n", "[Container]\nLabel="+strconv.Quote("io.deploy.commit="+commit)+"\nLabel="+strconv.Quote("io.deploy.release="+id)+"\n", 1)
+}
+
 // renderQuadlet has no filesystem or process side effects.
 func renderQuadlet(n NormalizedConfig, resolvedImage string) (string, error) {
 	q := n.Env.Quadlet
@@ -34,6 +38,8 @@ func renderQuadlet(n NormalizedConfig, resolvedImage string) (string, error) {
 		}
 	}
 	data := TemplateData{Quadlet: q, TargetDir: n.Env.Dir, Routing: n.Routing, EnvFile: n.EnvFile, CPUQuota: n.CPUQuota, Pinned: n.Mode == ModeImage}
+	// systemd expands dollar variables in ExecStartPre even inside quoted argv.
+	data.ActivationGate = strings.ReplaceAll(path.Join(n.Env.Dir, ".deploy", string(n.Mode), "activation-check.sh"), "$", "$$")
 	t, err := template.New("quadlet").Funcs(template.FuncMap{
 		"literal": func(s string) string { return strings.ReplaceAll(s, "%", "%%") },
 		"quote":   func(s string) string { return strconv.Quote(strings.ReplaceAll(s, "%", "%%")) },

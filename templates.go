@@ -1,6 +1,7 @@
 package main
 
 type TemplateData struct {
+	ActivationGate string
 	Quadlet
 	TargetDir string
 	Routing   bool
@@ -146,6 +147,9 @@ Label={{ quote . }}
 {{- end }}
 
 [Service]
+{{- if .ActivationGate }}
+ExecStartPre=/bin/bash {{ quote .ActivationGate }}
+{{- end }}
 {{- if .AutoRestart }}
 Restart=on-failure
 RestartSec=5s

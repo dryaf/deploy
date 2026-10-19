@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -29,10 +30,10 @@ func release(explicitVersion, envName string, runner ReleaseRunner) error {
 		return err
 	}
 	// All local configuration and artifact validation precedes Git publication and SSH.
-	if n.Mode == ModeImage {
-		if err := checkLocalImageArtifacts(n); err != nil {
-			return err
-		}
+	inputs := n
+	inputs.Config.Artifacts.Include = selectedArtifacts(n)
+	if err := checkLocalImageArtifacts(inputs); err != nil {
+		return err
 	}
 	if _, err := renderQuadlet(n, ""); err != nil {
 		return err
@@ -45,6 +46,23 @@ func release(explicitVersion, envName string, runner ReleaseRunner) error {
 			if _, err := exec.LookPath("go"); err != nil {
 				return fmt.Errorf("local prerequisite go missing")
 			}
+		}
+	}
+	var projectLock *localLock
+	if !dryRun {
+		projectLock, err = lockProject()
+		if err != nil {
+			return err
+		}
+		defer projectLock.Close()
+		// Configuration can change while validation or lock acquisition runs.
+		cfg, err = readConfig("deploy.yaml")
+		if err != nil {
+			return err
+		}
+		n, err = normalizeAndValidateConfig(cfg, envName)
+		if err != nil {
+			return err
 		}
 	}
 	version, err := resolveAndValidateVersion(explicitVersion)
@@ -64,6 +82,11 @@ func release(explicitVersion, envName string, runner ReleaseRunner) error {
 	if err != nil {
 		return err
 	}
+	p.projectLock = projectLock
+	p.CheckSource = !dryRun
+	if !dryRun {
+		p.TagObject = getCmdOutput("git", "rev-parse", "refs/tags/"+version)
+	}
 	p.Print(os.Stdout)
 	if dryRun {
 		return nil
@@ -75,6 +98,15 @@ func release(explicitVersion, envName string, runner ReleaseRunner) error {
 }
 
 func executeBinaryRelease(p ReleasePlan, runner ReleaseRunner) error {
+	lock := p.projectLock
+	if lock == nil {
+		var err error
+		lock, err = lockProject()
+		if err != nil {
+			return err
+		}
+	}
+	defer lock.Close()
 	cfg, env, version := p.Config.Config, p.Config.Env, p.Version
 	preflight := binaryRemotePreflight + imageResourceChecks(env.Quadlet)
 	if env.Database.Driver != "" {
@@ -112,6 +144,9 @@ func executeBinaryRelease(p ReleasePlan, runner ReleaseRunner) error {
 	logInfo("🔨 Building binary (%s)...", arch)
 
 	buildMeta := getBuildMetadata(version)
+	buildMeta.Commit = p.Commit
+	buildMeta.Version = p.Version
+	buildMeta.Tag = p.Version
 	var ldflags string
 	if cfg.Build.Ldflags != "" {
 		tmpl, err := template.New("ld").Parse(cfg.Build.Ldflags)
@@ -156,19 +191,29 @@ func executeBinaryRelease(p ReleasePlan, runner ReleaseRunner) error {
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+arch)
 	}
 
-	if err := runner.Local(cmd); err != nil {
+	var buildErr error
+	if timed, ok := runner.(interface {
+		LocalTimeout(*exec.Cmd, time.Duration, time.Duration) error
+	}); ok {
+		buildErr = timed.LocalTimeout(cmd, budget(env.Timeouts.Build, "15m"), budget(env.Timeouts.ShutdownGrace, "10s"))
+	} else {
+		buildErr = runner.Local(cmd)
+	}
+	if err := buildErr; err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
 	if info, err := os.Lstat(output); err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 		return fmt.Errorf("build did not produce a nonempty regular file at %s", output)
 	}
 
-	containerPath := filepath.Join("build", env.Quadlet.ServiceName+".container")
-	if err := os.WriteFile(containerPath, []byte(p.Quadlet), 0600); err != nil {
+	payload, err := captureRelease(p, output)
+	if err != nil {
 		return err
 	}
-
-	return stageBinaryRelease(p, containerPath, runner)
+	defer payload.Close()
+	p.payload = payload
+	lock.Close()
+	return stageBinaryRelease(p, payload.Container, runner)
 }
 
 func generateTraefikLabels(serviceName string, r RouterConfig, defaultResolver string) []string {
@@ -284,16 +329,25 @@ func doMaintenanceEnable(envName string) {
 
 	logInfo("🚧 Setting up Maintenance Page infrastructure on %s...", env.Host)
 
-	if !dryRun {
-		os.MkdirAll("build", 0755)
+	if dryRun {
+		logInfo("[DRY] Generate, stage and activate maintenance artifacts for %s", env.Quadlet.ServiceName)
+		return
 	}
-
-	// 1. Generate Files
-	maintPath, htmlPath := generateMaintenance(env, "build")
+	temporary, err := os.MkdirTemp("", "deploy-maintenance-")
+	if err != nil {
+		logFatal("Maintenance staging: %v", err)
+	}
+	defer os.RemoveAll(temporary)
+	maintPath, htmlPath, err := generateMaintenance(env, temporary)
+	if err != nil {
+		logFatal("Maintenance generation: %v", err)
+	}
 
 	// 2. Sync
 	logInfo("📤 Syncing maintenance artifacts...")
-	runSSH(env, fmt.Sprintf("mkdir -p %s/maintenance ~/.config/containers/systemd", env.Dir))
+	if err := runSSH(env, "mkdir -p -- "+shellQuote(env.Dir+"/maintenance")+" ~/.config/containers/systemd"); err != nil {
+		logFatal("Maintenance directory: %v", err)
+	}
 	runRsync(env, []string{htmlPath}, fmt.Sprintf("%s@%s:%s/maintenance/index.html", env.User, env.Host, env.Dir))
 	runRsync(env, []string{maintPath}, remoteDestination(env, ".config/containers/systemd/"))
 
@@ -346,31 +400,45 @@ func doMaintenanceDisable(envName string) {
 }
 
 // resolveAndValidateVersion handles the logic for strict versioning and "lazy" tagging.
+var releaseVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/+-]*$`)
+
+func validateReleaseVersion(version string) error {
+	if !releaseVersionPattern.MatchString(version) {
+		return fmt.Errorf("release tag must start with a letter or digit and use only letters, digits, dot, underscore, slash, plus or hyphen")
+	}
+	return nil
+}
+
 func resolveAndValidateVersion(explicitVersion string) (string, error) {
+	if explicitVersion != "" {
+		if err := validateReleaseVersion(explicitVersion); err != nil {
+			return "", err
+		}
+	}
 	if dryRun {
 		if explicitVersion == "" {
 			return "<configuration-version>", nil
 		}
 		return explicitVersion, nil
 	}
-	out, err := exec.Command("git", "status", "--porcelain").Output()
+	out, err := gitOutput("status", "--porcelain")
 	if err != nil {
 		return "", fmt.Errorf("git status: %w", err)
 	}
 	if len(strings.TrimSpace(string(out))) > 0 {
 		return "", fmt.Errorf("Git working directory is dirty; commit or stash changes before releasing")
 	}
-	hasRemote := exec.Command("git", "remote", "get-url", "origin").Run() == nil
+	hasRemote := gitRun("remote", "get-url", "origin") == nil
 	if explicitVersion != "" {
 		// Accept tags only, never revision expressions or command-line options.
-		if err := exec.Command("git", "check-ref-format", "refs/tags/"+explicitVersion).Run(); err != nil {
+		if err := gitRun("check-ref-format", "refs/tags/"+explicitVersion); err != nil {
 			return "", fmt.Errorf("invalid Git tag")
 		}
-		head, err := exec.Command("git", "rev-parse", "--verify", "HEAD").Output()
+		head, err := gitOutput("rev-parse", "--verify", "HEAD")
 		if err != nil {
 			return "", err
 		}
-		tag, err := exec.Command("git", "rev-parse", "--verify", "refs/tags/"+explicitVersion+"^{commit}").Output()
+		tag, err := gitOutput("rev-parse", "--verify", "refs/tags/"+explicitVersion+"^{commit}")
 		if err != nil {
 			return "", fmt.Errorf("tag %q not found: %w", explicitVersion, err)
 		}
@@ -384,8 +452,11 @@ func resolveAndValidateVersion(explicitVersion string) (string, error) {
 		}
 		return explicitVersion, nil
 	}
-	if tag, err := exec.Command("git", "describe", "--tags", "--exact-match", "HEAD").Output(); err == nil {
+	if tag, err := gitOutput("describe", "--tags", "--exact-match", "HEAD"); err == nil {
 		version := strings.TrimSpace(string(tag))
+		if err := validateReleaseVersion(version); err != nil {
+			return "", err
+		}
 		if hasRemote {
 			if err := ensureTagPushed(version); err != nil {
 				return "", err
@@ -397,10 +468,13 @@ func resolveAndValidateVersion(explicitVersion string) (string, error) {
 		return "", err
 	}
 	version := prompt("Enter new semantic version (e.g. v1.0.1)")
+	if err := validateReleaseVersion(version); err != nil {
+		return "", err
+	}
 	if version == "" || strings.HasPrefix(version, "-") {
 		return "", fmt.Errorf("valid version tag required")
 	}
-	if err := exec.Command("git", "check-ref-format", "refs/tags/"+version).Run(); err != nil {
+	if err := gitRun("check-ref-format", "refs/tags/"+version); err != nil {
 		return "", fmt.Errorf("invalid Git tag")
 	}
 	if err := runCommandRaw("git", "tag", "-a", version, "-m", "Release "+version); err != nil {
@@ -410,18 +484,75 @@ func resolveAndValidateVersion(explicitVersion string) (string, error) {
 		if err := runCommandRaw("git", "push", "origin", "refs/tags/"+version); err != nil {
 			return "", err
 		}
+		if exists, err := verifyRemoteTag(version); err != nil || !exists {
+			return "", fmt.Errorf("verify published tag %s: %v", version, err)
+		}
 	}
 	return version, nil
 }
 
 func ensureTagPushed(version string) error {
-	if err := exec.Command("git", "ls-remote", "--exit-code", "--tags", "origin", "refs/tags/"+version).Run(); err == nil {
+	exists, err := verifyRemoteTag(version)
+	if err != nil {
+		return err
+	}
+	if exists {
 		return nil
 	}
 	if !confirm(fmt.Sprintf("Push tag %s to origin?", version)) {
 		return fmt.Errorf("deployment requires synced Git tags")
 	}
-	return runCommandRaw("git", "push", "origin", "refs/tags/"+version)
+	if err := runCommandRaw("git", "push", "origin", "refs/tags/"+version); err != nil {
+		return err
+	}
+	exists, err = verifyRemoteTag(version)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("remote tag %s missing after push", version)
+	}
+	return nil
+}
+
+func verifyRemoteTag(version string) (bool, error) {
+	ref := "refs/tags/" + version
+	if err := gitRun("check-ref-format", ref); err != nil {
+		return false, fmt.Errorf("invalid Git tag")
+	}
+	local, err := gitOutput("rev-parse", "--verify", ref)
+	if err != nil {
+		return false, fmt.Errorf("local tag %s: %w", version, err)
+	}
+	peeled, err := gitOutput("rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return false, fmt.Errorf("tag %s must identify a commit: %w", version, err)
+	}
+	out, err := gitOutput("ls-remote", "--tags", "origin", ref, ref+"^{}")
+	if err != nil {
+		return false, fmt.Errorf("read remote tag %s: %w", version, err)
+	}
+	refs := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 || (fields[1] != ref && fields[1] != ref+"^{}") || refs[fields[1]] != "" {
+			return false, fmt.Errorf("malformed remote tag response")
+		}
+		refs[fields[1]] = fields[0]
+	}
+	if len(refs) == 0 {
+		return false, nil
+	}
+	if refs[ref] != strings.TrimSpace(string(local)) {
+		return false, fmt.Errorf("tag %s differs: local %s; remote %s", version, strings.TrimSpace(string(local)), refs[ref])
+	}
+	if target := refs[ref+"^{}"]; target != "" && target != strings.TrimSpace(string(peeled)) {
+		return false, fmt.Errorf("peeled remote tag %s differs from local commit", version)
+	}
+	return true, nil
 }
 
 func getBuildMetadata(explicitVersion string) BuildMetadata {
@@ -429,7 +560,7 @@ func getBuildMetadata(explicitVersion string) BuildMetadata {
 		if dryRun {
 			return "dry"
 		}
-		out, _ := exec.Command(args[0], args[1:]...).Output()
+		out, _ := boundedOutput(exec.Command(args[0], args[1:]...), 2*time.Minute)
 		return strings.TrimSpace(string(out))
 	}
 
@@ -462,7 +593,7 @@ func getBuildMetadata(explicitVersion string) BuildMetadata {
 	}
 }
 
-func generateMaintenance(env Environment, outDir string) (string, string) {
+func generateMaintenance(env Environment, outDir string) (string, string, error) {
 	// 1. Apply Defaults if config is missing (Enabled check removed in CLI)
 	if env.Maintenance.Title == "" {
 		env.Maintenance.Title = "System Maintenance"
@@ -473,12 +604,19 @@ func generateMaintenance(env Environment, outDir string) (string, string) {
 
 	// 2. Generate HTML
 	var htmlBuf bytes.Buffer
-	t1, _ := template.New("h").Parse(maintenanceHtmlTmpl)
-	t1.Execute(&htmlBuf, env.Maintenance)
+	t1, err := template.New("h").Parse(maintenanceHtmlTmpl)
+	if err != nil {
+		return "", "", err
+	}
+	if err = t1.Execute(&htmlBuf, env.Maintenance); err != nil {
+		return "", "", err
+	}
 
 	htmlPath := filepath.Join(outDir, "maintenance.html")
 	if !dryRun {
-		os.WriteFile(htmlPath, htmlBuf.Bytes(), 0644)
+		if err = os.WriteFile(htmlPath, htmlBuf.Bytes(), 0644); err != nil {
+			return "", "", err
+		}
 	}
 
 	// 3. Generate Container
@@ -505,13 +643,20 @@ func generateMaintenance(env Environment, outDir string) (string, string) {
 		Resolver:    resolver,
 	}
 	var cBuf bytes.Buffer
-	t2, _ := template.New("mc").Parse(maintenanceContainerTmpl)
-	t2.Execute(&cBuf, data)
+	t2, err := template.New("mc").Parse(maintenanceContainerTmpl)
+	if err != nil {
+		return "", "", err
+	}
+	if err = t2.Execute(&cBuf, data); err != nil {
+		return "", "", err
+	}
 
 	containerPath := filepath.Join(outDir, env.Quadlet.ServiceName+"-maint.container")
 	if !dryRun {
-		os.WriteFile(containerPath, cBuf.Bytes(), 0644)
+		if err = os.WriteFile(containerPath, cBuf.Bytes(), 0644); err != nil {
+			return "", "", err
+		}
 	}
 
-	return containerPath, htmlPath
+	return containerPath, htmlPath, nil
 }

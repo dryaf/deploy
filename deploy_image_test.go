@@ -30,6 +30,9 @@ func newTransactionFixture(t *testing.T) *transactionFixture {
 	}
 	root := t.TempDir()
 	f := &transactionFixture{t: t, root: root, target: filepath.Join(root, "project with ' quotes $dollar"), home: filepath.Join(root, "home"), bin: filepath.Join(root, "bin"), script: filepath.Join(root, "transaction.sh")}
+	if err := os.MkdirAll(filepath.Join(root, "images"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	f.write(f.script, imageTransactionScript, 0700)
 	f.write(filepath.Join(f.bin, "podman"), fakePodman, 0700)
 	f.write(filepath.Join(f.bin, "systemctl"), fakeSystemctl, 0700)
@@ -468,12 +471,12 @@ case "$1 $2" in
   image=$3
   if [[ $image != sha256:* ]]; then image=$(cat "$FAKE_ROOT/tags/${image//\//_}"); fi
   jq -n --arg id "$image" --arg arch "$arch" '[{Id:$id,Os:"linux",Architecture:$arch,RepoDigests:["docker.io/example/pdf@sha256:abc"]}]';;
- 'container inspect') cat "$FAKE_ROOT/running-image";;
+ 'container inspect') if [[ $4 == *RestartCount* ]]; then printf 'container-%s 0\n' "$(cat "$FAKE_ROOT/running-image")"; else cat "$FAKE_ROOT/running-image"; fi;;
  'healthcheck run')
   if [ -f "$FAKE_ROOT/hang-probe" ]; then sleep 10; fi
   if [ -f "$FAKE_ROOT/fail-health" ] && grep -q bbbbbbbb "$FAKE_ROOT/running-image"; then exit 1; fi;;
  'info --format') case "$3" in *Store.GraphRoot*) echo "$FAKE_ROOT/images";; *Host.OS*) echo linux;; *Host.Arch*) echo amd64;; *Host.CgroupControllers*) if [ -f "$FAKE_ROOT/missing-controllers" ]; then echo '["pids"]'; else echo '["cpu","memory","pids"]'; fi;; esac;;
- *) if [ "$1" = tag ]; then [[ $3 != *@* ]] || exit 1; [ ! -f "$FAKE_ROOT/fail-tag" ] || exit 1; mkdir -p "$FAKE_ROOT/tags"; printf '%s' "$2" > "$FAKE_ROOT/tags/${3//\//_}"; else echo 'unexpected podman invocation' >&2; exit 1; fi;;
+ *) if [ "$1" = tag ]; then [[ $3 != *@* ]] || exit 1; [ ! -f "$FAKE_ROOT/fail-tag" ] || exit 1; mkdir -p "$FAKE_ROOT/tags"; printf '%s' "$2" > "$FAKE_ROOT/tags/${3//\//_}"; if [[ -f $FAKE_ROOT/kill-after-reference && $3 != localhost/deploy-retain/* ]]; then rm "$FAKE_ROOT/kill-after-reference"; kill -KILL "$(cat "$FAKE_ROOT/txpid")"; fi; else echo 'unexpected podman invocation' >&2; exit 1; fi;;
 esac
 `
 const fakeSystemctl = `#!/bin/bash

@@ -1,7 +1,8 @@
 mode=${1:?missing operation}
 stage=${2:?missing staging path}
 init_transaction image "$stage"
-recover_database_update
+store_lock -s
+if [[ -f $target/.deploy/db/pending.json ]]; then bounded_recovery recover_database_update; fi
 
 init_boot_state
 
@@ -65,7 +66,7 @@ recover_pending() {
  image=$(jq -er .image_id "$release/manifest.json") || return
  if [[ -f $current ]]; then
   validate_commit || return
-  if [[ $(jq -r .current "$current") == "$pending_id" ]] && cmp -s "$unit" "$release/candidate.container" && wait_health "$release/manifest.json" "$image"; then
+  if [[ $(jq -r .current "$current") == "$pending_id" ]] && cmp -s "$unit" "$release/candidate.container" && resume_committed_release "$release/manifest.json" "$image"; then
    durable_remove "$pending" || return
    echo "Completed committed pending release $pending_id" >&2
    return 0
@@ -77,7 +78,7 @@ recover_pending() {
   return 0
  fi
  echo "Recovering interrupted release $pending_id" >&2
- restore_image_deployment "$release"
+ bounded_recovery restore_image_deployment "$release"
 }
 if [[ -f $boot_pending ]]; then restore_boot; fi
 recover_pending
@@ -128,10 +129,12 @@ else
  if $old_active || systemctl --user cat "$service.service" >/dev/null 2>&1; then fail 'Existing unmanaged service cannot be adopted'; fi
 fi
 
+check_release_capacity
 release="$state/releases/$id"
 mkdir -m 700 -- "$release"
 before="$release/before"
 mkdir -m 700 -- "$before" "$before/files"
+jq --arg timestamp "$(date -u +%FT%TZ)" '. + {created_at:$timestamp}' "$request" | atomic_json "$release/manifest.json"
 if [[ -n $old_id ]]; then
  cp -p -- "$unit" "$before/active.container"
  cp -p -- "$current" "$before/current.json"
@@ -185,32 +188,7 @@ sync_image_store
 [[ $(grep -Fxc 'Image=__DEPLOY_RESOLVED_IMAGE__' "$stage/candidate.container") == 1 ]] || fail 'Invalid image placeholder'
 sed "s/^Image=__DEPLOY_RESOLVED_IMAGE__$/Image=$image/" "$stage/candidate.container" > "$release/candidate.container"
 grep -Fx 'Pull=never' "$release/candidate.container" >/dev/null || fail 'Candidate must disable implicit pulls'
-validate_dir="$release/validate"
-mkdir -m 700 -- "$validate_dir"
-cp -- "$release/candidate.container" "$validate_dir/$service.container"
-if [[ -f $boot_file ]]; then
- mkdir -m 700 -- "$validate_dir/$service.container.d"
- cp -- "$boot_file" "$validate_dir/$service.container.d/90-deploy-boot.conf"
-fi
-# Network Quadlets are existing infrastructure. Copy definitions solely for validation.
-sed -n 's/^Network="\{0,1\}\([^" ]*\)"\{0,1\}$/\1/p' "$release/candidate.container" > "$release/networks"
-while IFS= read -r network; do
- [[ $network == *.network ]] || continue
- [[ $network =~ ^[a-zA-Z0-9_.-]+\.network$ ]] || fail 'Invalid network Quadlet reference'
- found=false
- for base in "$units" "/run/user/$(id -u)/containers/systemd" "/etc/containers/systemd/users/$(id -u)" /etc/containers/systemd/users /usr/share/containers/systemd; do
-  if [[ -f $base/$network ]]; then cp -- "$base/$network" "$validate_dir/$network"; found=true; break; fi
- done
- $found || fail "Referenced network Quadlet missing: $network"
-done < "$release/networks"
-generator=/usr/lib/systemd/system-generators/podman-system-generator
-[[ -x $generator ]] || generator=/usr/libexec/podman/quadlet
-# Tests may supply an isolated generator, the production CLI does not set this.
-generator=${DEPLOY_TEST_GENERATOR:-$generator}
-mkdir -m 700 -- "$release/generated"
-QUADLET_UNIT_DIRS="$validate_dir" "$generator" --user "$release/generated" > "$release/generator-output.txt" 2> "$release/generator-errors.txt"
-[[ ! -s $release/generator-errors.txt ]] || { cat "$release/generator-errors.txt" >&2; fail 'Quadlet generator rejected candidate'; }
-[[ -s $release/generated/$service.service ]] || fail 'Quadlet generator did not generate requested service'
+validate_candidate_quadlet
 jq --arg image "$image" --arg retention "$retention" --arg previous "$old_id" --arg os "$platform_os" --arg arch "$platform_arch" --arg timestamp "$(date -u +%FT%TZ)" --argjson digests "$(jq '.[0].RepoDigests // []' <<< "$inspection")" '. + {image_id:$image,registry_digests:$digests,retention_tag:$retention,created_at:$timestamp,previous_release:(if $previous == "" then null else $previous end),has_predecessor:($previous != ""),os:$os,architecture:$arch,check_result:null}' "$request" | atomic_json "$release/manifest.json"
 
 [[ ! -e $unit.deploy-install-$id && ! -L $unit.deploy-install-$id ]] || fail 'Reserved Quadlet temporary path already exists'
@@ -221,7 +199,7 @@ transaction_exit() {
  if (( status != 0 )); then
   if $changed || ! snapshot_unchanged "$release"; then
   echo "Image rollout failed (exit $status); restoring previous deployment" >&2
-  if restore_image_deployment "$release"; then
+  if bounded_recovery restore_image_deployment "$release"; then
    echo 'Rollout failed; previous state restored' >&2
   else
    echo "ROLLBACK FAILED after rollout failure (exit $status); pending state and backups preserved at $release" >&2
@@ -239,23 +217,29 @@ trap 'exit 143' TERM
 sync -f -- "$release"
 bind_service
 jq -n --arg id "$id" '{schema:1,release_id:$id}' | atomic_json "$pending"
+phase_checkpoint pending
 if $old_active && [[ $(jq -r .stop_on_deploy "$request") == true ]]; then systemctl --user stop "$service.service"; changed=true; fi
+check_release_capacity
 prepare_release_database
 install_managed_files "$before" "$stage/artifacts"
 check_path "$unit.deploy-install-$id"
 cp -- "$release/candidate.container" "$unit.deploy-install-$id"
 chmod 600 "$unit.deploy-install-$id"
 durable_move "$unit.deploy-install-$id" "$unit"
+phase_checkpoint candidate-activation
 changed=true
 systemctl --user daemon-reload
 if [[ -f $before/database.json ]]; then printf '{}\n' | atomic_json "$release/database-started.json"; fi
 systemctl --user restart "$service.service"
+phase_checkpoint candidate-started
 wait_health "$release/manifest.json" "$image" || fail 'Readiness deadline exceeded (service, image identity or application health check)'
 check_result=application-health
 if [[ $(jq -r .health_command "$request") != true && -z $(jq -r .health_url "$request") ]]; then check_result=service-and-image-only; fi
 jq --arg result "$check_result" --arg timestamp "$(date -u +%FT%TZ)" '.check_result=$result | .confirmed_at=$timestamp' "$release/manifest.json" | atomic_json "$release/manifest.json"
 jq -n --arg id "$id" --arg previous "$old_id" --arg service "$service" --arg target "$target" '{schema:1,current:$id,previous:(if $previous == "" then null else $previous end),service:$service,target:$target}' | atomic_json "$current"
 # Once committed, a disconnect is resolved by checking current.json and readiness.
+phase_checkpoint commit
 changed=false
 durable_remove "$pending"
-printf 'Confirmed configuration %s; image %s; readiness: %s\n' "$(jq -r .git_version "$request")" "$image" "$check_result"
+phase_checkpoint pending-cleared
+printf 'Confirmed release %s; commit %s; image %s; readiness: %s\n' "$id" "$(jq -r .git_commit "$request")" "$image" "$check_result"
