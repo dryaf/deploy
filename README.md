@@ -127,7 +127,7 @@ environments:
       description: "Production Service"
       image: "localhost/my-awesome-app:latest"
       dockerfile: "Dockerfile.vps" # The file used for 'podman build' on remote
-      network: "traefik-net"
+      network: "traefik-net.network" # Reference the network Quadlet created by server provision
       auto_restart: true
       timezone: "Europe/Vienna"
 
@@ -263,10 +263,17 @@ The live integration suite passed on Podman 5.4.2 and systemd 257.5 in an isolat
 rootless test account on 2026-10-17. These versions define the supported floor.
 The local generator check also passed on Podman 5.7.0/systemd 259.
 
-Existing networks are reused. A `*.network` reference must resolve to an existing
-network Quadlet. Plain names refer to existing Podman networks. This feature does
-not provision networks. The container remains `systemd-<service_name>`; give each
-environment distinct service names, target directories and network aliases.
+Both release modes reuse existing networks. `deploy server provision` creates
+`<network_name>.network` using `server.yaml`'s `stack.traefik.network_name`
+(default: `traefik-net`). Set `quadlet.network: traefik-net.network` for that
+default, or `<network_name>.network` for a custom name. Provision Traefik and deploy
+the application with the same remote SSH user so they share the rootless network.
+
+A `*.network` reference must resolve to an existing network Quadlet. Plain names
+refer to existing Podman networks, so `traefik-net` is not equivalent to
+`traefik-net.network`. Application releases do not provision networks. The container
+remains `systemd-<service_name>`; give each environment distinct service names,
+target directories and network aliases.
 
 ### Routing, environment files and health
 
