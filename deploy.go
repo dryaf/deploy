@@ -77,6 +77,9 @@ func release(explicitVersion, envName string, runner ReleaseRunner) error {
 func executeBinaryRelease(p ReleasePlan, runner ReleaseRunner) error {
 	cfg, env, version := p.Config.Config, p.Config.Env, p.Version
 	preflight := binaryRemotePreflight + imageResourceChecks(env.Quadlet)
+	if env.Database.Driver != "" {
+		preflight += databaseReleasePreflight
+	}
 	if env.Quadlet.HealthURL != "" {
 		preflight += "\ncommand -v curl >/dev/null\n"
 	}
@@ -84,6 +87,20 @@ func executeBinaryRelease(p ReleasePlan, runner ReleaseRunner) error {
 		return err
 	}
 	if err := os.MkdirAll("build", 0755); err != nil {
+		return err
+	}
+	if info, err := os.Lstat("build"); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("build must be a real directory")
+	}
+	output := filepath.Join("build", cfg.BinaryName)
+	if info, err := os.Lstat(output); err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("build output must be a regular file: %s", output)
+		}
+		if err := os.Remove(output); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
 		return err
 	}
 
@@ -135,13 +152,15 @@ func executeBinaryRelease(p ReleasePlan, runner ReleaseRunner) error {
 		if cfg.Build.Dir != "" {
 			srcDir = cfg.Build.Dir
 		}
-		output := fmt.Sprintf("build/%s", cfg.BinaryName)
 		cmd = exec.Command("go", "build", "-ldflags", ldflags, "-o", output, srcDir)
 		cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+arch)
 	}
 
 	if err := runner.Local(cmd); err != nil {
 		return fmt.Errorf("build: %w", err)
+	}
+	if info, err := os.Lstat(output); err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		return fmt.Errorf("build did not produce a nonempty regular file at %s", output)
 	}
 
 	containerPath := filepath.Join("build", env.Quadlet.ServiceName+".container")

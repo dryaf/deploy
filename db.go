@@ -3,7 +3,6 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,15 +17,30 @@ var databaseTransactionBody string
 
 var databaseTransactionScript = transactionCommonScript + "\n" + databaseTransactionBody
 
+const databaseReleasePreflight = `
+command -v sqlite3 >/dev/null || { echo 'Configured database requires sqlite3' >&2; exit 1; }
+sqlite3 :memory: '.help dump' | grep -q -- '--preserve-rowids' || { echo 'SQLite CLI with .dump --preserve-rowids is required' >&2; exit 1; }
+`
+
 type databaseRequest struct {
-	Schema    int            `json:"schema"`
-	ReleaseID string         `json:"release_id"`
-	Service   string         `json:"service"`
-	Target    string         `json:"target"`
-	Mode      DeploymentMode `json:"deployment_mode"`
-	Database  string         `json:"database"`
-	UID       int            `json:"container_uid"`
-	GID       int            `json:"container_gid"`
+	Schema      int            `json:"schema"`
+	ReleaseID   string         `json:"release_id"`
+	Service     string         `json:"service"`
+	Target      string         `json:"target"`
+	Mode        DeploymentMode `json:"deployment_mode"`
+	Database    string         `json:"database"`
+	UID         int            `json:"container_uid"`
+	GID         int            `json:"container_gid"`
+	Environment string         `json:"environment"`
+}
+
+func configureReleaseDatabase(req *imageReleaseRequest, env Environment) {
+	req.Environment = env.Name
+	req.UID, req.GID = env.Quadlet.ContainerUID, env.Quadlet.ContainerGID
+	if env.Database.Driver == "sqlite" {
+		req.Database = path.Join(env.Dir, env.Database.Source)
+		req.DatabaseRollback = env.Database.Rollback
+	}
 }
 
 func databasePaths(env Environment) (local, remote string, err error) {
@@ -46,7 +60,7 @@ func doDBPull(envName string) {
 		logFatal("Database pull: %v", err)
 	}
 	if dryRun {
-		logInfo("[DRY] Download SQLite snapshot to %s; preserve existing database as .bak", local)
+		logInfo("[DRY] Download SQLite snapshot to %s; retain a timestamped backup in its sibling backup directory", local)
 		return
 	}
 	if !confirm(fmt.Sprintf("Download to %s and back up the existing database? Stop your local application first.", local)) {
@@ -88,7 +102,77 @@ func sqliteSnapshot(source, destination string) error {
 	if err != nil {
 		return fmt.Errorf("SQLite snapshot: %w: %s", err, out)
 	}
+	if err := os.Chmod(destination, 0600); err != nil {
+		return err
+	}
+	if err := validateSQLiteSnapshot(destination); err != nil {
+		return err
+	}
 	return syncFile(destination)
+}
+
+func validateSQLiteSnapshot(file string) error {
+	out, err := exec.Command("sqlite3", "-readonly", file, "PRAGMA quick_check;").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "ok" {
+		return fmt.Errorf("SQLite snapshot failed integrity validation: %s", out)
+	}
+	return nil
+}
+
+func filenameLabel(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			return r
+		}
+		return '-'
+	}, value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
+}
+
+func backupLocalDatabase(database, environment, operation string) (string, error) {
+	dir := filepath.Join(filepath.Dir(database), "backup")
+	if info, err := os.Lstat(dir); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("backup must be a real directory: %s", dir)
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return "", err
+	}
+	id, err := newReleaseID("backup")
+	if err != nil {
+		return "", err
+	}
+	name := strings.TrimSuffix(filepath.Base(database), filepath.Ext(database)) + "." + filenameLabel(environment) + "." + filenameLabel(operation) + "." + strings.TrimPrefix(id, "backup-") + ".db"
+	backup := filepath.Join(dir, name)
+	temp, err := os.CreateTemp(dir, ".snapshot-")
+	if err != nil {
+		return "", err
+	}
+	temp.Close()
+	defer os.Remove(temp.Name())
+	if err := sqliteSnapshot(database, temp.Name()); err != nil {
+		return "", err
+	}
+	if err := os.Rename(temp.Name(), backup); err != nil {
+		return "", err
+	}
+	if err := syncFile(dir); err != nil {
+		return "", err
+	}
+	if err := syncFile(filepath.Dir(dir)); err != nil {
+		return "", err
+	}
+	logInfo("Database backup: %s", backup)
+	return backup, nil
 }
 
 func syncFile(file string) error {
@@ -104,7 +188,7 @@ func syncFile(file string) error {
 	return closeErr
 }
 
-func pullDatabase(env Environment) (resultErr error) {
+func pullDatabase(env Environment) error {
 	local, remote, err := databasePaths(env)
 	if err != nil {
 		return err
@@ -125,12 +209,7 @@ func pullDatabase(env Environment) (resultErr error) {
 	if err != nil {
 		return err
 	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			os.RemoveAll(dir)
-		}
-	}()
+	defer os.RemoveAll(dir)
 	download := filepath.Join(dir, "download.db")
 	f, err := os.OpenFile(download, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
@@ -162,53 +241,45 @@ cd -- "$temp"
 	if closeErr != nil {
 		return closeErr
 	}
-	if out, err := exec.Command("sqlite3", "-readonly", download, "PRAGMA quick_check;").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "ok" {
-		return fmt.Errorf("downloaded database failed integrity validation: %s", out)
+	if err := validateSQLiteSnapshot(download); err != nil {
+		return err
 	}
 	if _, err := os.Lstat(local); err == nil {
-		backup := filepath.Join(dir, "before.db")
-		if err := sqliteSnapshot(local, backup); err != nil {
+		backup, err := backupLocalDatabase(local, "local", "before-pull-from-"+filenameLabel(env.Name))
+		if err != nil {
 			return err
 		}
-		if err := os.Rename(backup, local+".bak"); err != nil {
+		// Keep the legacy latest-backup file, while retaining every unique snapshot.
+		if err := sqliteSnapshot(backup, filepath.Join(dir, "latest.db")); err != nil {
+			return err
+		}
+		if err := os.Rename(filepath.Join(dir, "latest.db"), local+".bak"); err != nil {
 			return err
 		}
 		if err := syncFile(filepath.Dir(local)); err != nil {
 			return err
 		}
+		// SQLite's backup API publishes the replacement in a database transaction.
+		// Its journal/WAL handles process crashes; never detach sidecars by hand.
+		out, err := exec.Command("sqlite3", "-cmd", ".timeout 5000", local, ".restore "+strconv.Quote(download)).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("restore downloaded snapshot: %w: %s", err, out)
+		}
+		if err := syncFile(local); err != nil {
+			return err
+		}
+		return syncFile(filepath.Dir(local))
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	// Move old sidecars aside, restoring them if the final rename fails.
-	moved := []string{}
-	published := false
-	defer func() {
-		if published {
-			return
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Lstat(local + suffix); !os.IsNotExist(err) {
+			return fmt.Errorf("orphan database sidecar requires recovery before pull: %s", local+suffix)
 		}
-		for _, suffix := range moved {
-			if err := os.Rename(filepath.Join(dir, "before"+suffix), local+suffix); err != nil {
-				cleanup = false
-				resultErr = errors.Join(resultErr, fmt.Errorf("restore sidecar: %w; retained recovery files at %s", err, dir))
-			}
-		}
-	}()
-	for _, suffix := range []string{"-wal", "-shm"} {
-		old := local + suffix
-		if _, err := os.Lstat(old); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return err
-		}
-		if err := os.Rename(old, filepath.Join(dir, "before"+suffix)); err != nil {
-			return err
-		}
-		moved = append(moved, suffix)
 	}
 	if err := os.Rename(download, local); err != nil {
 		return err
 	}
-	published = true
 	return syncFile(filepath.Dir(local))
 }
 
@@ -236,7 +307,7 @@ func pushDatabase(env Environment, mode DeploymentMode, runner ReleaseRunner) er
 	if mode == "" {
 		mode = ModeBinary
 	}
-	req := databaseRequest{Schema: 1, ReleaseID: id, Service: env.Quadlet.ServiceName, Target: env.Dir, Mode: mode, Database: remote, UID: env.Quadlet.ContainerUID, GID: env.Quadlet.ContainerGID}
+	req := databaseRequest{Schema: 1, ReleaseID: id, Service: env.Quadlet.ServiceName, Target: env.Dir, Mode: mode, Database: remote, UID: env.Quadlet.ContainerUID, GID: env.Quadlet.ContainerGID, Environment: env.Name}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return err

@@ -108,6 +108,9 @@ func (p ReleasePlan) Print(w io.Writer) {
 	if n.Env.Quadlet.HealthCmd == "" && n.Env.Quadlet.HealthURL == "" {
 		fmt.Fprintln(w, "Readiness: service activity and image identity only; no application health check configured")
 	}
+	if n.Env.Database.Driver == "sqlite" {
+		fmt.Fprintf(w, "Database: %s; stop service and retain snapshot before startup; changed-database rollback: %s\n", n.Env.Database.Source, displayDefault(n.Env.Database.Rollback, "manual"))
+	}
 }
 func displayDefault(s, fallback string) string {
 	if s == "" {

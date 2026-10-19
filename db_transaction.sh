@@ -27,16 +27,15 @@ if db_fileop "$uid" test -e "$database"; then
  db_fileop "$uid" test -f "$database" || fail 'Remote database is not a regular file'
  existed=true
  # A SQLite backup includes committed WAL data; copying only the main file does not.
- backup_arg=$(jq -Rn --arg file "$op/before.db" '$file')
- db_fileop "$uid" sqlite3 -readonly "$database" ".backup $backup_arg"
- chmod 600 "$op/before.db"
+ sqlite_snapshot "$uid" "$database" "$op/before.db"
+ retain_database_backup "$database" "$uid" "$op/before.db" "$(jq -r '.environment // "unknown"' "$request")" before-push
  checksum=$(sha256sum -- "$op/before.db" | cut -d' ' -f1)
  old_mode=$(db_fileop "$uid" stat -c '%a' -- "$database")
  old_owner=$(db_fileop "$uid" stat -c '%u:%g' -- "$database")
  db_check_path "$uid" "$database.bak"
  db_check_path "$uid" "$database.bak.deploy-install-$id"
  db_fileop "$uid" cp -- "$op/before.db" "$database.bak.deploy-install-$id"
- db_fileop "$uid" chmod "$old_mode" "$database.bak.deploy-install-$id"
+ db_fileop "$uid" chmod 600 "$database.bak.deploy-install-$id"
  db_fileop "$uid" chown "$old_owner" "$database.bak.deploy-install-$id"
  db_fileop "$uid" sync -f -- "$database.bak.deploy-install-$id"
  db_fileop "$uid" mv -fT -- "$database.bak.deploy-install-$id" "$database.bak"

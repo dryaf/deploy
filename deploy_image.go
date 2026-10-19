@@ -18,19 +18,24 @@ var transactionCommonScript string
 var imageTransactionScript = transactionCommonScript + "\n" + imageTransactionBody
 
 type imageReleaseRequest struct {
-	Schema        int     `json:"schema"`
-	ReleaseID     string  `json:"release_id"`
-	Version       string  `json:"git_version"`
-	Commit        string  `json:"git_commit"`
-	Service       string  `json:"service"`
-	Target        string  `json:"target"`
-	Reference     string  `json:"configured_reference"`
-	EnvFile       string  `json:"env_file"`
-	SyncEnv       bool    `json:"sync_env"`
-	HealthCommand bool    `json:"health_command"`
-	HealthURL     string  `json:"health_url"`
-	HealthSeconds float64 `json:"health_seconds"`
-	Stop          bool    `json:"stop_on_deploy"`
+	Schema           int     `json:"schema"`
+	ReleaseID        string  `json:"release_id"`
+	Version          string  `json:"git_version"`
+	Commit           string  `json:"git_commit"`
+	Service          string  `json:"service"`
+	Target           string  `json:"target"`
+	Reference        string  `json:"configured_reference"`
+	EnvFile          string  `json:"env_file"`
+	SyncEnv          bool    `json:"sync_env"`
+	HealthCommand    bool    `json:"health_command"`
+	HealthURL        string  `json:"health_url"`
+	HealthSeconds    float64 `json:"health_seconds"`
+	Stop             bool    `json:"stop_on_deploy"`
+	Environment      string  `json:"environment"`
+	Database         string  `json:"database,omitempty"`
+	DatabaseRollback string  `json:"database_rollback,omitempty"`
+	UID              int     `json:"container_uid"`
+	GID              int     `json:"container_gid"`
 }
 
 func executeImageRelease(p ReleasePlan, runner ReleaseRunner) error {
@@ -49,6 +54,7 @@ func executeImageRelease(p ReleasePlan, runner ReleaseRunner) error {
 		HealthCommand: e.Quadlet.HealthCmd != "", HealthURL: e.Quadlet.HealthURL,
 		HealthSeconds: n.HealthTimeout.Seconds(), Stop: e.Quadlet.StopOnDeploy,
 	}
+	configureReleaseDatabase(&request, e)
 	body, err := json.Marshal(request)
 	if err != nil {
 		return err
@@ -61,6 +67,9 @@ func executeImageRelease(p ReleasePlan, runner ReleaseRunner) error {
 	stage := path.Join(e.Dir, ".deploy/image/staging", p.ReleaseID)
 	// This preflight does not modify the service or its active files.
 	setup := imageRemotePreflight + "\n" + imageResourceChecks(e.Quadlet)
+	if request.Database != "" {
+		setup += databaseReleasePreflight
+	}
 	if e.Quadlet.HealthURL != "" {
 		setup += "command -v curl >/dev/null || { echo 'Host health_url requires curl' >&2; exit 1; }\n"
 	}

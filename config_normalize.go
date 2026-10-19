@@ -58,6 +58,25 @@ func normalizeAndValidateConfig(cfg Config, envName string) (NormalizedConfig, e
 		return n, fmt.Errorf("environment %q not found", envName)
 	}
 	n.Env = env
+	n.Env.Name = envName
+	if env.Database != (DatabaseConfig{}) {
+		if _, _, err := databasePaths(n.Env); err != nil {
+			return n, err
+		}
+		if env.Database.Rollback != "" && env.Database.Rollback != "manual" && env.Database.Rollback != "restore" {
+			return n, fmt.Errorf("database.rollback must be manual or restore")
+		}
+		backupDir := path.Join(env.Dir, path.Dir(env.Database.Source), "backup")
+		for _, owned := range env.Quadlet.ChownVolumes {
+			if !path.IsAbs(owned) {
+				owned = path.Join(env.Dir, owned)
+			}
+			owned = path.Clean(owned)
+			if owned == backupDir || strings.HasPrefix(owned, backupDir+"/") {
+				return n, fmt.Errorf("chown_volumes cannot target the database backup directory")
+			}
+		}
+	}
 	q := &n.Env.Quadlet
 	if cfg.AppName == "" {
 		return n, fmt.Errorf("app_name is required")
@@ -180,6 +199,9 @@ func normalizeAndValidateConfig(cfg Config, envName string) (NormalizedConfig, e
 		return n, err
 	}
 	if n.Mode == ModeBinary {
+		if err := validateArtifactPath(q.Dockerfile); err != nil {
+			return n, fmt.Errorf("dockerfile: %w", err)
+		}
 		for name, text := range map[string]string{"build.cmd": cfg.Build.Cmd, "build.ldflags": cfg.Build.Ldflags} {
 			tmpl, err := template.New(name).Parse(text)
 			if err != nil {
@@ -190,20 +212,18 @@ func normalizeAndValidateConfig(cfg Config, envName string) (NormalizedConfig, e
 			}
 		}
 	}
-	if n.Mode == ModeImage {
-		for i, p := range cfg.Artifacts.Include {
-			if err := validateArtifactPath(p); err != nil {
-				return n, err
-			}
-			p = path.Clean(p)
-			if env.SyncEnvFile != "" && (p == ".env" || strings.HasPrefix(p, ".env/")) {
-				return n, fmt.Errorf("artifact overlaps synchronized .env")
-			}
-			for _, other := range cfg.Artifacts.Include[:i] {
-				other = path.Clean(other)
-				if p == other || strings.HasPrefix(p, other+"/") || strings.HasPrefix(other, p+"/") {
-					return n, fmt.Errorf("overlapping artifact paths")
-				}
+	for i, p := range cfg.Artifacts.Include {
+		if err := validateArtifactPath(p); err != nil {
+			return n, err
+		}
+		p = path.Clean(p)
+		if env.SyncEnvFile != "" && (p == ".env" || strings.HasPrefix(p, ".env/")) {
+			return n, fmt.Errorf("artifact overlaps synchronized .env")
+		}
+		for _, other := range cfg.Artifacts.Include[:i] {
+			other = path.Clean(other)
+			if p == other || strings.HasPrefix(p, other+"/") || strings.HasPrefix(other, p+"/") {
+				return n, fmt.Errorf("overlapping artifact paths")
 			}
 		}
 	}

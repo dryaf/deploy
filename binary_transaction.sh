@@ -31,6 +31,7 @@ restore_binary_deployment() {
  if ! systemctl --user stop "$service.service"; then
   if service_is_active; then return 1; else [[ $? == 1 ]] || return 1; fi
  fi
+ restore_release_database "$release" || return
  restore_managed_files "$before" "$restore_id" || return
  if [[ $(jq -r .quadlet "$before/snapshot.json") == true ]]; then
   check_path "$unit.deploy-restore-$restore_id" || return
@@ -114,11 +115,16 @@ printf '[]\n' > "$before/files.json"
 find "$stage/artifacts" -mindepth 1 -print0 | sort -z > "$release/staged-paths"
 while IFS= read -r -d '' file; do
  rel=${file#"$stage/artifacts/"}
+ [[ $rel != .env ]] || fail 'Environment files must be synchronized separately from build artifacts'
+ [[ $target/$rel != "$(jq -r '.env_file // ""' "$request")" ]] || fail 'Configured environment file cannot be a build artifact'
  [[ ! -L $file ]] || fail 'Symlinks are not supported in transactional binary artifacts'
  if [[ -d $file ]]; then record_path "$rel" directory
  elif [[ -f $file ]]; then record_path "$rel" file
  else fail 'Unsupported binary artifact'; fi
 done < "$release/staged-paths"
+dockerfile=$(jq -er .dockerfile "$request")
+[[ $dockerfile != /* && /$dockerfile/ != */../* && -f $stage/artifacts/$dockerfile && ! -L $stage/artifacts/$dockerfile ]] || fail 'Dockerfile is missing from staged build artifacts'
+reconcile_managed_files
 if [[ $(jq -r .sync_env "$request") == true ]]; then
  [[ -f $stage/env && ! -L $stage/env ]] || fail 'Missing staged environment file'
  record_path .env file
@@ -149,10 +155,11 @@ trap 'exit 143' TERM
 bind_service
 jq -n --arg id "$id" '{schema:1,release_id:$id}' | atomic_json "$pending"
 if $old_active && [[ $(jq -r .stop_on_deploy "$request") == true ]]; then systemctl --user stop "$service.service"; changed=true; fi
+prepare_release_database
 install_managed_files "$before" "$stage/artifacts"
 reference=$(jq -er .configured_reference "$request")
 dockerfile=$(jq -er .dockerfile "$request")
-cd -- "$target"
+cd -- "$stage/artifacts"
 podman build --iidfile "$release/built-image-id" -f "$dockerfile" -t "$reference" .
 # Capture this build's ID directly: another service may reuse the mutable tag.
 image=$(canonical_id "$(cat -- "$release/built-image-id")")
@@ -162,7 +169,15 @@ uid=$(jq -r .container_uid "$request")
 gid=$(jq -r .container_gid "$request")
 if (( uid > 0 )); then
  jq -r '(.chown_paths // [])[]' "$request" > "$release/chown-paths"
- while IFS= read -r owned; do podman unshare chown -R "$uid:$gid" "$owned"; done < "$release/chown-paths"
+ database=$(jq -r '.database // ""' "$request")
+ backup_directory=''
+ if [[ -n $database ]]; then backup_directory="$(dirname -- "$database")/backup"; fi
+ while IFS= read -r owned; do
+  if [[ -n $backup_directory ]]; then
+   # Keep historical backups owned by the SSH user, outside application ownership.
+   podman unshare find "$owned" -path "$backup_directory" -prune -o -exec chown --no-dereference "$uid:$gid" -- '{}' +
+  else podman unshare chown -R "$uid:$gid" "$owned"; fi
+ done < "$release/chown-paths"
 fi
 [[ $(grep -c '^Image=' "$stage/candidate.container") == 1 ]] || fail 'Candidate has no unique image reference'
 sed "s/^Image=.*$/Image=$image\nPull=never/" "$stage/candidate.container" > "$release/candidate.container"
@@ -172,6 +187,7 @@ chmod 600 "$unit.deploy-install-$id"
 durable_move "$unit.deploy-install-$id" "$unit"
 changed=true
 systemctl --user daemon-reload
+if [[ -f $before/database.json ]]; then printf '{}\n' | atomic_json "$release/database-started.json"; fi
 systemctl --user restart "$service.service"
 wait_health "$release/manifest.json" "$image" || fail 'Binary readiness deadline exceeded'
 jq --arg image "$image" '.image_id=$image | .check_result="confirmed"' "$release/manifest.json" | atomic_json "$release/manifest.json"

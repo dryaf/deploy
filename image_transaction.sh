@@ -30,6 +30,7 @@ restore_image_deployment() {
   if service_is_active; then fail 'Could not stop candidate service'; return 1
   else [[ $? == 1 ]] || return 1; fi
  fi
+ restore_release_database "$release" || return
  restore_managed_files "$before" "$restore_id" || return
  check_path "$unit.deploy-install-$restore_id" || return
  rm -f -- "$unit.deploy-install-$restore_id" || return
@@ -148,12 +149,14 @@ printf '[]\n' > "$before/files.json"
 find "$stage/artifacts" -mindepth 1 -print0 | sort -z > "$release/staged-paths"
 while IFS= read -r -d '' file; do
  rel=${file#"$stage/artifacts/"}
+ [[ $rel != .env ]] || fail 'Environment files must be synchronized separately from artifacts'
  [[ $rel != .deploy && $rel != .deploy/* && $rel != ../* && $rel != /* ]] || fail 'Unsafe staged artifact'
  [[ ! -L $file ]] || fail 'Symlink in staged artifacts'
  if [[ -d $file ]]; then record_path "$rel" directory
  elif [[ -f $file ]]; then record_path "$rel" file
  else fail 'Unsupported staged artifact'; fi
 done < "$release/staged-paths"
+reconcile_managed_files
 if [[ $(jq -r .sync_env "$request") == true ]]; then
  [[ -f $stage/env && ! -L $stage/env ]] || fail 'Missing staged environment file'
  record_path .env file
@@ -237,6 +240,7 @@ sync -f -- "$release"
 bind_service
 jq -n --arg id "$id" '{schema:1,release_id:$id}' | atomic_json "$pending"
 if $old_active && [[ $(jq -r .stop_on_deploy "$request") == true ]]; then systemctl --user stop "$service.service"; changed=true; fi
+prepare_release_database
 install_managed_files "$before" "$stage/artifacts"
 check_path "$unit.deploy-install-$id"
 cp -- "$release/candidate.container" "$unit.deploy-install-$id"
@@ -244,6 +248,7 @@ chmod 600 "$unit.deploy-install-$id"
 durable_move "$unit.deploy-install-$id" "$unit"
 changed=true
 systemctl --user daemon-reload
+if [[ -f $before/database.json ]]; then printf '{}\n' | atomic_json "$release/database-started.json"; fi
 systemctl --user restart "$service.service"
 wait_health "$release/manifest.json" "$image" || fail 'Readiness deadline exceeded (service, image identity or application health check)'
 check_result=application-health

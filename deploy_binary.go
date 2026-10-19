@@ -7,7 +7,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 )
 
 //go:embed binary_transaction.sh
@@ -18,14 +17,12 @@ var binaryTransactionScript = transactionCommonScript + "\n" + binaryTransaction
 type binaryReleaseRequest struct {
 	imageReleaseRequest
 	Dockerfile string   `json:"dockerfile"`
-	UID        int      `json:"container_uid"`
-	GID        int      `json:"container_gid"`
 	ChownPaths []string `json:"chown_paths"`
 }
 
 const binaryRemotePreflight = `set -euo pipefail
 umask 077
-for tool in bash podman systemctl rsync jq flock sync timeout realpath find stat cmp sha256sum grep sed sort cut dirname cp mv chmod mkdir rm rmdir cat chown; do
+for tool in bash podman systemctl rsync jq flock sync timeout realpath find stat cmp sha256sum grep sed sort cut dirname cp mv chmod mkdir rm rmdir cat chown date; do
  command -v "$tool" >/dev/null || { echo "Missing remote prerequisite: $tool" >&2; exit 1; }
 done
 systemctl --user show-environment >/dev/null
@@ -42,12 +39,13 @@ func stageBinaryRelease(p ReleasePlan, containerPath string, runner ReleaseRunne
 	if err != nil {
 		return err
 	}
-	req := binaryReleaseRequest{imageReleaseRequest: imageReleaseRequest{Schema: 1, ReleaseID: id, Version: p.Version, Commit: p.Commit, Service: e.Quadlet.ServiceName, Target: e.Dir, Reference: e.Quadlet.Image, EnvFile: n.EnvFile, SyncEnv: e.SyncEnvFile != "", HealthCommand: e.Quadlet.HealthCmd != "", HealthURL: e.Quadlet.HealthURL, HealthSeconds: n.HealthTimeout.Seconds(), Stop: e.Quadlet.StopOnDeploy}, Dockerfile: e.Quadlet.Dockerfile, UID: e.Quadlet.ContainerUID, GID: e.Quadlet.ContainerGID}
+	req := binaryReleaseRequest{imageReleaseRequest: imageReleaseRequest{Schema: 1, ReleaseID: id, Version: p.Version, Commit: p.Commit, Service: e.Quadlet.ServiceName, Target: e.Dir, Reference: e.Quadlet.Image, EnvFile: n.EnvFile, SyncEnv: e.SyncEnvFile != "", HealthCommand: e.Quadlet.HealthCmd != "", HealthURL: e.Quadlet.HealthURL, HealthSeconds: n.HealthTimeout.Seconds(), Stop: e.Quadlet.StopOnDeploy}, Dockerfile: e.Quadlet.Dockerfile}
+	configureReleaseDatabase(&req.imageReleaseRequest, e)
 	for _, owned := range e.Quadlet.ChownVolumes {
-		if strings.HasPrefix(owned, "./") {
+		if !path.IsAbs(owned) {
 			owned = path.Join(e.Dir, owned)
 		}
-		req.ChownPaths = append(req.ChownPaths, owned)
+		req.ChownPaths = append(req.ChownPaths, path.Clean(owned))
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -71,14 +69,18 @@ func stageBinaryRelease(p ReleasePlan, containerPath string, runner ReleaseRunne
 	if err := runner.Sync(e, []string{containerPath}, remoteDestination(e, stage+"/candidate.container")); err != nil {
 		return err
 	}
-	artifacts := []string{"build/" + n.Config.BinaryName}
-	if len(n.Config.Artifacts.Include) > 0 {
-		artifacts = append(artifacts, n.Config.Artifacts.Include...)
-	} else {
-		artifacts = append(artifacts, "Dockerfile.vps", "migrations", "files")
+	artifacts := n.Config.Artifacts.Include
+	if len(artifacts) == 0 {
+		artifacts = []string{"Dockerfile.vps", "migrations", "files"}
 	}
-	if err := runner.Sync(e, artifacts, remoteDestination(e, stage+"/artifacts/"), excludeArgs(n.Config.Artifacts.Exclude)...); err != nil {
+	args := append([]string{"--relative"}, excludeArgs(n.Config.Artifacts.Exclude)...)
+	if err := runner.Sync(e, cleanArtifactSources(artifacts), remoteDestination(e, stage+"/artifacts/"), args...); err != nil {
 		return fmt.Errorf("stage binary artifacts: %w", err)
+	}
+	// Artifact filters must never omit the compiled binary. Upload it last so a
+	// same-name artifact cannot replace it, even with identical size and mtime.
+	if err := runner.Sync(e, []string{filepath.Join("build", n.Config.BinaryName)}, remoteDestination(e, stage+"/artifacts/"), "--checksum"); err != nil {
+		return fmt.Errorf("stage built binary: %w", err)
 	}
 	if e.SyncEnvFile != "" {
 		if err := runner.Sync(e, []string{e.SyncEnvFile}, remoteDestination(e, stage+"/env"), "--chmod=F600"); err != nil {

@@ -66,6 +66,7 @@ type ArtifactsConfig struct {
 }
 
 type Environment struct {
+	Name        string            `yaml:"-"`
 	Host        string            `yaml:"host"`
 	User        string            `yaml:"user"`
 	Port        int               `yaml:"ssh_port"`
@@ -85,8 +86,9 @@ type MaintenanceConfig struct {
 }
 
 type DatabaseConfig struct {
-	Driver string `yaml:"driver"`
-	Source string `yaml:"source"`
+	Driver   string `yaml:"driver"`
+	Source   string `yaml:"source"`
+	Rollback string `yaml:"rollback"` // manual (default), or restore with possible loss of candidate writes
 }
 
 type TraefikConfig struct {

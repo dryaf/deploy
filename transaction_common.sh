@@ -146,6 +146,125 @@ db_check_path() {
   podman unshare bash -c "$(declare -f fail check_path); check_path \"\$1\"" -- "$path"
  else check_path "$path"; fi
 }
+validate_database_path() {
+ [[ $1 == "$target/"* && /${1#"$target/"}/ != */../* && /${1#"$target/"}/ != */.deploy/* ]] || { fail 'Unsafe database path'; return 1; }
+}
+sqlite_snapshot() {
+ local uid=$1 source=$2 destination=$3 argument
+ check_path "$destination" || return
+ argument=$(jq -Rn --arg file "$destination" '$file') || return
+ db_fileop "$uid" sqlite3 -readonly "$source" ".backup $argument" || return
+ chmod 600 "$destination" || return
+ [[ $(sqlite3 -readonly "$destination" 'PRAGMA quick_check;') == ok ]] || { fail 'Database backup failed integrity validation'; return 1; }
+ sync -f -- "$destination"
+}
+sqlite_fingerprint() {
+ # Backup/restore can change SQLite's page-header counters without changing data.
+ # Compare SQL contents only when byte checksums differ; pipefail fails closed.
+ sqlite3 :memory: '.help dump' | grep -q -- '--preserve-rowids' || return
+ sqlite3 -readonly -bail -cmd 'PRAGMA user_version; PRAGMA application_id; PRAGMA encoding;' "$1" '.dump --preserve-rowids' | sha256sum | cut -d' ' -f1
+}
+retain_database_backup() {
+ local database=$1 uid=$2 snapshot=$3 environment=$4 operation=$5 directory name temporary
+ directory="$(dirname -- "$database")/backup"
+ db_check_path "$uid" "$directory" || return
+ db_fileop "$uid" mkdir -p -m 700 -- "$directory" || return
+ db_fileop "$uid" chmod 700 -- "$directory" || return
+ environment=$(printf '%s' "${environment:-unknown}" | sed 's/[^a-zA-Z0-9_-]/-/g') || return
+ name=${database##*/}
+ name=${name%.*}
+ database_backup="$directory/$name.$environment.$operation.$(date -u +%Y%m%dT%H%M%S%NZ).$id.db"
+ temporary="$database_backup.tmp"
+ db_check_path "$uid" "$database_backup" || return
+ db_check_path "$uid" "$temporary" || return
+ if db_fileop "$uid" test -e "$database_backup"; then fail 'Database backup already exists'; return 1; fi
+ db_fileop "$uid" cp -- "$snapshot" "$temporary" || return
+ db_fileop "$uid" chmod 600 -- "$temporary" || return
+ db_fileop "$uid" sync -f -- "$temporary" || return
+ db_fileop "$uid" mv -fT -- "$temporary" "$database_backup" || return
+ db_fileop "$uid" sync -f -- "$directory" || return
+ echo "Database backup: $database_backup" >&2
+}
+prepare_release_database() {
+ local database uid environment existed=false old_mode=600 old_owner='' checksum='' backup=''
+ database=$(jq -r '.database // ""' "$request") || return
+ [[ -n $database ]] || return 0
+ validate_database_path "$database" || return
+ uid=$(jq -r '.container_uid // 0' "$request") || return
+ db_check_path "$uid" "$database" || return
+ if service_is_active; then
+  systemctl --user stop "$service.service" || return
+  changed=true
+ else [[ $? == 1 ]] || return 1; fi
+ db_fileop "$uid" mkdir -p -- "$(dirname -- "$database")" || return
+ db_fileop "$uid" test -x "$(dirname -- "$database")" || { fail 'Database parent is inaccessible; verify container_uid'; return 1; }
+ if db_fileop "$uid" test -e "$database"; then
+  db_fileop "$uid" test -f "$database" || { fail 'Database is not a regular file'; return 1; }
+  db_fileop "$uid" test -r "$database" || { fail 'Database is unreadable; verify container_uid'; return 1; }
+  existed=true
+  old_mode=$(db_fileop "$uid" stat -c '%a' -- "$database") || return
+  old_owner=$(db_fileop "$uid" stat -c '%u:%g' -- "$database") || return
+  sqlite_snapshot "$uid" "$database" "$before/database.db" || return
+  checksum=$(sha256sum -- "$before/database.db" | cut -d' ' -f1) || return
+  environment=$(jq -r '.environment // "unknown"' "$request") || return
+  retain_database_backup "$database" "$uid" "$before/database.db" "$environment" before-release || return
+  backup=$database_backup
+ fi
+ jq --argjson existed "$existed" --arg checksum "$checksum" --arg mode "$old_mode" --arg owner "$old_owner" --arg backup "$backup" '. + {existed:$existed,sha256:$checksum,old_mode:$mode,old_owner:$owner,backup:$backup}' "$request" | atomic_json "$before/database.json"
+}
+restore_release_database() {
+ local release=$1 metadata="$1/before/database.json" database uid existed unchanged=false saved checksum temporary environment old_contents new_contents
+ [[ -f $release/database-started.json ]] || return 0
+ [[ -f $metadata ]] || { fail 'Missing pre-release database snapshot'; return 1; }
+ database=$(jq -er .database "$metadata") || return
+ validate_database_path "$database" || return
+ uid=$(jq -r '.container_uid // 0' "$metadata") || return
+ existed=$(jq -r .existed "$metadata") || return
+ db_check_path "$uid" "$database" || return
+ if [[ $existed == true ]]; then
+  saved="$release/before/database.db"
+  checksum=$(jq -er .sha256 "$metadata") || return
+  [[ $(sha256sum -- "$saved" | cut -d' ' -f1) == "$checksum" ]] || { fail 'Pre-release database backup checksum mismatch'; return 1; }
+ fi
+ if [[ ! -f $release/database-restoring.json ]]; then
+  if db_fileop "$uid" test -f "$database"; then
+   if sqlite_snapshot "$uid" "$database" "$release/after-database.db"; then
+    if [[ $existed == true ]]; then
+     if [[ $(sha256sum -- "$release/after-database.db" | cut -d' ' -f1) == "$checksum" ]]; then unchanged=true
+     elif old_contents=$(sqlite_fingerprint "$saved") && new_contents=$(sqlite_fingerprint "$release/after-database.db") && [[ $old_contents == "$new_contents" ]]; then unchanged=true; fi
+    fi
+   fi
+  elif [[ $existed == false ]] && ! db_fileop "$uid" test -e "$database"; then unchanged=true; fi
+  if $unchanged; then return 0; fi
+  if [[ $(jq -r '.database_rollback // "manual"' "$metadata") != restore ]]; then
+   if [[ $existed == true ]]; then
+    echo "Database changed during startup; service remains stopped. Restore the pre-release snapshot at $release/before/database.db before retrying recovery." >&2
+   else echo 'Database was created during startup; service remains stopped. Preserve and remove the new database and its sidecars before retrying recovery.' >&2; fi
+   echo 'Automatic restoration requires database.rollback: restore before release and may discard candidate writes.' >&2
+   return 1
+  fi
+  # Preserve the candidate's data too, before an explicitly authorized rewind.
+  if db_fileop "$uid" test -f "$database"; then
+   sqlite_snapshot "$uid" "$database" "$release/after-database.db" || return
+   environment=$(jq -r '.environment // "unknown"' "$metadata") || return
+   retain_database_backup "$database" "$uid" "$release/after-database.db" "$environment" before-rollback || return
+  fi
+  # Recovery must finish the same rewind after a crash, without reinterpreting a
+  # database whose sidecars were already removed by the interrupted restore.
+  printf '{}\n' | atomic_json "$release/database-restoring.json" || return
+ fi
+ db_fileop "$uid" rm -f -- "$database-wal" "$database-shm" "$database-journal" || return
+ if [[ $existed == true ]]; then
+  temporary="$database.deploy-restore-${release##*/}"
+  db_check_path "$uid" "$temporary" || return
+  db_fileop "$uid" cp -- "$saved" "$temporary" || return
+  db_fileop "$uid" chmod "$(jq -r .old_mode "$metadata")" "$temporary" || return
+  db_fileop "$uid" chown "$(jq -r .old_owner "$metadata")" "$temporary" || return
+  db_fileop "$uid" sync -f -- "$temporary" || return
+  db_fileop "$uid" mv -fT -- "$temporary" "$database" || return
+ else db_fileop "$uid" rm -f -- "$database" || return; fi
+ db_fileop "$uid" sync -f -- "$(dirname -- "$database")"
+}
 recover_database_update() {
  local journal="$target/.deploy/db/pending.json" metadata op database uid existed temp committed
  [[ -f $journal ]] || return 0
@@ -202,6 +321,14 @@ wait_health() {
 record_path() {
  local rel=$1 kind=$2 dest="$target/$1" existed=false mode_value='' checksum=''
  [[ $rel != /* && /$rel/ != */../* && /$rel/ != */.deploy/* ]] || { fail "Unsafe managed artifact: $rel"; return 1; }
+ [[ $rel != *$'\n'* && $rel != *$'\r'* ]] || { fail 'Control character in managed artifact path'; return 1; }
+ local database backup_directory
+ database=$(jq -r '.database // ""' "$request") || return
+ if [[ -n $database ]]; then
+  backup_directory="$(dirname -- "$database")/backup"
+  [[ $dest != "$database" && $dest != "$database-wal" && $dest != "$database-shm" && $dest != "$database-journal" && $dest != "$database.bak" && $dest != "$backup_directory" && $dest != "$backup_directory/"* ]] || { fail 'Artifact overlaps database or backups'; return 1; }
+ fi
+ if [[ $rel == .env && $kind == file && $(jq -r '.sync_env // false' "$request") != true ]]; then fail 'Environment files must be synchronized separately'; return 1; fi
  check_path "$dest"
  [[ $dest != "$units" && $dest != "$units/"* && $dest != "$locks" && $dest != "$locks/"* ]] || fail 'Artifact overlaps deployment control files'
  [[ ! -e $dest.deploy-install-$id && ! -L $dest.deploy-install-$id ]] || fail 'Reserved deployment temporary path already exists'
@@ -213,6 +340,35 @@ record_path() {
   if [[ $kind == file ]]; then mkdir -p -- "$before/files/$(dirname -- "$rel")"; cp -p -- "$dest" "$before/files/$rel"; chmod 600 "$before/files/$rel"; checksum=$(sha256sum -- "$before/files/$rel" | cut -d' ' -f1); fi
  fi
  jq --arg rel "$rel" --arg kind "$kind" --arg mode "$mode_value" --arg checksum "$checksum" --argjson existed "$existed" '. + [{path:$rel,kind:$kind,mode:$mode,existed:$existed,sha256:$checksum}]' "$before/files.json" | atomic_json "$before/files.json"
+}
+reconcile_managed_files() {
+ local previous='' rel parent component current_parent
+ local -a components
+ if [[ -f $current ]]; then previous=$(jq -er .current "$current") || return; fi
+ if [[ -n $previous && -f $state/releases/$previous/before/files.json ]]; then
+  jq -r '.[] | select(.kind == "file" and .path != ".env" and .action != "remove") | .path' "$state/releases/$previous/before/files.json" > "$release/previous-files" || return
+  while IFS= read -r rel; do
+   if ! jq -e --arg rel "$rel" 'any(.[]; .path == $rel)' "$before/files.json" >/dev/null; then
+    [[ -e $target/$rel || -L $target/$rel ]] || continue
+    # Removed files may live in a read-only directory absent from the new payload.
+    # Track those parents too, and restore their original modes after mutation.
+    parent=${rel%/*}
+    if [[ $parent != "$rel" ]]; then
+     IFS=/ read -ra components <<< "$parent"
+     current_parent=''
+     for component in "${components[@]}"; do
+      current_parent="${current_parent:+$current_parent/}$component"
+      if ! jq -e --arg rel "$current_parent" 'any(.[]; .path == $rel)' "$before/files.json" >/dev/null; then
+       record_path "$current_parent" directory || return
+       jq '.[-1].action="preserve"' "$before/files.json" | atomic_json "$before/files.json" || return
+      fi
+     done
+    fi
+    record_path "$rel" file || return
+    jq '.[-1].action="remove"' "$before/files.json" | atomic_json "$before/files.json" || return
+   fi
+  done < "$release/previous-files"
+ fi
 }
 validate_managed_snapshot() {
  local before=$1 entry rel
@@ -251,6 +407,11 @@ install_managed_files() {
   kind=$(jq -r .kind <<< "$entry") || return
   [[ $kind != directory ]] || continue
   check_path "$target/$rel" || return
+  if [[ $(jq -r '.action // "install"' <<< "$entry") == remove ]]; then
+   durable_remove "$target/$rel" || return
+   changed=true
+   continue
+  fi
   if [[ $rel == .env && $(jq -r .sync_env "$request") == true ]]; then source="$stage/env"; else source="$payload/$rel"; fi
   check_path "$target/$rel.deploy-install-$id" || return
   cp -p -- "$source" "$target/$rel.deploy-install-$id" || return
@@ -262,7 +423,9 @@ install_managed_files() {
  jq -c 'reverse[] | select(.kind == "directory")' "$before/files.json" > "$release/directory-modes.jsonl" || return
  while IFS= read -r entry; do
   rel=$(jq -r .path <<< "$entry") || return
-  chmod --reference="$payload/$rel" -- "$target/$rel" || return
+  if [[ $(jq -r '.action // "install"' <<< "$entry") == preserve ]]; then
+   chmod "$(jq -r .mode <<< "$entry")" -- "$target/$rel" || return
+  else chmod --reference="$payload/$rel" -- "$target/$rel" || return; fi
   sync -f -- "$target/$rel" || return
  done < "$release/directory-modes.jsonl"
  sync -f -- "$target"
@@ -304,6 +467,7 @@ restore_managed_files() {
 snapshot_unchanged() {
  local release=$1 before="$1/before" expected_active current_active=false entry rel kind existed
  [[ -f $before/snapshot.json && -f $before/files.json ]] || return 1
+ [[ ! -f $release/database-started.json ]] || return 1
  if [[ $(jq -r .quadlet "$before/snapshot.json") == true ]]; then
   cmp -s "$unit" "$before/active.container" || return 1
  else [[ ! -e $unit ]] || return 1; fi

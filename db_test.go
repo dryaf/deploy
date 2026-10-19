@@ -178,7 +178,7 @@ func TestDatabasePushRequiresBackupAndRestoresFailures(t *testing.T) {
 			case "active":
 				f.mark("active")
 			}
-			env := Environment{Host: "example.com", User: "deploy", Dir: f.target, Database: DatabaseConfig{Driver: "sqlite", Source: "app.db"}, Quadlet: Quadlet{ServiceName: "pdf"}}
+			env := Environment{Name: "prod", Host: "example.com", User: "deploy", Dir: f.target, Database: DatabaseConfig{Driver: "sqlite", Source: "app.db"}, Quadlet: Quadlet{ServiceName: "pdf"}}
 			err := pushDatabase(env, ModeBinary, runner)
 			if point == "success" {
 				if err != nil {
@@ -186,6 +186,10 @@ func TestDatabasePushRequiresBackupAndRestoresFailures(t *testing.T) {
 				}
 				if databaseValue(t, filepath.Join(f.target, "app.db")) != "new" || databaseValue(t, filepath.Join(f.target, "app.db.bak")) != "old" {
 					t.Fatal("wrong database/backup")
+				}
+				backups, err := filepath.Glob(filepath.Join(f.target, "backup/app.prod.before-push.*.db"))
+				if err != nil || len(backups) != 1 || databaseValue(t, backups[0]) != "old" {
+					t.Fatal("retained production backup missing", backups, err)
 				}
 			} else {
 				if err == nil {
@@ -241,34 +245,41 @@ c=sqlite3.connect(sys.argv[1]);c.execute('PRAGMA journal_mode=WAL');c.execute('P
 }
 
 func TestBinaryUploadFailureKeepsExistingServiceRunning(t *testing.T) {
-	f := newTransactionFixture(t)
-	t.Chdir(t.TempDir())
-	f.mark("active")
-	f.write(f.unit(), "legacy unit", 0600)
-	f.write(filepath.Join(f.target, "server"), "old binary", 0755)
-	os.WriteFile("Dockerfile.vps", []byte("FROM unused"), 0600)
-	cfg := imageConfig()
-	cfg.Deployment.Mode = ModeBinary
-	cfg.BinaryName = "server"
-	cfg.Build.Cmd = "printf new > build/server"
-	cfg.Artifacts.Include = []string{"Dockerfile.vps"}
-	changeEnv(&cfg, func(e *Environment) { e.Dir = f.target; e.Quadlet.StopOnDeploy = true; e.Quadlet.EnvFile = ptr("") })
-	n, err := normalizeAndValidateConfig(cfg, "prod")
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err := planBinaryRelease(n, "v1", "abc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	runner := &filesystemRunner{env: f.command("release", "unused").Env, failSync: 3}
-	if err := executeBinaryRelease(plan, runner); err == nil {
-		t.Fatal("transfer failure ignored")
-	}
-	if _, err := os.Stat(filepath.Join(f.root, "active")); err != nil {
-		t.Fatal("previous service stopped")
-	}
-	if f.read(f.unit()) != "legacy unit" || f.read(filepath.Join(f.target, "server")) != "old binary" {
-		t.Fatal("active files changed during staging")
+	for _, upload := range []struct {
+		name string
+		sync int
+	}{{"artifacts", 3}, {"binary", 4}} {
+		t.Run(upload.name, func(t *testing.T) {
+			f := newTransactionFixture(t)
+			t.Chdir(t.TempDir())
+			f.mark("active")
+			f.write(f.unit(), "legacy unit", 0600)
+			f.write(filepath.Join(f.target, "server"), "old binary", 0755)
+			os.WriteFile("Dockerfile.vps", []byte("FROM unused"), 0600)
+			cfg := imageConfig()
+			cfg.Deployment.Mode = ModeBinary
+			cfg.BinaryName = "server"
+			cfg.Build.Cmd = "printf new > build/server"
+			cfg.Artifacts.Include = []string{"Dockerfile.vps"}
+			changeEnv(&cfg, func(e *Environment) { e.Dir = f.target; e.Quadlet.StopOnDeploy = true; e.Quadlet.EnvFile = ptr("") })
+			n, err := normalizeAndValidateConfig(cfg, "prod")
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := planBinaryRelease(n, "v1", "abc")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &filesystemRunner{env: f.command("release", "unused").Env, failSync: upload.sync}
+			if err := executeBinaryRelease(plan, runner); err == nil {
+				t.Fatal("transfer failure ignored")
+			}
+			if _, err := os.Stat(filepath.Join(f.root, "active")); err != nil {
+				t.Fatal("previous service stopped")
+			}
+			if f.read(f.unit()) != "legacy unit" || f.read(filepath.Join(f.target, "server")) != "old binary" {
+				t.Fatal("active files changed during staging")
+			}
+		})
 	}
 }

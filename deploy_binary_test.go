@@ -32,6 +32,62 @@ func (r *localBinaryReleaseRunner) Sync(e Environment, sources []string, destina
 	return nil
 }
 
+func TestBinaryReleaseUploadsBuiltBinaryDespiteArtifactExclusions(t *testing.T) {
+	for _, exclusion := range []string{"server", "server*", ""} {
+		t.Run(displayDefault(exclusion, "same-name-artifact"), func(t *testing.T) {
+			f := newTransactionFixture(t)
+			t.Chdir(f.root)
+			f.write("compiled-server", "new binary", 0755)
+			f.write("server", "old binary", 0755)
+			info, err := os.Stat("compiled-server")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Match size and mtime to catch rsync quick-check skipping the build output.
+			if err := os.Chtimes("server", info.ModTime(), info.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			f.write("Dockerfile.vps", "FROM scratch\nCOPY server /server\n", 0600)
+			f.write("assets/keep.txt", "included", 0600)
+			f.write("assets/secret.db", "excluded", 0600)
+			f.write(filepath.Join(f.target, "server"), "remote old binary", 0755)
+			c := imageConfig()
+			c.Deployment.Mode = ModeBinary
+			c.BinaryName = "server"
+			c.Build.Cmd = "cp -p compiled-server build/server"
+			c.Artifacts.Include = []string{"Dockerfile.vps", "assets", "server"}
+			c.Artifacts.Exclude = []string{"*.db"}
+			if exclusion != "" {
+				c.Artifacts.Exclude = append(c.Artifacts.Exclude, exclusion)
+			}
+			changeEnv(&c, func(e *Environment) {
+				e.Dir = f.target
+				e.Quadlet.EnvFile = ptr("")
+				e.Quadlet.Image = "localhost/pdf:latest"
+			})
+			n, err := normalizeAndValidateConfig(c, "prod")
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := planBinaryRelease(n, "v1", "abc")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &filesystemRunner{env: f.command("release", "unused").Env}
+			if err := executeBinaryRelease(p, runner); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.read(filepath.Join(f.target, "server")); got != "new binary" {
+				t.Fatalf("deployed %q instead of the newly built binary", got)
+			}
+			if got := f.read(filepath.Join(f.target, "assets/keep.txt")); got != "included" {
+				t.Fatalf("included artifact changed: %q", got)
+			}
+			f.assertAbsent(filepath.Join(f.target, "assets/secret.db"))
+		})
+	}
+}
+
 func TestBinaryReleasePreparesDataDirectory(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		t.Run(map[bool]string{false: "fresh", true: "existing"}[existing], func(t *testing.T) {
@@ -91,7 +147,11 @@ func TestBinaryReleasePreparesDataDirectory(t *testing.T) {
 
 func stageBinaryFixture(f *transactionFixture, id string, artifacts map[string]string, syncEnv bool) string {
 	f.t.Helper()
-	original := f.stage(id, artifacts, syncEnv)
+	copyArtifacts := map[string]string{"Dockerfile.vps": "FROM scratch"}
+	for name, content := range artifacts {
+		copyArtifacts[name] = content
+	}
+	original := f.stage(id, copyArtifacts, syncEnv)
 	destination := filepath.Join(f.target, ".deploy/binary/staging", id)
 	if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
 		f.t.Fatal(err)

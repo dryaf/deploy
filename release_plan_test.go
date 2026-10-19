@@ -13,6 +13,7 @@ import (
 type fakeRunner struct {
 	calls  []string
 	failAt int
+	local  func(*exec.Cmd) error
 }
 
 func (r *fakeRunner) record(s string) error {
@@ -26,7 +27,15 @@ func (r *fakeRunner) SSH(_ Environment, s string) (string, error) { return "", r
 func (r *fakeRunner) Sync(_ Environment, s []string, d string, a ...string) error {
 	return r.record("sync " + strings.Join(s, " ") + " " + d + " " + strings.Join(a, " "))
 }
-func (r *fakeRunner) Local(c *exec.Cmd) error { return r.record("local " + c.String()) }
+func (r *fakeRunner) Local(c *exec.Cmd) error {
+	if err := r.record("local " + c.String()); err != nil {
+		return err
+	}
+	if r.local != nil {
+		return r.local(c)
+	}
+	return nil
+}
 
 func TestImagePlanAndRunner(t *testing.T) {
 	n, err := normalizeAndValidateConfig(imageConfig(), "prod")
@@ -139,7 +148,7 @@ func TestBinaryBuildOrder(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r := &fakeRunner{}
+			r := &fakeRunner{local: func(*exec.Cmd) error { return os.WriteFile("build/server", []byte("compiled binary"), 0755) }}
 			if err := executeBinaryRelease(p, r); err != nil {
 				t.Fatal(err)
 			}
