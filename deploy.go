@@ -465,7 +465,7 @@ func resolveAndValidateVersion(explicitVersion string) (string, error) {
 		return version, nil
 	}
 	// A pager cannot interact with the terminal from runBounded's process group.
-	if err := runCommandRaw("git", "--no-pager", "tag", "--sort=-v:refname", "--list"); err != nil {
+	if err := runCommandRaw("git", "--no-pager", "for-each-ref", "--sort=-v:refname", "--count=4", "--format=%(refname:strip=2)", "refs/tags/"); err != nil {
 		return "", err
 	}
 	version := prompt("Enter new semantic version (e.g. v1.0.1)")
