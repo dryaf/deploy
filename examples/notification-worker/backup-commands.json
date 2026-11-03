@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "producer": {
+    "id": "replace-with-backup-writer-id",
+    "epoch": "command-installation-one"
+  },
+  "identity": {
+    "worker": "replace-with-gateway-worker-id",
+    "recovery": "replace-with-gateway-recovery-id"
+  },
+  "socket": "/absolute/private-runtime/api.sock",
+  "policy": {
+    "revision": "one",
+    "workers": [
+      {
+        "alias": "backup/storage",
+        "producer": {
+          "id": "replace-with-backup-writer-id",
+          "epoch": "command-installation-one"
+        },
+        "generation": "one",
+        "commands": {
+          "details": {
+            "id": "backup.details",
+            "version": 1,
+            "permission": "read",
+            "effect": "read",
+            "scoped": true,
+            "target_required": true,
+            "arguments": {
+              "subject": {
+                "kind": "token",
+                "required": true,
+                "max": 128
+              },
+              "target": {
+                "kind": "token",
+                "required": true,
+                "max": 128
+              }
+            },
+            "help": "Read an exact incident, its occurrence and evidence/decision revisions."
+          },
+          "status": {
+            "id": "backup.status",
+            "version": 1,
+            "permission": "read",
+            "effect": "read",
+            "scoped": true,
+            "help": "Count open incidents within your authorized subjects; this does not qualify backup freshness."
+          },
+          "why": {
+            "id": "backup.why",
+            "version": 1,
+            "permission": "read",
+            "effect": "read",
+            "scoped": true,
+            "target_required": true,
+            "arguments": {
+              "subject": {
+                "kind": "token",
+                "required": true,
+                "max": 128
+              },
+              "target": {
+                "kind": "token",
+                "required": true,
+                "max": 128
+              }
+            },
+            "help": "Read an exact incident, its occurrence and evidence/decision revisions."
+          }
+        }
+      }
+    ],
+    "destinations": [
+      {
+        "id": "ops",
+        "generation": "one",
+        "provider": "telegram",
+        "account": "999000222",
+        "native_id": "-999000333"
+      }
+    ],
+    "permissions": [
+      {
+        "actor": "999000111",
+        "conversation": "ops",
+        "worker": "replace-with-backup-writer-id",
+        "permissions": [
+          "read"
+        ],
+        "scope": {
+          "subjects": [
+            "replace-with-backup-instance-key"
+          ]
+        }
+      }
+    ]
+  }
+}

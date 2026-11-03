@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "operation": "REPLACE_WITH_ONE_RETAINED_n_ID_AND_32_LOWERCASE_HEX_DIGITS",
+  "gateway_config": "/home/notify/.config/deploy-notification/runtime.json",
+  "gateway_sha256": "REPLACE_WITH_SHA256_OF_GATEWAY_CONFIG",
+  "gateway_state": "/home/notify/.local/state/deploy-notification",
+  "commit_hash": "REPLACE_WITH_COMPLETED_GATEWAY_PUBLICATION_COMMIT",
+  "account_state": "/home/notify/.local/state/signal-account",
+  "relay_source": "/home/notify/.local/state/signal-inbox",
+  "relay_destination": "/home/notify/.local/state/signal-inbox-recovered",
+  "service": {
+    "unit_file": "/home/notify/.config/systemd/user/deploy-notification-signal.service",
+    "unit_sha256": "REPLACE_WITH_SHA256_OF_LOADED_NATIVE_UNIT",
+    "executable": "/home/notify/bin/deploy",
+    "executable_sha256": "REPLACE_WITH_SHA256_OF_NATIVE_DEPLOY_BINARY",
+    "relay_config": "/home/notify/.config/deploy-notification/signal-relay.json",
+    "relay_sha256": "REPLACE_WITH_SHA256_OF_RELAY_CONFIG"
+  }
+}

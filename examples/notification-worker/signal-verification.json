@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "operation": "n-REPLACE_WITH_ENDPOINT_OPERATION",
+  "root": "/home/deploy/.local/state/signal-verification",
+  "gateway_config": "/home/deploy/.config/deploy/notification-worker.json",
+  "gateway_sha256": "REPLACE_WITH_ORIGINAL_GATEWAY_FILE_SHA256",
+  "gateway_state": "/home/deploy/.local/state/notification-worker",
+  "commit_hash": "REPLACE_WITH_GATEWAY_PUBLICATION_COMMIT",
+  "account_state": "/home/deploy/.local/state/signal-account",
+  "inbox_destination": "/home/deploy/.local/state/signal-inbox-recovered",
+  "recovery": {
+    "operation": "n-REPLACE_WITH_COMPLETED_ACCOUNT_OPERATION",
+    "binding": "REPLACE_WITH_EXACT_ACCOUNT_RECOVERY_BINDING",
+    "target": "REPLACE_WITH_EXACT_ACCOUNT_RECOVERY_TARGET",
+    "phase": "complete",
+    "result_hash": "REPLACE_WITH_INBOX_INSTALLATION_HASH",
+    "runtime_allowed": false
+  }
+}

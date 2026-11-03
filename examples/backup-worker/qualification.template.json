@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "worker_id": "REPLACE_WITH_INSTALLED_WORKER_UUID",
+  "archive_id": "REPLACE_WITH_ENROLLED_ARCHIVE_UUID",
+  "config_hash": "REPLACE_WITH_INSTALLED_CONFIG_SHA256",
+  "architecture": "arm64",
+  "worker_image": "REPLACE_WITH_ACTUAL_IMAGE_DIGEST",
+  "checked_at": "REPLACE_WITH_ACTUAL_RFC3339_TEST_TIME",
+  "checks": {
+    "storage_crash_recovery": {"passed": false, "evidence": ""},
+    "notification_receipt": {"passed": false, "evidence": ""},
+    "missed_worker_route": {"passed": false, "evidence": ""},
+    "daily_delivery_route": {"passed": false, "evidence": ""},
+    "isolated_application_restore": {"passed": false, "evidence": ""}
+  }
+}

@@ -503,6 +503,1184 @@ tags; deployment refuses a different remote target and never force-pushes tags.
 Release names start with a letter or digit and use letters, digits, dot, underscore,
 slash, plus or hyphen, so metadata substitution cannot introduce shell operators.
 
+### Named servers and backup declarations
+
+`server init` now creates a version 2 inventory. Existing single-server files and
+inline application SSH settings remain supported. A v2 inventory can contain both
+application hosts and hosts with no infrastructure stack:
+
+```yaml
+version: 2
+servers:
+  vps-main:
+    host: vps.example.com
+    user: deploy
+    ssh_key: ~/.ssh/vps-admin
+    ssh_known_hosts: ~/.ssh/known_hosts
+```
+
+An application environment can use `server: vps-main` in place of `host`, `user`,
+`ssh_port`, `ssh_key`, and `ssh_known_hosts`. Mixing the two connection forms is an
+error, including explicitly empty inline fields. References are resolved for all
+application commands before remote work. Target directories, database settings,
+and runtime settings stay in `deploy.yaml`. Colliding services, target directories,
+database bindings, and shared writable volume sources on the same visible SSH
+account are rejected. DNS aliases cannot establish that two names are the same
+physical account; remote ownership checks remain necessary.
+
+The default inventory is `server.yaml` beside the application file; server-only
+commands use `./server.yaml`. `deploy --servers /path/server.yaml …` overrides that
+path. There is no parent-directory search. Relative SSH paths in v2 are relative
+to the inventory file, and `~` means the operator's home. Worker storage and secret
+paths stay absolute paths on the worker. V2 entries require an explicit user.
+
+```sh
+deploy --servers ./server.yaml validate --server
+deploy server provision vps-main
+# Prints a candidate without modifying the legacy input:
+deploy --servers ./legacy-server.yaml server migrate vps-main > server-v2.yaml
+deploy --servers ./server-v2.yaml validate --server
+```
+
+Keep a migrated inventory beside the original when retaining relative SSH paths.
+V2 provisioning always requires a name, even for one entry, and only provisions
+an explicitly configured Traefik stack. The original `deploy server provision`
+syntax still accepts a legacy file.
+
+[The shared prod/test example](examples/backup-worker/deploy.yaml) and
+[worker policy example](examples/backup-worker/server.yaml) demonstrate distinct
+services and data directories. `database.backup.enabled` defaults to false and
+requires a SQLite database in a dedicated host directory bind when enabled.
+Raw Podman overrides, overlapping mount destinations, and unsupported mount
+options are refused for this profile. The declaration does not change existing
+release-time database protection or `deploy db backup`.
+
+**Implementation status:** the Linux worker, restricted source helper, archive
+list/pull/recovery, scheduling, lifecycle commands, notifications, retention, and
+isolated restore-check contracts are implemented. Setup stages an installation
+with timers disabled. Actual ARM64/rootless execution, disk crash durability,
+Signal/Telegram receipt, and external missed-run routing still require live
+qualification before activation. No host was provisioned or image published by
+this implementation. See the [worker runbook](examples/backup-worker/README.md)
+and [qualification plan](BACKUP_WORKER_PLAN.md). Keep existing backup schedules
+until the rollout acceptance window passes.
+
+Worker policy validation currently supports `hourly`, `daily`, and `weekly`, with
+an explicit freshness value large enough to cover the interval and allowed run
+delay. Other calendar expressions are rejected until occurrence-policy handling
+is implemented. Defaults are hourly, Europe/Vienna, freshness 2h, run deadline
+40m, and 10 GiB per snapshot. Retention describes **all snapshots within 720 hours
+and at least the newest 48**, not a maximum of 48 snapshots. Validation does not
+read remote secrets, prove monitor identities, link accounts, or send messages.
+
+Automatic retention needs a new, fresh successful capture for each instance;
+failed or missing sources keep their existing history. Each capture can authorize
+only one automatic pass, recorded in the archive before deletion. Interrupted
+passes await another successful capture or explicit scoped operator pruning.
+Independent health checks include the maintenance timer and service.
+
+The [shared notification worker plan](NOTIFICATION_WORKER_PLAN.md) describes the
+proposed extraction of Signal/Telegram delivery, pi-status-led support, and future
+vulnerability/uptime producer integration, including migration and qualification.
+The [interactive command plan](INTERACTIVE_WORKER_PLAN.md) tracks the partial
+implementation of durable worker commands, scoped permissions, confirmation,
+native/opaque notification references, gateway discovery and paginated queries,
+and staged Telegram/Signal intake. Backup has read-only command staging and locally
+tested reminder handlers. Its private shared exporter now preserves original reply
+context, maps batch/daily/catch-up obligations, persists cancellation intent, and
+replays pinned submissions and receipt acknowledgements through the local gateway.
+Large histories use bounded pages; only the final catch-up acceptance settles the
+outage. A private delivery-monitor publisher verifies eligible coverage and retains
+recovery intent across restart and uncertain heartbeat responses.
+The private backup evaluator now builds reports from current catalogue, verification,
+run and host-probe evidence, committing incident changes and exports together.
+Healthy status expires with its supporting evidence.
+The gated report-service entry point connects evaluation, delivery and independent
+monitoring. Native units can be rendered and verified offline; production ownership
+handoff and installation are not enabled. Compatible legacy senders honor the local
+ownership fence, and compatible setup/recovery refuses to restore legacy delivery
+while that fence is present.
+The shared worker now journals delivery ownership outside SQLite and resumes exact
+interrupted transitions. Missing or conflicting ownership history fails closed;
+older ownership records migrate as explicitly incomplete historical evidence.
+Offline snapshots can now be captured and verified:
+
+```sh
+deploy notification-worker snapshot --local --config /absolute/runtime.json --state-dir /absolute/state --to /absolute/new-snapshot
+deploy notification-worker snapshot-verify --local --config /absolute/runtime.json --from /absolute/new-snapshot
+```
+
+Capture requires the worker to be stopped and creates a new private directory;
+it never overwrites a snapshot. The artifact is bound to the worker identity and
+configuration. To start local offline recovery, use the exact `id` and
+`database_hash` from the verified snapshot manifest:
+
+```sh
+deploy notification-worker recovery-prepare --local \
+  --config /absolute/runtime.json --state-dir /absolute/state \
+  --from /absolute/new-snapshot --snapshot-id n-REPLACE_WITH_VERIFIED_SNAPSHOT_ID \
+  --database-hash REPLACE_WITH_VERIFIED_DATABASE_HASH
+```
+
+This rotates the recovery epoch and quarantines restored messages and commands
+in a separate candidate. Preparation also checkpoints the original database's
+committed WAL, then seals a private `recovery/<operation>/original.db` copy with
+an independent manifest and database acknowledgment. It returns the recovery
+`operation` ID needed by producer reconciliation and `original_source_hash`, the
+digest of that preservation record. Retain the recovery directory and canonical
+original `state.db`; both remain checked while publication is unfinished. LED
+recovery reads the sealed copy and refuses incomplete preservation, changed source
+data, archive corruption or unaccounted WAL contents. Keep the original snapshot:
+the same command resumes interruption or lost output only when its full verified
+manifest matches the prepared operation. It refuses a running worker, missing
+state, changed snapshot or configuration. Global `--dry-run` checks arguments and
+configuration without opening either state or snapshot. Preparation never starts
+services, sends messages or publishes the candidate. Final recovered-state
+publication and managed lifecycle recovery remain unfinished; ordinary startup
+will continue to refuse this quarantined installation.
+
+Review the durable recovery stages without advancing them:
+
+```sh
+deploy notification-worker recovery-status --local \
+  --config /absolute/runtime.json --state-dir /absolute/state \
+  --operation n-REPLACE_WITH_RECOVERY_OPERATION
+```
+
+This requires the existing reconciliation projection created by
+`recovery-prepare`. It reports completed and pending producer, command, intake,
+message-disposition and LED stages. `retained_fenced` identifies preserved
+uncertainty, including unreconciled producers and inherited LED faults. Invalid
+or missing committed evidence causes an error. The review acquires the worker
+and producer leases together, opens the projection read-only, and hashes committed
+logical database contents (including WAL-visible rows) and independent evidence.
+`review_hash` identifies that observation; it is not publication or activation
+permission. Intake still needs fresh provider cutoffs and stopped-receiver checks
+at activation. The command does not initialize missing state, complete intents,
+acknowledge receipts, execute commands or contact providers/LEDs.
+
+Capture an immutable copy of that exact reviewed projection with:
+
+```bash
+deploy notification-worker recovery-checkpoint --local \
+  --config /absolute/private/runtime.json --state-dir /absolute/private/state \
+  --operation n-... --review-hash EXACT_REVIEW_HASH
+```
+
+The checkpoint is stored under `recovery/<operation>/checkpoints/<review_hash>/`.
+Its intent retains the review, operation and candidate binding; its seal and
+completion record pin the database bytes and logical projection. The copy includes
+committed WAL data and preserves implicit row IDs. The worker and all producer
+leases remain held through capture and repeated evidence validation. Exact retry
+resumes interrupted work; a stale review or damaged sealed copy is refused.
+Checkpointing does not change the reviewed source or enable delivery/execution.
+
+The checkpoint also retains byte-for-byte copies of the recovery-stage JSON,
+canonical identity/recovery records, complete enrolled ownership histories and
+administrative intent/result files. `evidence-intent.json`, `evidence-sealed.json`
+and `evidence.json` bind the file inventory to the checkpoint; numbered files in
+`evidence/` hold the original bytes. A completed archive with missing or damaged
+files is refused. An internal reader can validate these retained proofs after
+canonical ownership heads change, without trusting the new live files.
+
+Recovery review now verifies archived administrative records against the retained
+original database and independent intents/results. Unfinished intents remain
+fenced; missing result acknowledgments remain pending and are not recreated.
+The stronger evidence fingerprint includes full ownership and administrative
+history. Obtain a fresh `recovery-status` review after upgrading from the earlier
+projection-only implementation; its older review hashes will be stale.
+
+This is a publication prerequisite, not a complete recovery archive or an
+activation grant. Retain the original/source/candidate databases, reconciliation
+projection and all independent stage/ownership histories together with the
+checkpoint. A later publication coordinator must revalidate current evidence,
+complete service/provider handoffs and preserve ancestor proofs. Checkpoints are
+bounded to 128 per recovery operation and the configured database/free-space
+limits; automatic deletion of retained checkpoints is not implemented.
+
+Verify a retained historical checkpoint independently of the current canonical
+state with its original configuration and exact digests:
+
+```bash
+deploy notification-worker recovery-checkpoint-verify --local \
+  --config /absolute/private/runtime.json --state-dir /absolute/private/state \
+  --operation n-... --review-hash EXACT_REVIEW_HASH \
+  --checkpoint-hash EXACT_CHECKPOINT_HASH
+```
+
+This offline command holds the existing worker lease and reads the retained
+source, candidate, original and checkpoint databases immutably. It validates
+checksums, schemas, epochs, SQL acknowledgments, saved ownership history and the
+sealed evidence archive. It rechecks inputs before returning a deterministic
+`proof_hash`. It does not use canonical `state.db`, current ownership heads,
+mutable stage JSON or `reconciled.db`, so a later canonical transition does not
+invalidate an intact historical proof. Missing or altered retained inputs are
+errors; verification creates or repairs nothing.
+
+The proof records a historical checkpoint. It does not establish that publication
+completed, that services are stopped, or that provider cutoffs are fresh. Delivery,
+execution and publication flags remain false. Ancestor-chain integration and
+completed publication authority still need implementation.
+
+Prepare a database image for a later publication step using that exact proof:
+
+```bash
+deploy notification-worker recovery-publication-prepare --local \
+  --config /absolute/private/runtime.json --state-dir /absolute/private/state \
+  --operation n-... --review-hash EXACT_REVIEW_HASH \
+  --checkpoint-hash EXACT_CHECKPOINT_HASH --proof-hash EXACT_PROOF_HASH
+```
+
+Preparation requires the current review and holds the worker and producer leases.
+It copies the checkpoint to `publication.db` in the same checkpoint directory and
+adds one SQLite metadata anchor containing the historical proof. It verifies that
+all other logical data, schema, header values and implicit row IDs match the
+reviewed checkpoint. `publication-intent.json`, `publication-sealed.json` and
+`publication-image.json` bind the resulting bytes to the proof and `image_hash`.
+Interrupted unsealed copies can be resumed; damaged or missing sealed images are
+refused. An existing anchor requires future ancestor reconciliation and cannot be
+overwritten. Keep these artifacts with the retained checkpoint and evidence.
+
+This writes only a prepared image. Canonical `state.db`, current reconciliation,
+source fences and pending stages remain unchanged; publication, delivery and
+execution flags stay false. The separate `recovery-publish` step below installs
+the canonical database; managed activation still needs current service/provider
+checks and ancestor-chain handling. A changed recovery review requires a new
+checkpoint and image. `--dry-run` validates arguments/configuration only.
+
+Verify a completed prepared image using its original configuration and exact pins:
+
+```bash
+deploy notification-worker recovery-publication-verify --local \
+  --config /absolute/private/runtime.json --state-dir /absolute/private/state \
+  --operation n-... --review-hash EXACT_REVIEW_HASH \
+  --checkpoint-hash EXACT_CHECKPOINT_HASH --proof-hash EXACT_PROOF_HASH \
+  --image-hash EXACT_IMAGE_HASH
+```
+
+This read-only command validates the complete retained checkpoint proof, the
+image's SQLite anchor and unchanged logical contents, exact database bytes, and
+the preparation intent, seal and completion record. It holds the existing offline
+worker lease and checks inputs and directory identities again before returning.
+It does not read canonical `state.db`, current ownership/identity records or
+mutable reconciliation files, so an intact historical image remains verifiable
+after those files advance. Missing or damaged evidence is an error; verification
+never resumes preparation or recreates its completion record. The output matches
+the original prepared image, with all permission flags false. It proves completed
+preparation, not a completed canonical database switch or current activation
+readiness. Keep the entire retained proof set; `publication.db` alone is insufficient.
+
+Install that exact image as canonical state, retaining recovery quarantine:
+
+```bash
+deploy notification-worker recovery-publish --local \
+  --config /absolute/private/runtime.json --state-dir /absolute/private/state \
+  --operation n-... --review-hash EXACT_REVIEW_HASH \
+  --checkpoint-hash EXACT_CHECKPOINT_HASH --proof-hash EXACT_PROOF_HASH \
+  --image-hash EXACT_IMAGE_HASH
+```
+
+Publication holds the offline worker and producer leases and rechecks the current
+review, image and retained proofs. Pending durable preparation blocks publication.
+An absent producer may remain explicitly fenced with delivery/command reconciliation
+pending; its unfinished message decisions still block the swap. Provider activation
+rechecks remain separate. LED adoption can be skipped only without configured
+bindings and without retained LED history or recovery evidence.
+
+`recovery-publication.json` freezes the reviewed reconciliation. The publisher
+copies the image, seals it in `recovery-publication-sealed.json`, then atomically
+exchanges it with `state.db`. The old canonical database remains at
+`recovery-publication-exchange.db`, in addition to the retained original archive.
+`recovery-publication-complete.json` acknowledges the synced exchange. Both sides
+are verified against exact hashes on resume; damaged sealed files are never
+rebuilt. Only a checkpointed original's empty WAL/journal and rebuildable SHM index
+may be removed under the frozen intent. Nonempty WAL/journal data blocks publication.
+
+After freezing, other reconciliation commands are refused. Retry **the exact same
+`recovery-publish` command** to finish an interruption or obtain the completed
+result before adopting a verification runtime. A lost final acknowledgment can be completed from the intact sealed pair;
+an inconsistent completion or rolled-back completed pair is an error. Keep all
+publication and historical artifacts together. Independent checkpoint/image
+verification remains available after the swap.
+
+`canonical_installed: true` reports the completed database transition. Normal
+startup remains blocked, and delivery/execution flags remain false. Managed
+activation, current service/provider handoffs and subsequent recovery epochs are
+still unfinished; publication does not start a service or enable notifications.
+
+An existing managed verification installation can now adopt the published identity:
+
+```bash
+deploy notification-worker adopt-recovery --local --spec /absolute/adoption-spec.json
+```
+
+Use the normal installation spec with one additional field,
+`"recovery_commit_hash": "EXACT_COMMIT_HASH"`, taken from
+`recovery-publish`'s `commit.commit_hash`. Keep the installation root, state,
+configuration and exclusions unchanged, and supply the new executable and its
+SHA256. Adoption requires the installation's old identity to match the publication's
+original identity. It stops the pinned unit, takes the installation lease, verifies
+the complete retained proof and published database, and promotes a recovery-capable
+executable/helper before starting the new identity **in verification mode**.
+
+The state retains `recovery-verification.json` and an independent
+`recovery-verification-complete.json`. Before that completion, retries require the
+exact published database bytes. Later verification-runtime writes are allowed;
+restarts check both adoption records, the live SQL publication anchor, quarantine
+binding, identity and retained historical evidence. Missing completion after runtime
+writes is an error, not permission to rebuild authority. Normal `serve` remains
+blocked. Status reports `verification_only`, `installation_revision` and the exact
+`recovery_commit_hash`; delivery, command execution and provider intake remain off.
+
+Use `resume --local --root /absolute/installation` for an interrupted adoption;
+the original spec and input executable are no longer needed after the intent is
+published. Subsequent `update` specs must omit `recovery_commit_hash`: the installer
+preserves its accepted pin automatically and checks both executables' recovery
+capability. Updates and uninstall remain supported. Retained executable rollback
+cannot cross the recovery identity/helper transition. Repeated recovery and
+schema/configuration migration of the adopted state still require ancestor support.
+This operation does not qualify or activate production.
+
+After gateway publication, install the corresponding Signal relay runtime into a
+separate, already existing empty directory owned by the service user (mode 0700):
+
+```bash
+deploy notification-worker recovery-signal-install --local \
+  --config /absolute/runtime.json --state-dir /absolute/gateway-state \
+  --commit-hash EXACT_GATEWAY_PUBLICATION_COMMIT \
+  --relay-source /absolute/retained-inbox \
+  --relay-destination /absolute/recovered-inbox
+```
+
+The command obtains the exact cursor from the gateway's verified publication and
+holds its worker lease throughout installation. It verifies the original relay
+completion and candidate, retains the old inbox, and binds the source to exactly
+one destination directory. Both directories and their lock files must remain in
+place. The first source intent fences ordinary source startup; the destination is
+also fenced throughout installation. The new database preserves historical events
+and reserved sequence gaps, with a matching runtime baseline in SQLite and files.
+An immutable image seal and independent source/destination completion records
+support exact retry of the same command after interruption. A sealed image is
+never silently rebuilt. Keep both directories and all recovery artifacts.
+
+This installs **verification state only**. It contacts no Signal provider, starts
+no service and does not rewrite the gateway or relay service configuration. The
+returned `installation_hash` pins the completed installation. The Go APIs
+`VerifyInstalledSignalRuntime` and `OpenInstalledInboxVerification` inspect it;
+the verification instance refuses receiving, listing and acknowledging messages.
+An ordinary relay start remains blocked at both paths. Managed Signal account
+handoff, endpoint cutover and production activation still need implementation.
+Do not remove the fences to enable a receiver manually.
+
+Inspect the original Telegram handoff after gateway publication with:
+
+```bash
+deploy notification-worker recovery-telegram-check --local \
+  --config /absolute/runtime.json --state-dir /absolute/gateway-state \
+  --commit-hash EXACT_GATEWAY_PUBLICATION_COMMIT
+```
+
+This offline check compares the published cursor and request seal with live
+state under the exclusive worker lease, then checks the observation's ten-minute
+lifetime, boot identity, wall/monotonic clocks and five-second cutoff. A missing
+operational cursor is an error even when the expected offset is zero. It never
+polls Telegram, reads bot credentials, changes offsets or renews old evidence.
+Successful JSON contains `intake_enabled: false` and
+`requires_activation_recheck: true`: this is an inspection at `checked_at`, not
+permission to start a receiver later.
+
+An installed gateway that has completed `adopt-recovery` can renew its Telegram
+observation through the managed lifecycle:
+
+```bash
+deploy notification-worker renew-telegram --local --root /absolute/installation
+# Resume an interrupted operation using the same frozen request:
+deploy notification-worker resume --local --root /absolute/installation
+```
+
+The operation requires an interactive Telegram account and its private bot token.
+It stops the installation's exact managed service, holds the installation and
+worker leases, and checks service, configuration and lease identity around each
+provider preflight and poll. Stop any other receivers using that bot account
+beforehand; this local coordinator cannot establish exclusive ownership against
+external consumers. Webhook/account conflicts fail closed.
+
+A request is saved in `operations/ID/telegram-request.json` before polling. Its
+stable ID pins the exact predecessor: the original cursor hash for the first
+renewal, then the previous `renewal_hash`. Independent completion evidence is
+saved in `operations/ID/telegram-receipt.json`; successful `renew-telegram` JSON
+includes both the manifest and receipt. Completed retries return the same dated
+evidence without polling or reading credentials. A new invocation after completion
+creates a new observation. Missing request evidence after polling has started or
+missing receipt evidence after publication is an error, not permission to rebuild
+history.
+
+The runtime and retained recovery helper must both support renewal. Ordinary
+`update` keeps the existing helper. Upgrade older installations explicitly using
+an installation spec with the current binary/digest and unchanged runtime paths,
+configuration and schema; omit `recovery_commit_hash` from this spec:
+
+```bash
+deploy notification-worker upgrade-helper --local --spec /absolute/upgrade-spec.json
+```
+
+This retains the old executable/helper, stages and probes both replacements, and
+uses the resumable verification lifecycle. A binary rollback cannot cross the
+helper upgrade boundary. Use the newly staged helper or current external binary
+to resume an interrupted helper upgrade; the old helper does not know the new
+operation format. `upgrade-helper` does not migrate state or enable production.
+
+After renewal, only the verification service is restarted. It independently
+audits the exact completion while holding its lifetime worker lease. Health
+includes `telegram_renewal_id`; updates, compatible binary rollbacks and uninstall
+preserve that pin. Verification restart remains possible after observation expiry,
+but cannot renew freshness or admit commands. Later production activation still
+needs a fresh check and cutoff installation.
+
+Renewal keeps the original publication, canonical inbox, request mappings and
+operational offset unchanged. It stores sanitized provider pages in a separate
+archive and synchronizes each page plus an independent root checkpoint before
+requesting an offset that acknowledges that page. Retries start at zero, including
+after an acknowledged request whose response was lost. New inputs remain recovery
+evidence and cannot create or confirm commands. The archive retains previous
+generations and rejects missing pages, changed identities and conflicting native
+message IDs. Per account, bounds are 16 renewals, 4,096 total pages and page bytes limited to
+the smaller of `max_database_bytes` and 64 MiB; exhaustion leaves intake fenced.
+
+With the verification service stopped, inspect a completed renewal without polling
+or reading bot credentials (restart the verification service afterward):
+
+```bash
+deploy notification-worker recovery-telegram-check --local \
+  --config /absolute/runtime.json --state-dir /absolute/gateway-state \
+  --commit-hash EXACT_GATEWAY_PUBLICATION_COMMIT \
+  --renewal-hash EXACT_LATEST_RENEWAL_HASH
+```
+
+The check verifies all retained predecessors and page evidence, then applies the
+same boot, clock, expiry and cutoff checks to the latest observation. Starting a
+successor immediately invalidates inspection of the original or an older renewal,
+even if the successor is interrupted. Retain the root
+`telegram-renewal-ACCOUNT_HASH.json` and the full
+`recovery/OPERATION/telegram-renewals/ACCOUNT_HASH/` archive together with the managed
+request/receipt. The managed local Telegram shutdown and verification restart are
+implemented. Signal service handoff, installing the renewed Telegram cutoff into
+production admission and production activation remain unfinished; renewal itself
+grants no intake authority.
+
+The producer reconciliation stage now preserves retained acceptance,
+reconstructs missing payloads as ambiguous and records unknown compacted history.
+Backup now retains full receipt provenance and can capture immutable
+recovery pages while atomically fencing delivery. The target recovery identity is
+staged separately; the active binding, old receipt cursor and delivery obligations
+remain intact. Legacy acceptance records without complete receipts remain unproven.
+Its completion does not enable delivery, publish healthy status or clear LED faults.
+A local `backup-worker recovery-notifications` coordinator transfers these pages
+to the quarantined worker, evaluates fresh status and durably records the matching completion. Lost responses
+and process crashes resume without renewing completed health claims.
+Specialist command recovery now also retains original request mappings, results
+and receipt provenance under a durable execution fence. The quarantined worker
+records these as audit evidence; uncertain jobs and unconfirmed commands remain
+blocked. Completion never authorizes execution.
+Signal recovery can now export retained relay history past the normal ACK boundary.
+The quarantined worker preserves proven request mappings and keeps unknown replays
+quarantined; completion does not move operational cursors or enable intake.
+Telegram recovery can also import a verified retained gateway snapshot, preserving
+command identities, confirmation aliases and original deadlines. Pending inputs
+stay quarantined, and recovered commands receive no execution authority. This
+offline import neither polls Telegram nor claims complete provider history.
+An internal Telegram recovery polling stage can then quarantine returned updates,
+persisting pages and a separate progress journal before acknowledging them.
+Restart begins at offset zero; damaged or rolled-back progress blocks further
+polling. An empty response records a dated observation and keeps intake disabled.
+This stage is tested with fake providers and is not wired to a production CLI.
+Signal relay snapshots and restore quarantine are also available as internal APIs.
+Restore preserves live evidence, stages a separate candidate under a new epoch,
+and fences normal relay operations. Interrupted restores resume with the same epoch;
+the candidate is not installed or activated.
+The quarantined relay can now exchange its old history with the gateway, binding
+the snapshot to the staged new epoch. An older relay snapshot produces an explicit
+missing-history range while preserving the gateway's retained mappings. The
+exchange survives interruption and keeps history incomplete and intake disabled.
+Ambiguous outbound deliveries can also receive a journaled local retry/cancel
+instruction through the local staging commands `recovery-review` and
+`recovery-decide`. These require an already quarantined, reconciled worker.
+Review prints the exact payload and evidence bindings, plus any pending or recorded
+choice. Save that JSON to a new private file (0600), inspect it, then submit a choice:
+
+```sh
+umask 077
+deploy notification-worker recovery-review --local \
+  --config /path/to/runtime.json --state-dir /path/to/worker \
+  --producer producer-id --message event-id > /tmp/recovery-review.json
+
+deploy notification-worker recovery-decide --local \
+  --config /path/to/runtime.json --state-dir /path/to/worker \
+  --review /tmp/recovery-review.json --action retry \
+  --reason "Reviewed the uncertain delivery" --accept-duplicate-risk
+```
+
+For a cancellation instruction use `--action cancel` without the duplicate-risk
+flag. The actor is the current OS user ID. Reusing the same review and choice
+replays the original record after a lost response; a different choice cannot
+replace it. A new review exposes an interrupted intent and its original request ID.
+Review may initialize local reconciliation metadata, but never records or applies
+a choice. Dry-run validates arguments and review-file contents without opening the
+worker; it explicitly does not validate current recovery state.
+Both commands preserve quarantine; neither applies the choice.
+An internal offline ownership transition now binds each completed producer summary
+to the new recovery epoch, retains the ownership history and revokes all old
+generations. It resumes after interrupted publication without enabling delivery or
+changing messages, receipts or recorded choices. It has no CLI entry point yet.
+An absent producer can first be fenced independently, without inventing a
+reconciliation summary:
+
+```sh
+deploy notification-worker recovery-fence-producer --local \
+  --config /path/to/runtime.json --state-dir /path/to/worker \
+  --producer producer-id
+```
+
+This requires an existing quarantine. It moves that producer's ownership to the
+new epoch, revokes every old generation and persists `ReconciliationPending`.
+Staging and activation remain blocked until the normal challenged producer
+exchange completes and its exact summary is bound to ownership. Repeating the
+command resumes the same fence; after reconciliation advances, it refuses to
+refence the producer. Other producers retain their independent recovery paths.
+The command neither publishes recovered state nor enables production service.
+Backup now journals this handoff locally, checks matching reconciliation summaries
+and resumes lost responses without changing its active identity, receipt cursor or
+outstanding delivery obligations.
+An internal offline application step can now cancel a reviewed message or mark
+an approved retry as fenced, with one durable outcome receipt. An internal
+generation step can then stage a fresh generation and bind approved retries to it,
+preserving their original envelopes and receipt history. Runtime checks the binding
+and ordinary validity, status, route and revision guards before any future grant.
+Reviews show pending/applied application and pending/bound retry evidence. These
+steps have no CLI command; the generation remains staged and delivery stays fenced.
+Backup can now internally commit its delivery identity, staged generation and a
+zero cursor for the new receipt stream in one transaction with the recovery mapping.
+Old receipts and outstanding obligations survive; recovered submissions are not
+enqueued again, and cancellation intents remain pending. The commit requires
+matching command-recovery evidence where commands are installed, preserves the
+independent command identity, and leaves both delivery and execution fenced.
+Command recovery can now internally commit the specialist's new identity together
+with a checkpoint of every retained command's result revisions. Original command
+and result bodies, receipts and acknowledgement flags remain unchanged. Both
+completed and uncertain commands stay fenced; the result outbox also refuses to
+expose historical results during recovery. Delivery and command commits can replay
+in either order. An internal offline step now installs the reconciled command
+outcomes after the source checkpoint commits. Verified terminal outcomes become
+visible; uncertain commands keep their admission fence and surviving revision
+floors. Original receipts remain historical, and installation creates no new
+receipts, replies, confirmations or grants. Its journal supports crash and
+lost-response replay. Ordinary command execution/result APIs reject historical IDs.
+A separate internal step can seal the recovered request inventory after available
+provider and command mappings have been imported. Known requests keep their original
+identities, targets and deadlines. Unmapped inputs are durably blocked from becoming
+commands, queries or confirmation replies; fresh authorization requires a new request
+identity. Signal inventory requires retained relay identities, including for redacted
+inbox rows. Sealing does not prove complete provider history or enable intake.
+Telegram recovery can now internally commit a cursor handoff bound to the completed
+drain and sealed request inventory. Polling restarts at zero; unmapped input at or
+before the drain observation plus five seconds is rejected without creating commands
+or replies. Commit and activation validation require the same boot, consistent clocks
+and an observation less than ten minutes old; replay never refreshes that evidence.
+Signal recovery now internally prepares a matching relay/gateway handoff checkpoint
+after history reconciliation and request sealing. It binds the original gateway
+cursor, exact evidence and intended relay identity. The reserved position is the
+larger of the retained relay and gateway watermarks, preventing a restored relay
+from reusing positions already known to the gateway. Preparation changes no
+operational cursor, sequence or ACK; it is not activation authority. Both retained
+and restored relay paths support checkpoint replay after interruption.
+Signal cursor installation can now stage a separate relay database and atomically
+install the matching relay pin and baseline into the gateway recovery candidate.
+The relay candidate retains historical events and the original ACK evidence, with
+new positions reserved above both surviving watermarks. Its private database digest
+is bound to the gateway's completion record; interrupted installation resumes the
+same candidate. The candidate schema deliberately cannot start as a normal relay.
+The relay now understands a separately published runtime baseline: older cursors
+are rejected, historical events do not occupy pending-queue capacity, and an empty
+baseline ACK does not claim historical delivery. Runtime pins require matching file
+and SQL evidence. The gateway requires its installed cursor proof and persisted input
+beyond the baseline before admitting fresh Signal requests. Staging APIs still do
+not publish runtime authority. Version-2 relay snapshots now preserve the baseline
+proof, reserved gap, retained event count, actual positions and ACK evidence.
+Restoring one stages a separate format-6 quarantine and preserves the live inbox;
+interrupted restores resume from a retained immutable source copy. Recovery exchange
+and cursor staging now preserve multiple missing ranges across subsequent relay
+recoveries. Version-3 snapshots record their separate historical event counts.
+Gateway request sealing verifies surviving input against the immutable snapshot
+when the relay has lost it; opaque rows remain explicitly missing evidence.
+The worker remains quarantined. Managed receiver shutdown and fresh activation checks,
+LED ownership reconciliation and managed installation/activation
+remain pending; no restore command is enabled.
+
+A synthetic vulnerability specialist tests risk decisions,
+rescan jobs and health publication through the same interfaces. Shared backup
+notification migration and report-service installation, a real vulnerability scanner,
+recovery tooling and production activation remain
+unfinished. See the interactive plan for staging commands and the
+[backup command configuration example](examples/notification-worker/backup-commands.json).
+Local tests do not establish live provider or ARM64 qualification.
+
+In the staged runtime, Telegram/Signal intake, command conversion and command
+replies retry independently with bounded backoff. Expiring loop observations are
+included in status; an intake outage does not stop unrelated notification delivery.
+The LED reconciler verifies registry state and daemon arbitration after updates.
+Status includes optional `led` diagnostics: `registry_accepted` confirms observed
+registry presence, `suppressed` means another state wins, and `visual_verified`
+remains false. These observations expire after at most 30 seconds. Registry errors
+stop healthy renewal and attempt to clear the lease; if the clear cannot be
+confirmed, the bounded lease expires. Another application's states are never evicted.
+
+Before clearing an obsolete fault, the runtime checks the caller-owned daemon
+entry against its recorded LED, style and persistence, then rechecks current
+source evidence. A conflicting registry entry or failed lookup preserves the
+cleanup obligation and blocks healthy renewal. An already absent owned fault can
+be cleared idempotently; revoking a healthy lease does not depend on registry lookup.
+
+Staged LED bindings are available in the
+[LED runtime example](examples/notification-worker/led-runtime.json). Configure
+`worker.led_bindings` before initializing a disposable worker: each entry selects
+an enrolled producer, exact subjects or a sole `"*"`, and `green` or explicitly
+opted-in `red` (`allow_power: true`). The daemon must already enable the target;
+deploy does not change its configuration. Optional `styles` choose named patterns
+and priorities within severity bands: baseline 0–9, healthy 10–39, pause 40–59,
+warning 60–79, unknown 80–89 and critical 90–100. There are at most 32 bindings and
+512 selector entries in total. `led_bindings` in status shows source conditions
+and contributing subject keys; `omitted_subjects` counts labels omitted from the
+bounded summary. `led_outputs` shows each binding's observed registry state.
+Wildcards with more than 128 active subjects report `overflow` and cannot establish
+healthy coverage; known critical faults remain visible. Missing selected subjects
+remain unknown. Pauses expire with their evidence;
+fresh retirement clears faults without asserting health.
+
+Schema 7 pins the mapping and runtime UID. Changing or removing an initialized
+binding requires an explicit migration; do not delete the state directory to
+bypass this check. The implicit worker aggregate remains enabled alongside
+configured bindings.
+
+Schema 8 records each LED mutation intent before its RPC and its acknowledgement
+or uncertain outcome afterward. It keeps 64 recent attempts per binding and the
+latest acknowledged operation; `led_operations` in status includes pending and
+uncertain counts, the pruned history boundary, and how many unconfirmed attempts
+were pruned. This is historical evidence, not proof of current registry presence
+or visible output. Restart derives new work from current source evidence and never
+replays the history. Healthy/pause TTLs are recalculated after the intent commits.
+
+Schema 9 adds a local migration command. Keep the original runtime JSON. Resolve
+or retire all fault/cleanup records for each binding you will change or remove,
+using the original runtime. Then stop the staged worker and prepare a second
+runtime JSON changing only `worker.led_bindings`. Run:
+
+```sh
+deploy notification-worker led-migrate --local \
+  --config /private/worker/runtime.json \
+  --next-config /private/worker/runtime-next.json \
+  --state-dir /private/worker/state
+```
+
+The UID, LED socket and other runtime settings must remain unchanged. The command
+checks daemon targets, patterns, namespace collisions and capacity, revokes old
+healthy leases, and establishes the new unknown baselines. It preserves unrelated
+states and cannot clear fault incarnations. It does not stop or start services.
+After success, restart the staged worker using the new config; fresh producer
+reports are required before healthy indications can resume.
+
+If interrupted or a daemon acknowledgement is lost, rerun the exact command with
+the original two config files. Startup is blocked until the journal completes;
+deleting its file does not bypass the database fence. If the daemon loses its
+baselines, resume recreates the baseline sets without replaying old baseline clears.
+Dry-run validates the configs only and explicitly reports that it has not inspected
+worker state or the daemon.
+
+Previous mappings and their retained operation histories are archived transactionally.
+Status includes a `layout_hash` alongside operation counters so a new mapping's
+counters cannot be confused with the previous mapping. Returning to an earlier
+config creates a new mapping revision. History currently supports 16 migrations;
+archive compaction is not yet provided, and further migrations fail before LED I/O
+when the limit is reached. Older binaries refuse schema 9. Schema-6/7/8 snapshots
+remain readable; restored history retains its original epoch in quarantine.
+
+An already quarantined local recovery can now collect a durable LED ownership review:
+
+```sh
+deploy notification-worker recovery-led-review --local \
+  --config /private/worker/runtime.json \
+  --state-dir /private/worker/state
+```
+
+This requires a configured absolute `led_socket`, the existing recovery quarantine,
+and an available worker lease. It does not create a quarantine or stop services;
+there is still no operator restore/activation command. It compares the restored
+reconciliation database, the preserved original database (including newer faults),
+and read-only daemon observations. JSON output distinguishes snapshot-only and
+post-snapshot faults, cleanup intents, mapping revisions, unrecognized states and
+foreign UIDs. Schema-6/legacy faults cannot establish exact epoch ownership.
+Incompatible configurations, damaged ownership history and missing source databases
+fail closed. Free-form daemon messages are hashed, not copied into the review.
+
+Repeated calls reuse the sealed observation. `--refresh` explicitly captures another,
+up to eight inventories per recovery within storage budgets. An interrupted capture
+is sealed first, even with `--refresh`; rerun afterward to request a new capture.
+Restart never renews an observation's timestamp. `observation_current` requires
+unchanged source evidence, the same boot and less than 30 seconds of elapsed time;
+it is not a claim that the registry stayed unchanged. The review retains exact old
+fault identities and cannot adopt ownership, clear faults, publish health or activate
+the worker. `clear_allowed`, `activation_allowed` and `visual_verified` remain false.
+Dry-run validates configuration only, without inspecting state or contacting the daemon.
+
+The reviewed fault union can now be frozen for later recovery publication:
+
+```sh
+deploy notification-worker recovery-led-preserve --local \
+  --config /private/worker/runtime.json \
+  --state-dir /private/worker/state \
+  --inventory n-REPLACE_WITH_REVIEW_ID \
+  --inventory-hash REPLACE_WITH_REVIEW_HASH
+```
+
+The first call requires the current, sealed 30-second inventory and rechecks known
+fault instances against the registry. It preserves the complete union from both
+ledgers, including post-snapshot and snapshot-only faults, with their original
+IDs, epochs and cleanup history. Unrecognized and foreign states remain unowned;
+free-form daemon messages are never copied. Mismatched mappings, UIDs, legacy
+ownership, changed sources or fault instances prevent preparation.
+
+An independent file intent and SQLite acknowledgement make retries crash-safe.
+Repeat the exact ID/hash after interruption; a retained intent can finish after
+expiry or reboot without contacting the daemon or refreshing its evidence. Once
+prepared, a different inventory cannot replace it. `recovery-led-review` exposes
+its `preservation` summary and source-drift status. The record is bounded to one
+per recovery and at most 2,048 proven fault identities, subject to storage limits.
+
+This prepares ownership provenance for the publication coordinator. It leaves
+both source fault ledgers and daemon states untouched, grants no clear/healthy
+permission, and cannot discharge domain faults or remove quarantine. Normal-runtime
+acceptance, runtime-wide reconciliation and final publication remain
+unfinished; a committed preservation record is not production activation.
+
+The preserved union can be applied to the quarantined reconciliation database:
+
+```sh
+deploy notification-worker recovery-led-adopt --local \
+  --config /private/worker/runtime.json \
+  --state-dir /private/worker/state \
+  --inventory n-REPLACE_WITH_CURRENT_REVIEW_ID \
+  --inventory-hash REPLACE_WITH_CURRENT_REVIEW_HASH \
+  --preservation-hash REPLACE_WITH_COMMITTED_PRESERVATION_HASH
+```
+
+This requires the exact committed preservation and a current sealed inventory,
+with a fresh registry check. If the original observation expired or separately
+authorized cleanup changed the registry, refresh the review first. Adoption keeps
+every original fault ID and epoch and sets all executable cleanup flags to false;
+their original values remain in the preservation evidence. Faults cleared by a
+separate domain-authorized operation remain in the ownership history and are not
+recreated. Foreign registry entries are never adopted.
+
+Ledger replacement and its acknowledgement commit in one SQLite transaction. An
+independent intent makes interrupted adoption resumable using the exact same three
+arguments, even after expiry/reboot, without repeating registry requests. A retry
+cannot select another inventory or change the preserved union. Review includes an
+`adoption` summary. Subsequent reviews retain the original snapshot/source evidence
+and verify the merged ledger against the adoption checkpoint; missing or changed
+rows block reconciliation. Adoption grants no cleanup or activation authority and
+leaves the daemon and original live database untouched. The worker stays quarantined
+until the remaining reconciliation and publication work is implemented.
+
+After adoption, archive the old operation and mapping journals before starting
+history for the new recovery epoch:
+
+```sh
+deploy notification-worker recovery-led-handoff --local \
+  --config /private/worker/runtime.json \
+  --state-dir /private/worker/state \
+  --adoption-hash REPLACE_WITH_COMMITTED_ADOPTION_RECORD_HASH
+```
+
+This requires the current database schema, unchanged configuration, UID and LED
+socket, and the exact adoption record. It archives the original journals, layout
+and adopted fault union, then resets only the active operation/mapping histories
+in one transaction. Original fault IDs remain retained and protected from ordinary
+cleanup. No daemon request is sent. The independent intent supports exact retries
+after a crash; retrying cannot erase operations already recorded in the new epoch.
+Review exposes `epoch_handoff`; its fault count records the union retained at
+handoff, before any later cleanup imports. Missing or changed archive/provenance records and
+preserved-source drift block the handoff. The candidate remains quarantined;
+worker-wide fault reconciliation and final publication are still unfinished.
+
+Recovery now also has an internal producer evidence exchange
+(`OpenRecoveryLEDEvidenceSession`). A fresh challenge pins the inventory, both
+source ledgers, producer domain history and earlier recovery reports. The producer
+must return a newly evaluated full snapshot and, for policy faults, transitions
+for the exact retained fault revisions. A newer `ok` status alone cannot discharge
+a policy fault. Missing subjects, ongoing faults, expired support, changed sources
+or regressed revisions block the proposal. Explicit retirement can resolve a
+binding without asserting health.
+
+`recovery-led-review` includes a `resolutions` section when this exchange has stored
+evidence. A resolved binding lists exact `proposed_fault_ids`, an evidence hash and
+an expiry capped by its shortest lease and the inventory window. These are
+proposals only: no LED or ownership ledger is changed, and `clear_allowed` remains
+false. The worker-wide aggregate requires separate runtime reconciliation.
+Challenges and reports survive interruption without new timestamps; refresh cannot
+discard earlier producer evidence or acceptance dependencies. The exchange is an
+internal building block. Backup now has a coordinator that evaluates its actual
+archive, incidents, host probe, qualification and pause/run state while delivery
+remains fenced. It requires completed producer reconciliation, stores the new
+status sequence and frozen report atomically, and records the worker acknowledgement
+separately. Lost replies reuse that report; a new inventory requests a new evaluation.
+Expired probes, unresolved incidents or missing qualification cannot become healthy
+evidence. Backup produces ordinary resolution/retirement evidence, not risk-acceptance
+transitions. Its bounded journal retains up to eight reports for the recovery.
+
+To reconcile a backup producer with an already quarantined notification worker,
+use its exact recovery operation ID (`operation` in the preparation output or LED recovery review):
+
+```sh
+deploy backup-worker recovery-notifications --local \
+  --config /private/backup/worker.json --state-dir /private/backup/state \
+  --notification-config /private/worker/runtime.json \
+  --notification-state /private/worker/state \
+  --operation n-REPLACE_WITH_RECOVERY_OPERATION
+```
+
+This command drains the local report pump through its lease, fences backup
+notification ownership, freezes the producer export, and exchanges retained
+messages/receipts and an evaluated snapshot with the offline worker. It prints
+the durable reconciliation summary and its `summary_hash`. Interrupted exchanges resume; a completed
+exchange returns the same historical summary without refreshing its evidence.
+A different recovery operation is rejected before the producer is fenced.
+Neither provider delivery nor command recovery, ownership handoff, active cursor
+publication or service startup is performed. Prepare quarantine first with
+`notification-worker recovery-prepare`. Final recovered-state publication and
+managed service orchestration remain unfinished.
+
+After reviewing that completion, perform the local producer handoff:
+
+```sh
+deploy backup-worker recovery-handoff --local \
+  --config /private/backup/worker.json --state-dir /private/backup/state \
+  --notification-config /private/worker/runtime.json \
+  --notification-state /private/worker/state \
+  --operation n-REPLACE_WITH_RECOVERY_OPERATION \
+  --summary-hash REPLACE_WITH_RECONCILIATION_SUMMARY_HASH
+```
+
+The coordinator keeps one offline gateway lease throughout the handoff. For an
+interactive producer it also holds the existing backup command-runner lease and
+requires the command ledger's original archive binding. It reconciles retained
+commands, revokes old delivery generations, stages one new generation, commits
+the new delivery identity with a zero unread-receipt cursor, and installs proved
+command outcomes under the new identity. Old payloads, result receipts and
+request mappings remain history. Previously successful commands stay successful;
+unfinished commands stay uncertain, with their execution and confirmation fences
+intact. No domain command runs and no receipt is acknowledged by this operation.
+
+Missing command state or a missing command lock is refused for an interactive
+producer. Removing command enrollment cannot hide a surviving command ledger.
+Notification-only producers can hand off when both configurations and retained
+state prove that no command ledger is involved. Neither path initializes state,
+starts services, sends messages or releases quarantine. The JSON result includes
+delivery and command checkpoints with both activation flags false. Repeating the
+exact command resumes partial completion or returns the same historical result;
+it cannot renew evidence or create another generation. Managed service handoff,
+runtime configuration installation and final recovered publication remain pending.
+
+The local backup LED coordinator is available after this producer reconciliation.
+These local recovery commands use existing state and the installed backup configuration
+(an owned regular file with mode `0600`). They never initialize missing state,
+prepare quarantine or start services:
+
+```sh
+deploy backup-worker recovery-led-evidence --local \
+  --config /private/backup/worker.json --state-dir /private/backup/state \
+  --notification-config /private/worker/runtime.json \
+  --notification-state /private/worker/state \
+  --inventory n-REPLACE_WITH_CURRENT_REVIEW_ID \
+  --inventory-hash REPLACE_WITH_CURRENT_REVIEW_HASH
+```
+
+Run `notification-worker recovery-led-review` again to inspect the resulting
+binding proposal. After preservation, adoption and LED epoch handoff are committed,
+clear and import one exact reviewed backup fault:
+
+```sh
+deploy backup-worker recovery-led-clear --local \
+  --config /private/backup/worker.json --state-dir /private/backup/state \
+  --notification-config /private/worker/runtime.json \
+  --notification-state /private/worker/state \
+  --inventory n-REPLACE_WITH_CURRENT_REVIEW_ID \
+  --inventory-hash REPLACE_WITH_CURRENT_REVIEW_HASH \
+  --binding REPLACE_WITH_BACKUP_BINDING \
+  --fault deploy.f.REPLACE_WITH_EXACT_48_HEX_FAULT_DIGEST \
+  --evidence-hash REPLACE_WITH_REVIEWED_EVIDENCE_HASH \
+  --epoch-hash REPLACE_WITH_COMMITTED_EPOCH_HANDOFF_HASH
+```
+
+The clear command pins the backup producer and its configured binding, retains
+the backup source leases across the guarded clear, and imports only a committed
+`acknowledged` or domain-authorized `observed_absent` result. Output includes the
+cleanup result/hash and, if completed, the import decision. While the reviewed
+inventory remains current, a lost response can be retried with the same arguments
+without sending another clear, even after the original evidence expires. Uncertain or
+not-sent outcomes remain unimported; inspect their outcome before deciding on a
+new attempt. If clear succeeded but import failed, the reported result hash can
+also be passed to `notification-worker recovery-led-import-cleanup`.
+
+Current evidence has a short lease. If the inventory expires, refresh the LED
+review and obtain a new backup evidence report before a new clear attempt. A
+refresh does not replay an earlier attempt. Exact historical completion does not
+renew its proof or assert current backup health. Both commands support global
+`--dry-run`; it validates arguments/configuration without opening state or making
+registry requests. Other producer adapters, remote service orchestration and final
+recovery publication remain pending. Running the review command alone does not
+obtain producer proof.
+
+Exact named-binding cleanup is now available to internal coordinators through
+`OpenRecoveryLEDCleanupSession`. It requires the reviewed inventory/evidence hash,
+fresh exact-UID registry checks and the producer's current domain guard. Backup
+holds both source leases and uses a speculative evaluation that always rolls back.
+The clear intent and outcome are journaled independently; restart never replays an
+uncertain attempt. Another attempt requires a fresh inventory and fresh producer
+evidence. No source ownership ledger, delivery cursor or activation fence changes.
+Review reports `cleanup_attempts`, `cleanup_unconfirmed` and up to 64
+`recent_cleanup` outcomes. Acknowledgement means registry acceptance, not physical
+rendering. There is deliberately no chat command that bypasses these checks.
+
+Once a named-binding clear has a committed `acknowledged` or domain-authorized
+`observed_absent` result and the epoch handoff is committed, retire its exact
+inherited ledger row:
+
+```sh
+deploy notification-worker recovery-led-import-cleanup --local \
+  --config /private/worker/runtime.json \
+  --state-dir /private/worker/state \
+  --epoch-hash REPLACE_WITH_COMMITTED_EPOCH_HANDOFF_HASH \
+  --result-hash REPLACE_WITH_EXACT_CLEANUP_RESULT_HASH
+```
+
+Review lists up to 32 distinct eligible receipts in `importable_cleanup`, with
+the full count in `importable_cleanup_count`. After importing, review again for
+the next candidates. `cleanup_imports` retains the exact import decisions. Each
+decision pins the original fault, cleanup receipt, domain proof and epoch archive.
+Independent intent/history and atomic row removal support exact crash resume.
+Retrying imports the same historical result without renewing proof or contacting
+the daemon. Pending imports must finish before runtime ownership is accepted.
+Uncertain/not-sent outcomes cannot be imported; an ordinary registry absence is
+not a cleanup receipt. Missing or changed history fails closed. Newer fault IDs
+remain fenced, and the full original union stays archived. Imports make no domain
+or healthy-status claim and do not release quarantine. Worker-wide aggregate
+cleanup and managed producer cleanup orchestration remain unfinished.
+
+The mutation path passed seven SIGKILL cases and integration against the pinned
+pi-status-led daemon's mock hardware driver. Physical LED testing remains deferred.
+Managed LED-binding migration in verification mode is described below. Production
+activation, UID/socket changes and runtime-wide fault reconciliation remain
+unfinished. Runtime ownership primitives now verify inherited faults against the
+committed adoption/preservation/inventory chain and report `inherited_led_faults`
+per binding. Such faults keep output critical or unknown, cannot be reused as new
+incarnations, and are excluded from normal Set/Clear and cleanup selection.
+Missing or changed proof fails closed. These primitives are tested using a fenced
+candidate; worker-wide reconciliation and final recovered-state publication are
+still required before a recovered service can run.
+
+A staged worker can also run in explicit verification mode:
+
+```sh
+deploy notification-worker serve --local --verification \
+  --config /private/worker/runtime.json \
+  --state-dir /private/worker/state \
+  --socket /private/worker/state/api.sock
+```
+
+It accepts durable producer submissions and exposes status while withholding
+message delivery, chat intake, command execution and reply grants. LED reconciliation
+revokes healthy leases and maintains unknown baselines; existing fault IDs remain
+untouched even after healthy producer submissions. Status includes
+`verification_only: true`. This mode applies to that process and leaves canonical
+producer ownership unchanged. It is not a durable installation/activation fence.
+
+`install.RenderVerificationService` renders a native user-service template with
+that mode, resource limits, private file permissions, Unix-only networking,
+private devices, source-path exclusions and writable access restricted to worker
+state. The local managed lifecycle now installs this verification mode through
+`setup`/`update --local --spec …`, and supports `resume`, `uninstall` and
+`installation-status --local --root …`. It pins releases, runtime, identity and an
+independent recovery helper, journals service/file transitions and checks the exact
+running installation revision. It adopts explicitly initialized inactive state;
+it never recreates missing state or implicitly upgrades schemas. Uninstall retains
+state, pending obligations, credentials and LED fault history. See the
+[native verification installation guide](examples/notification-worker/INSTALLATION.md)
+and [installation spec](examples/notification-worker/installation.json).
+
+`queue-inspect` and `receipts-inspect` provide bounded, producer-scoped inspection
+through the Unix API. Their pagination positions cannot advance a producer's
+listed/acknowledged receipt floors; inspecting history does not authorize an ack.
+Queue inspection omits message text. These are live views, not recovery exports.
+
+`producer-retire --local --config … --state-dir … --producer … --reason …`
+previews permanent retirement of an enrolled producer epoch; `--apply` publishes
+the decision under the stopped worker's exclusive lease. All generations must be
+revoked, subjects explicitly retired, and delivery/command/receipt/policy/LED
+obligations settled first. It preserves history, blocks new work and activation,
+and removes the retired producer's heartbeat requirement without asserting health.
+Configuration enrollment remains retained. See the
+[producer retirement guide](examples/notification-worker/ADMINISTRATION.md#producer-retirement).
+
+`receipts-compact --local --config … --state-dir … --producer …` previews bounded
+receipt cleanup; `--apply` deletes acknowledged intermediate history older than
+the configured audit window (90 days by default). Latest outcomes, administrative
+audit receipts, message replay fences, cursor values and chat contexts survive.
+Inspection reports discarded-history counts without granting acknowledgement
+authority. See the [receipt compaction guide](examples/notification-worker/ADMINISTRATION.md#receipt-compaction).
+
+`rollback --local --root … --from-revision …` re-releases a retained executable as
+a new managed verification revision, preserving current configuration, schema and
+state. It uses the update journal and refuses changed/incompatible artifacts.
+Interrupted rollback resumes through the retained helper; an unfinished update
+can first be cancelled with uninstall. See the
+[installation guide](examples/notification-worker/INSTALLATION.md).
+
+`upgrade-helper --local --spec …` explicitly stages a new runtime and recovery
+helper at the current schema, retaining configuration, identity and completed
+recovery/Telegram evidence. Ordinary updates keep their pinned helper. This gives
+older installations a path to new lifecycle capabilities without a data migration.
+See the [helper upgrade instructions](examples/notification-worker/INSTALLATION.md#explicit-helper-upgrade).
+
+`migrate-schema --local --spec …` explicitly upgrades an installed verification
+worker from schema 9 to 10. It pins the same identity/configuration/exclusions,
+checks migration-capable executables before stopping the service, and retains the
+original database plus both recovery helpers. SQL migration and its checkpoint
+commit atomically; interrupted work uses `resume` with the staged new helper.
+Ordinary updates still cannot change schemas, and rollback cannot cross this
+migration. See the [schema migration instructions](examples/notification-worker/INSTALLATION.md#explicit-schema-migration).
+
+`migrate-led --local --spec …` changes only LED bindings on an installed
+verification worker. It pins the identity, socket, enrollment, providers and
+limits; checks migration-capable executables before service stop; and journals
+the mapping under the same installation operation. Changed bindings must have
+no remaining fault/cleanup records. The migration can revoke healthy leases and
+set unknown baselines; it cannot clear faults or enable healthy output. Exact
+resume uses the staged new helper. See the
+[LED mapping migration instructions](examples/notification-worker/INSTALLATION.md#managed-led-binding-migration).
+
+`qualification-template`, `qualify --report …` and `qualification-status` now
+record bounded, dated operator evidence for the exact managed revision, local
+configuration, credential fingerprints, architecture and UID. Partial/failed
+reports are retained; changed bindings and expired reports cannot count as current.
+These commands perform no live checks and grant no activation authority. See the
+[qualification evidence guide](examples/notification-worker/QUALIFICATION.md).
+
+Signal linking now enters the same account lease as both relays through the
+pinned container's deploy entry point. Interrupted or failed attempts block
+relinking and relay startup until explicit account-state review. Local
+`signal-link-status`, `signal-service-status` and `signal-link-resolve` expose the
+link and service journals. Backup linking now stops its enrolled legacy relay and
+restores its recorded prior activity, with crash-resumable maintenance fencing.
+The internal recovery coordinator now durably fences the account before stopping
+its pinned service, checks surviving CLI children and installs/verifies the
+recovered inbox under the gateway lease. `signal-recovery-status --local
+--state-dir …` inspects the fence. Completion keeps ordinary relay startup and
+linking disabled. `recovery-signal-handoff --local --spec …` now connects that
+coordinator to an existing native user-systemd relay: it pins the loaded unit,
+executable, configuration and live account/inbox leases, then stops it and installs the
+offline inbox. Exact retry handles interrupted stops without starting a receiver.
+`recovery-signal-podman-handoff --local --spec …` now provides the corresponding
+rootless backend for the supported interactive Quadlet profile, including exact
+container/image IDs, loaded commands, namespace-visible mounts and live flock
+proofs. The tested flow preserves the fence after container removal and handles
+lost stop responses. `signal-verification-prepare` now enrolls a separate,
+health-only endpoint and stages the next verification gateway configuration.
+`signal-verification-serve` runs that endpoint in the foreground, holding the
+account and both inbox leases and continuously checking retained evidence. The
+staged configuration can now be adopted with `adopt-signal --local --spec …` into
+an existing recovered gateway verification service. Its journal preserves endpoint
+pins across restart/update/rollback, and the gateway stops serving if the separate
+verifier becomes unavailable or mismatched. The original account-handoff inputs
+remain intact. `signal-service-setup --local --spec …` now installs a separate
+native verification service with pinned executable/publication and resumable
+setup/removal. `supervise-signal` binds an already adopted foreground endpoint to
+that service; new adoptions can include the service pins directly. Gateway units
+then depend on the verifier, and readiness includes its exact service hash.
+Real user-systemd qualification, legacy backup-relay adoption and production
+activation remain unfinished.
+See the [Signal verification endpoint guide](examples/notification-worker/SIGNAL_VERIFICATION.md).
+Details: [Podman Signal recovery](examples/notification-worker/SIGNAL_PODMAN_RECOVERY.md)
+and the [Signal maintenance guide](examples/notification-worker/SIGNAL_MAINTENANCE.md).
+
+For a stopped worker, `message-review`, `message-decide` and
+`message-decision-status` provide audited retry/cancel administration. A private,
+five-minute review pins the exact event, route, generation, configuration, epoch
+and receipt history. Retrying an ambiguous event requires explicit duplicate-risk
+acknowledgement. Retries retain attempt counts and normal validity/ownership guards;
+cancellation never means acceptance. Repeating a committed decision returns its
+original result without reopening the event. The commands neither stop services
+nor call providers. See the [administration guide](examples/notification-worker/ADMINISTRATION.md).
+Administrative audit requires storage schema 10; older binaries refuse it.
+Managed administration will not implicitly upgrade older state. Compatible
+unmanaged staging upgrades are transactional, and older snapshots remain readable
+in quarantine. The explicit managed schema 9 → 10/helper migration is available;
+other schema transitions and configuration migrations remain unfinished.
+
+Production activation, other managed schema/configuration migrations, Signal
+service/account handoff and later recovery epochs remain unfinished. Offline systemd
+validation and temporary executable/socket tests do not establish that all
+restrictions work in a real user manager.
+
+### Managed inventory
+
+```sh
+deploy ls                          # Current local account only
+deploy ls vps-main                  # Named server account
+deploy ls --managed vps-main
+deploy ls --json vps-main
+```
+
+The probe requires Python 3, Podman, and systemd on the inspected host. It is sent
+over the existing authenticated SSH connection without installing a helper.
+It reads Quadlet search paths, generated service properties, and Podman inspect
+data. It does not reload systemd, start services, enroll identities, or adopt files.
+Output separates management, ownership evidence, and runtime state. An effective
+generated unit's container ID can associate a custom container name; similar
+names or copied labels cannot. Unproven associations remain separate rows.
+
+Application, Traefik, and maintenance renderers use one versioned JSON metadata
+encoder. Application markers travel with the unit through existing release and
+rollback transactions. User labels under `io.deploy.*` are reserved. A marker is
+a public management claim, not export authorization. Matching committed service
+and target ownership is reported separately. An `enabled` backup column indicates
+opt-in only; the exporter revalidates the binding and ownership under
+the deployment locks. Drop-ins and unresolved effective configuration are shown
+as diagnostics rather than interpreted as safe export policy.
+
+JSON has `schema`, stable entry IDs, `complete`, and diagnostics. Failed probes
+produce partial results and a nonzero exit status, never a healthy empty list.
+`--managed` retains diagnostics for filtered rows. The bounded probe supports up
+to 512 source files/containers/units, 1 MiB per Quadlet, and 16 KiB per marker.
+Unknown metadata schema versions, malformed markers, shadowed sources, masks,
+and unassociated containers stay visible. Listing is an observation; it does not
+hold deployment locks or claim a transactionally consistent source inventory.
+
+Local SQLite snapshot creation now rejects uninitialized sources, normalizes
+private WAL-derived snapshots to DELETE mode, and validates them without creating
+sidecars. Generic checks disable SQLite startup scripts, use bounded output and
+process budgets, and distinguish unsupported validator features from integrity
+findings. These checks are not a filesystem/network sandbox or an application
+restore test. The dedicated worker validator still needs platform qualification.
+
+Run `make test-backup-worker` for the worker and foundation checks, or `make test` for the
+complete unit/process suite, race detector, and vet. In a workspace with a
+read-only home cache, set `GOCACHE` and `XDG_CACHE_HOME` to writable temporary
+directories. `make test-backup-worker-isolated` checks staged SSH trust isolation,
+automatic update recovery (including trust files) after SIGKILL, and the
+production SQLite validator, capture-lock inheritance through Podman unshare, and
+native SQLite watchdog behavior after supervisor death in a disposable rootless
+Podman/systemd environment with its own store. Full backup flows, VM reboot/power
+loss, and live ARM/provider acceptance gates remain outstanding.
+
 ### Stable readiness and execution budgets
 
 Readiness samples service activity, pinned image identity, container identity,
@@ -595,7 +1773,8 @@ Preview reads remote
 inventory under coordination locks and creates only temporary inventory/lock metadata.
 The release policy also controls completed database-operation archives. Cleanup
 protects current and previous releases and all retained history backup references; pending
-recovery or corrupt inventory stops cleanup. Older snapshots without managed metadata
+recovery, corrupt inventory, or a checksum mismatch in any matching snapshot
+(including retained copies) stops cleanup. Older snapshots without managed metadata
 and unrelated files are retained. Ordinary `deploy prune prod` continues to prune
 unused image/cache data under the shared Podman storage lock.
 
@@ -638,13 +1817,43 @@ retrieved database. The check must exercise an application read. Command output 
 suppressed to avoid logging database records. An off-host copy is useful recovery
 protection only after its restore procedure has been tested.
 
+### Code layout
+
+The repository uses one Go module. `cmd/deploy` is the canonical executable entry
+point; root `main.go` forwards to the same CLI so existing `go build .` and
+`go install github.com/dryaf/deploy` commands continue to work.
+
+| Directory | Responsibility |
+| --- | --- |
+| `internal/cli` | Command parsing and dispatch |
+| `internal/config` | Strict configuration, server inventory resolution, backup policy |
+| `internal/deployment` | Application/server operations, database operations, retention, embedded transaction scripts |
+| `internal/quadlet`, `internal/inventory` | Unit rendering/metadata and discovery |
+| `internal/backup` | Archive, worker lifecycle, state transactions, outbox, recovery and restore |
+| `internal/backup/source` | Restricted source helper, capture and source enrollment |
+| `internal/backup/protocol` | Snapshot framing and wire types |
+| `internal/backup/notification` | Notification providers, heartbeat and Signal relay |
+| `internal/backup/helper` | Installed helper artifacts |
+| `internal/safefs`, `internal/sqlite` | Filesystem/lock ownership and bounded SQLite snapshots |
+| `internal/process`, `internal/transport`, `internal/ui` | Process execution, SSH/rsync and CLI output/options |
+| `internal/testutil` | Shared test fixtures |
+
+Archive control, worker state and the notification outbox stay in one package
+because their transactions and locking rules are coordinated. Tests live beside
+the code they exercise and are grouped by feature. Embedded shell/Python assets
+live in the package that embeds them.
+
+`make build` builds `./cmd/deploy`. `make test` runs every package's unit tests,
+race tests and vet checks. The isolated integration scripts build their tagged
+test binaries from `internal/deployment` or `internal/backup`.
+
 ### Release verification
 
-`make release-check` requires the normal/race/vet suite, real SSH/rootless Podman
-integration and the VM interruption matrix. CI runs local checks on Linux and macOS,
-real transport against the pinned runtime floor and a freshly resolved current
-runtime digest, and VM recovery before the `release-gate` job succeeds. Configure
-repository branch/release protections to require that job before publishing.
+`make release-check` requires the normal/race/vet suite, both isolated rootless
+Podman suites (image deployment and backup worker recovery), and the VM interruption
+matrix. `make test-backup-worker-isolated` runs the backup suite separately.
+There is no checked-in CI workflow; CI and branch/release protections must be
+configured separately to enforce this gate before publishing.
 
 `make test-deploy-vm-crash` builds a disposable bootable VM from the pinned integration
 base, using a temporary disk and generated credentials. It power-cuts and reboots

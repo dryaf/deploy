@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "operation": "REPLACE_WITH_FRESH_N_OPERATION_ID",
+  "root": "/home/notify/.local/share/deploy/signal-verification-service",
+  "unit_directory": "/home/notify/.config/systemd/user",
+  "binary_file": "/home/notify/bin/deploy",
+  "binary_sha256": "REPLACE_WITH_SHA256_OF_THE_NATIVE_DEPLOY_BINARY",
+  "endpoint": {
+    "root": "/home/notify/.local/state/signal-verification",
+    "manifest_hash": "REPLACE_WITH_EXACT_SIGNAL_VERIFICATION_MANIFEST_HASH"
+  }
+}

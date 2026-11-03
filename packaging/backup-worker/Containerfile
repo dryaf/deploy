@@ -1,0 +1,14 @@
+# Supply a verified Debian base digest and an immutable Debian snapshot timestamp.
+ARG DEBIAN_IMAGE
+FROM ${DEBIAN_IMAGE}
+ARG DEBIAN_SUITE=bookworm
+ARG DEBIAN_SNAPSHOT
+RUN test -n "$DEBIAN_SNAPSHOT" && \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* && \
+    printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s/ %s main\n' "$DEBIAN_SNAPSHOT" "$DEBIAN_SUITE" > /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client bubblewrap tzdata && \
+    rm -rf /var/lib/apt/lists/*
+ARG TARGETARCH
+COPY dist/backup-worker/deploy-linux-${TARGETARCH} /usr/local/bin/deploy
+USER 0:0
+ENTRYPOINT ["/usr/local/bin/deploy"]

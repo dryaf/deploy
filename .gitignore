@@ -1,8 +1,13 @@
 .prompt
 _prompt.txt
 _prompt_response.txt
-deploy
+/deploy
 .prompt/user_settings.yaml
 .prompt/cache/
 .prompt/benchmarks/
 PLAN.md
+
+/dist/
+.codex
+.aws
+.agents

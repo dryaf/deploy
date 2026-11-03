@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "root": "/home/notify/.local/share/deploy/notification-installation",
+  "state": "/home/notify/.local/state/deploy-notification",
+  "unit_directory": "/home/notify/.config/systemd/user",
+  "runtime_file": "/home/notify/.local/state/signal-verification/gateway-next.json",
+  "binary_file": "/home/notify/bin/deploy",
+  "binary_sha256": "REPLACE_WITH_SHA256_OF_THE_NATIVE_DEPLOY_BINARY",
+  "denied_paths": [
+    "/home/notify/.ssh",
+    "/home/notify/backups"
+  ],
+  "signal_verification": {
+    "root": "/home/notify/.local/state/signal-verification",
+    "manifest_hash": "REPLACE_WITH_EXACT_SIGNAL_VERIFICATION_MANIFEST_HASH"
+  }
+}

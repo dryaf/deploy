@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "worker": {
+    "producers": [
+      {
+        "producer": {
+          "id": "synthetic-backups",
+          "epoch": "fixture-installation-one"
+        },
+        "required": true,
+        "routes": [],
+        "max_silence_seconds": 150,
+        "max_evidence_seconds": 86400,
+        "max_messages": 100
+      }
+    ],
+    "routes": {},
+    "max_messages": 10000,
+    "max_payload_bytes": 67108864,
+    "max_database_bytes": 536870912,
+    "min_free_bytes": 134217728
+  },
+  "providers": {},
+  "led_socket": ""
+}

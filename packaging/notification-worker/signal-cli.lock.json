@@ -1,0 +1,11 @@
+{
+  "version": "0.14.9",
+  "source_commit": "3997429779095ff3a2d64c877126e84fce9852aa",
+  "source": "https://github.com/AsamK/signal-cli",
+  "images": {
+    "linux/amd64": "ghcr.io/asamk/signal-cli@sha256:a6b1fc309cd8e6bab1c239bd5afaffa978ae252921e6b529643e84e180e0c4aa"
+  },
+  "executable": "/opt/signal-cli/bin/signal-cli",
+  "native_arm64_qualified": false,
+  "live_signal_qualified": false
+}

@@ -1,0 +1,72 @@
+package install
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/dryaf/deploy/internal/notification/worker"
+	"github.com/dryaf/deploy/internal/safefs"
+)
+
+func (i managedInstaller) probeRecovery(ctx context.Context, d *safefs.Directory, m ManagedManifest) error {
+	if m.RecoveryCommitHash == "" {
+		return nil
+	}
+	probe := i.recoveryProbe
+	if probe == nil {
+		probe = func(ctx context.Context, d *safefs.Directory, name, hash string) error {
+			return probeManagedCapability(ctx, d, name, hash, "__managed-recovery-probe")
+		}
+	}
+	if err := probe(ctx, d, "releases/"+m.Revision+"/deploy", m.BinaryHash); err != nil {
+		return err
+	}
+	return probe(ctx, d, managedHelperName(m), m.HelperHash)
+}
+
+func openManagedStore(m ManagedManifest, c Runtime) (*worker.Store, error) {
+	if m.TelegramRenewalID != "" {
+		d, err := privateManagedDir(m.Root, true)
+		if err != nil {
+			return nil, err
+		}
+		receipt, err := readManagedTelegramReceipt(d, m)
+		d.Close()
+		if err != nil {
+			return nil, err
+		}
+		if c.Telegram == nil {
+			return nil, fmt.Errorf("managed Telegram account missing")
+		}
+		return worker.OpenManagedTelegramVerification(m.Paths.State, c.Worker, m.Identity, m.Revision, m.RecoveryCommitHash, c.Telegram.Account, m.TelegramRenewalID, receipt.Renewal.RenewalHash)
+	}
+	if m.RecoveryCommitHash != "" {
+		return worker.OpenManagedRecoveryVerification(m.Paths.State, c.Worker, m.Identity, m.Revision, m.RecoveryCommitHash)
+	}
+	return worker.OpenManagedRuntime(m.Paths.State, c.Worker, m.Identity, m.Revision)
+}
+
+func (i managedInstaller) adoptRecovery(ctx context.Context, d *safefs.Directory, j managedJournal, c Runtime) error {
+	m := j.Intent.After
+	if err := i.probeRecovery(ctx, d, m); err != nil {
+		return err
+	}
+	if j.Intent.Operation != "adopt-recovery" {
+		return nil
+	}
+	review, err := worker.ReviewPublishedRecovery(ctx, m.Paths.State, c.Worker, m.RecoveryCommitHash)
+	if err != nil {
+		return err
+	}
+	if j.Intent.Before == nil || review.Before != j.Intent.Before.Identity || review.After != m.Identity {
+		return fmt.Errorf("recovery adoption changed managed identity transition")
+	}
+	adopted, err := worker.AdoptPublishedRecoveryVerification(ctx, m.Paths.State, c.Worker, m.RecoveryCommitHash)
+	if err != nil {
+		return err
+	}
+	if adopted != review {
+		return fmt.Errorf("recovery changed during adoption")
+	}
+	return i.boundary("recovery-adopted")
+}

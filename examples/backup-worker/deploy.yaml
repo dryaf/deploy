@@ -1,0 +1,34 @@
+# Configuration example only: replace the image and command with your application.
+# Declaring backup opt-in does not install or schedule a worker.
+app_name: foodlog
+deployment:
+  mode: image
+environments:
+  prod:
+    server: vps-main
+    target_dir: /home/deploy/apps/foodlog-prod
+    database:
+      driver: sqlite
+      source: data/app.db
+      backup:
+        enabled: true
+    quadlet:
+      service_name: foodlog-prod
+      image: docker.io/library/alpine:3.21
+      exec: sleep infinity
+      volumes: ["./data:/data"]
+      network_aliases: [foodlog-prod]
+  test:
+    server: vps-main
+    target_dir: /home/deploy/apps/foodlog-test
+    database:
+      driver: sqlite
+      source: data/app.db
+      backup:
+        enabled: false
+    quadlet:
+      service_name: foodlog-test
+      image: docker.io/library/alpine:3.21
+      exec: sleep infinity
+      volumes: ["./data:/data"]
+      network_aliases: [foodlog-test]

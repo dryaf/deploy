@@ -1,0 +1,45 @@
+version: 2
+servers:
+  vps-main:
+    host: vps.example.com
+    user: deploy
+    ssh_port: 22
+    ssh_key: ~/.ssh/vps-admin
+    ssh_known_hosts: ~/.ssh/known_hosts
+  home-backup:
+    host: raspberrypi
+    user: backup
+    ssh_key: ~/.ssh/pi-admin
+    backup_worker:
+      sources: [vps-main]
+      storage:
+        path: /mnt/backup/deploy
+        require_mount: /mnt/backup
+        min_free_bytes: 1073741824
+      schedule: hourly
+      timezone: Europe/Vienna
+      freshness: 2h
+      max_run_time: 40m
+      max_snapshot_bytes: 10737418240
+      timeouts:
+        connect: 10s
+        inventory: 30s
+        snapshot: 5m
+        transfer: 10m
+        verify: 5m
+        shutdown_grace: 10s
+      retention:
+        keep_last: 48
+        max_age: 720h
+      notifications:
+        primary: signal
+        failure: immediate
+        repeat_after: 6h
+        recovery: true
+        daily_at: "09:00"
+        signal:
+          account_file: /home/backup/.config/deploy/secrets/signal-account
+          recipient_file: /home/backup/.config/deploy/secrets/signal-recipient
+      monitoring:
+        backup_ping_url_file: /home/backup/.config/deploy/secrets/backup-heartbeat
+        daily_delivery_ping_url_file: /home/backup/.config/deploy/secrets/report-heartbeat

@@ -1,0 +1,27 @@
+[Unit]
+Description=deploy interactive Signal relay
+
+[Container]
+ContainerName=deploy-notification-signal
+Image=sha256:REPLACE_WITH_64_HEX_LOCAL_IMAGE_CONFIG_ID
+GlobalArgs=--remote=false
+Pull=never
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+User=0
+Entrypoint=/usr/local/bin/deploy
+Volume=/home/notify/.local/state/signal-account:/signal-state:rw
+Volume=/home/notify/.local/state/signal-inbox:/signal-inbox:rw
+Volume=/home/notify/.local/run/signal-relay:/relay:rw
+Volume=/home/notify/.config/deploy-notification/signal-relay.json:/relay-config.json:ro
+Volume=/home/notify/.config/deploy-notification/secrets/signal-account:/secrets/signal-account:ro
+Volume=/home/notify/.config/deploy-notification/secrets/signal-recipient:/secrets/signal-recipient:ro
+Exec=notification-worker __signal-relay --local --config /relay-config.json
+Tmpfs=/tmp:rw,size=256m,nosuid,nodev
+Network=pasta
+PodmanArgs=--image-volume=ignore
+
+[Service]
+Restart=on-failure
+TimeoutStopSec=30s

@@ -5,7 +5,7 @@ repo_dir=$(cd -- "$(dirname -- "$0")/.." && pwd)
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/deploy-image-integration.XXXXXXXX")
 container_name="deploy-image-integration-$$"
 base_image=${DEPLOY_TEST_BASE_IMAGE:-quay.io/podman/stable:v5.4@sha256:52536d900c9e7e7cc924bb737eb8c570eeaa3c50f6a3b0b563eb0ec9c48807e4}
-if [[ $(uname -m) != x86_64 && -z ${DEPLOY_TEST_GOTENBERG_IMAGE:-} ]]; then
+if [[ ${DEPLOY_TEST_BACKUP_WORKER:-} != 1 && $(uname -m) != x86_64 && -z ${DEPLOY_TEST_GOTENBERG_IMAGE:-} ]]; then
  echo 'Set DEPLOY_TEST_GOTENBERG_IMAGE to a verified native Chromium image with digest on non-amd64 hosts' >&2
  exit 1
 fi
@@ -36,7 +36,14 @@ mkdir -m 700 -- "$test_root/runtime"
 command -v podman >/dev/null
 command -v go >/dev/null
 cd -- "$repo_dir"
-CGO_ENABLED=0 go test -tags=imageintegration -c -o "$test_root/integration.test" .
+test_tags=imageintegration
+test_package=./internal/deployment
+if [[ ${DEPLOY_TEST_BACKUP_WORKER:-} == 1 ]]; then
+ test_tags=backupintegration
+ test_package=./internal/backup
+ CGO_ENABLED=0 go build -o "$test_root/deploy-backup" ./cmd/deploy
+fi
+CGO_ENABLED=0 go test -tags="$test_tags" -c -o "$test_root/integration.test" "$test_package"
 if [[ $base_image == current ]]; then
  container_tool pull -- quay.io/podman/stable:latest
  base_image=$(container_tool image inspect --format '{{index .RepoDigests 0}}' quay.io/podman/stable:latest)
@@ -51,7 +58,7 @@ set -euo pipefail
 # that root so cgroup v2 can enable controllers for systemd's child slices.
 for attempt in {1..50}; do [[ -d /sys/fs/cgroup/init.scope ]] && break; sleep .1; done
 echo $$ > /sys/fs/cgroup/init.scope/cgroup.procs
-dnf install -y jq rsync dbus-daemon git-core openssh-clients openssh-server gawk sqlite
+dnf install -y jq rsync dbus-daemon git-core openssh-clients openssh-server gawk sqlite bubblewrap
 ssh-keygen -A
 install -d -m 700 -o 1000 -g 1000 /home/podman/.ssh
 ssh-keygen -q -t ed25519 -N '' -f /home/podman/.ssh/deploy-integration
@@ -81,6 +88,11 @@ systemctl set-property user@1000.service CPUAccounting=yes MemoryAccounting=yes
 systemctl restart user@1000.service
 BOOTSTRAP
 container_tool cp "$test_root/integration.test" "$container_name:/usr/local/bin/deploy-integration.test"
+if [[ ${DEPLOY_TEST_BACKUP_WORKER:-} == 1 ]]; then
+ container_tool cp "$test_root/deploy-backup" "$container_name:/usr/local/bin/deploy-backup-integration"
+ container_tool exec --env HOME=/home/podman --env XDG_RUNTIME_DIR=/run/user/1000 --env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus --env DEPLOY_BACKUP_INTEGRATION=isolated "$container_name" bash -c 'echo $$ > /sys/fs/cgroup/init.scope/cgroup.procs; exec setpriv --reuid=1000 --regid=1000 --init-groups /usr/local/bin/deploy-integration.test -test.v -test.run "^TestRootlessBackupRecoveryIntegration$" -test.timeout=3m'
+ exit 0
+fi
 if [[ ${DEPLOY_TEST_VM_CRASH:-} == 1 ]]; then
  source "$repo_dir/scripts/vm-crash-driver.sh"
  exit 0
