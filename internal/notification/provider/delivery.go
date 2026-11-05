@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -51,7 +52,7 @@ func ReadSecret(path string) (string, error) {
 		return "", fmt.Errorf("credential unavailable")
 	}
 	defer d.Close()
-	f, err := d.Open(filepath.Base(path), os.O_RDONLY, 0)
+	f, err := d.Open(filepath.Base(path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", fmt.Errorf("credential unavailable")
 	}

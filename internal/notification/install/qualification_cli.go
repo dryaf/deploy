@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"github.com/dryaf/deploy/internal/notification/protocol"
+	"github.com/dryaf/deploy/internal/notification/worker"
 	"github.com/dryaf/deploy/internal/safefs"
 	"github.com/dryaf/deploy/internal/ui"
 )
 
 type QualificationStatus struct {
+	RecordHash        string               `json:"record_hash,omitempty"`
 	Record            *QualificationRecord `json:"latest_record,omitempty"`
 	Pending           bool                 `json:"acknowledgement_pending"`
 	BindingMatches    bool                 `json:"binding_matches"`
@@ -28,7 +30,7 @@ func qualificationInstallation(d *safefs.Directory, root string) (m ManagedManif
 		return m, c, err
 	}
 	m = j.Intent.After
-	if j.Phase != "complete" || m.Mode != "verification" || m.Root != root {
+	if j.Phase != "complete" || (m.Mode != "verification" && m.Mode != "delivery") || m.Root != root {
 		return m, c, fmt.Errorf("qualification requires a completed verification installation")
 	}
 	if err = validateManagedPointer(d, j, true); err != nil {
@@ -36,6 +38,15 @@ func qualificationInstallation(d *safefs.Directory, root string) (m ManagedManif
 	}
 	if c, err = verifyManagedArtifacts(d, m); err != nil {
 		return
+	}
+	if m.DeliveryOwnerHash != "" {
+		owner, e := worker.InspectManagedDeliveryOwner(m.Paths.State)
+		if e != nil {
+			return m, c, e
+		}
+		if owner != deliveryOwner(m, c) || protocol.Hash(owner) != m.DeliveryOwnerHash {
+			return m, c, fmt.Errorf("managed delivery ownership changed")
+		}
 	}
 	units, err := managedUnitDirectory(m.UnitDirectory)
 	if err != nil {
@@ -105,7 +116,17 @@ func runQualificationCLI(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	b, err := qualificationBinding(m, c)
+	bound := m
+	if m.Mode == "delivery" {
+		if args[0] != "qualification-status" {
+			return fmt.Errorf("deactivate delivery before collecting or recording new qualification")
+		}
+		_, bound, err = readDeliveryAdmission(d, m, c)
+		if err != nil {
+			return err
+		}
+	}
+	b, err := qualificationBinding(bound, c)
 	if err != nil {
 		return err
 	}
@@ -166,10 +187,11 @@ func runQualificationCLI(args []string, out io.Writer) error {
 	if len(h.Records) > 0 {
 		record := h.Records[len(h.Records)-1]
 		status.Record = &record
+		status.RecordHash = protocol.Hash(record)
 		matchErr := record.Report.matches(b, c, now)
 		status.BindingMatches = matchErr == nil && !now.Before(record.RecordedAt)
 		status.EvidenceComplete = !h.Pending && status.BindingMatches && record.Report.evidenceComplete(c)
-		status.Reason = "operator evidence only; production lifecycle and activation gates remain unavailable"
+		status.Reason = "operator evidence; service activation and producer admission are separate"
 		if h.Pending {
 			status.Reason = "audit acknowledgement pending; retry the exact report"
 		} else if matchErr != nil {

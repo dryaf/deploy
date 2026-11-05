@@ -48,6 +48,7 @@ func installBackupNotificationPipeline(tx *sql.Tx, b backupNotificationBinding) 
 		"CREATE TABLE IF NOT EXISTS backup_notification_sources(source TEXT NOT NULL,event TEXT NOT NULL UNIQUE,revision INTEGER NOT NULL,PRIMARY KEY(source,revision));" +
 		"CREATE TABLE IF NOT EXISTS backup_notification_members(obligation TEXT PRIMARY KEY,source TEXT NOT NULL,kind TEXT NOT NULL,incident TEXT NOT NULL);" +
 		"CREATE TABLE IF NOT EXISTS backup_notification_transfers(event TEXT PRIMARY KEY,submitted INTEGER NOT NULL DEFAULT 0,cancel_reason TEXT NOT NULL DEFAULT '',cancel_sent INTEGER NOT NULL DEFAULT 0);" +
+		"CREATE TABLE IF NOT EXISTS backup_notification_legacy(source TEXT PRIMARY KEY,body TEXT NOT NULL,hash TEXT NOT NULL,disposition TEXT NOT NULL,reason TEXT NOT NULL);" +
 		"CREATE TABLE IF NOT EXISTS backup_notification_incidents(id TEXT PRIMARY KEY,hash TEXT NOT NULL,revision INTEGER NOT NULL);")
 	if err != nil {
 		return err
@@ -134,6 +135,9 @@ func freezeBackupNotificationPass(tx *sql.Tx, e backupNotificationEvaluation) ([
 	if err := requireNotificationRecoveryInactive(tx); err != nil {
 		return nil, err
 	}
+	if _, err := readLegacyDeliveryJournal(tx); err != nil {
+		return nil, err
+	}
 	b, err := readBackupNotificationBinding(tx)
 	if err != nil {
 		return nil, err
@@ -146,6 +150,8 @@ func freezeBackupNotificationPass(tx *sql.Tx, e backupNotificationEvaluation) ([
 		return nil, err
 	}
 	rows, err := tx.Query("SELECT record,created FROM outbox b WHERE "+backupPendingSourcePredicate+` AND due<=?
+ AND NOT EXISTS (SELECT 1 FROM backup_notification_legacy l WHERE l.source=b.id AND l.disposition='held')
+ AND NOT EXISTS (SELECT 1 FROM json_each(b.record,'$.members') member JOIN backup_notification_legacy l ON l.source=member.value WHERE l.disposition='held')
  AND NOT EXISTS (SELECT 1 FROM backup_notification_sources s JOIN notification_exports e ON e.id=s.event WHERE s.source=b.id AND e.state NOT IN ('expired','superseded','cancelled','provider_accepted'))
  ORDER BY created,id LIMIT 32`, snap.EvaluatedAt.UTC().Format(eventTimeLayout))
 	if err != nil {
@@ -177,6 +183,13 @@ func freezeBackupNotificationPass(tx *sql.Tx, e backupNotificationEvaluation) ([
 	}
 	var exports []notify.Message
 	for _, source := range sources {
+		held, err := backupSourceHeld(tx, source.event)
+		if err != nil {
+			return nil, err
+		}
+		if held {
+			continue
+		}
 		m, ok, err := freezeBackupSource(tx, b, e, source)
 		if err != nil {
 			return nil, err
@@ -249,6 +262,9 @@ func backupSourceMembers(tx *sql.Tx, event notification.NotificationEvent) ([]no
 
 func freezeBackupSource(tx *sql.Tx, b backupNotificationBinding, e backupNotificationEvaluation, source backupNotificationSource) (m notify.Message, ok bool, err error) {
 	event := source.event
+	if err := requireBackupUnsentSource(tx, event); err != nil {
+		return m, false, err
+	}
 	members, err := backupSourceMembers(tx, event)
 	if err != nil {
 		return m, false, err
@@ -266,6 +282,13 @@ func freezeBackupSource(tx *sql.Tx, b backupNotificationBinding, e backupNotific
 	var obligations []notificationObligation
 	refs := map[string]notify.Incident{}
 	for _, member := range members {
+		held, err := backupSourceHeld(tx, member)
+		if err != nil || held {
+			return m, false, err
+		}
+		if err := requireBackupUnsentSource(tx, member); err != nil {
+			return m, false, err
+		}
 		obligation := notificationObligation{ID: member.ID, Kind: "alert"}
 		switch member.Kind {
 		case "daily":

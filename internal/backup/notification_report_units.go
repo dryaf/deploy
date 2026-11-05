@@ -15,8 +15,8 @@ func reportUnitPathQuote(path string) string {
 	return strconv.Quote(strings.ReplaceAll(path, "%", "%%"))
 }
 
-// Rendering never installs or enables units. The ownership handoff will select
-// these names only after fencing the legacy sender and reconciling its evidence.
+// Rendering never installs or enables units. The managed handoff selects these
+// names only after fencing the legacy sender and preserving reviewed evidence.
 func renderBackupReportUnits(paths WorkerUnitPaths, policy config.BackupWorkerConfig, extraCredentials []string) (map[string]string, error) {
 	for _, path := range []string{paths.Home, paths.Config, paths.State} {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.ContainsAny(path, "\x00\r\n") {
@@ -30,7 +30,7 @@ func renderBackupReportUnits(paths WorkerUnitPaths, policy config.BackupWorkerCo
 	for path := range notificationMounts(policyWithoutMonitors) {
 		denied = append(denied, path)
 	}
-	for _, path := range []string{paths.Keys, paths.RelayState} {
+	for _, path := range []string{paths.Keys, paths.RelayState, paths.Archive} {
 		if path != "" {
 			denied = append(denied, path)
 		}

@@ -43,6 +43,10 @@ func verifyPublishedTelegramHandoff(ctx context.Context, path string, c Config, 
 		return out, err
 	}
 	defer s.close()
+	return s.verifyOriginalHandoff(ctx, now, clock)
+}
+
+func (s *publishedTelegramSession) verifyOriginalHandoff(ctx context.Context, now func() time.Time, clock func() (string, float64, error)) (out PublishedTelegramHandoff, err error) {
 	if err = s.requireOriginalTelegramHandoff(); err != nil {
 		return out, err
 	}
@@ -67,7 +71,7 @@ func verifyPublishedTelegramHandoff(ctx context.Context, path string, c Config, 
 	if err = ctx.Err(); err != nil {
 		return out, err
 	}
-	return PublishedTelegramHandoff{Version: 1, CommitHash: commit, Cursor: cursor, CheckedAt: at, ExpiresAt: cursor.Drain.ObservedAt.Add(telegramHandoffLifetime), RequiresActivationRecheck: true}, nil
+	return PublishedTelegramHandoff{Version: 1, CommitHash: s.publication.CommitHash, Cursor: cursor, CheckedAt: at, ExpiresAt: cursor.Drain.ObservedAt.Add(telegramHandoffLifetime), RequiresActivationRecheck: true}, nil
 }
 
 func readPublishedTelegramCursor(ctx context.Context, db *sql.DB, account string) (TelegramRecoveryCursor, error) {

@@ -99,11 +99,14 @@ func checkManagedSignalHealthPID(ctx context.Context, m ManagedManifest, pid uin
 	}
 }
 
-func serveManagedSignalRuntime(ctx context.Context, d *safefs.Directory, s *worker.Store, c Runtime, m ManagedManifest) error {
+func serveManagedSignalRuntime(ctx context.Context, d *safefs.Directory, s *worker.Store, c Runtime, m ManagedManifest, installation *safefs.Lock) error {
 	if m.SignalVerification == nil {
 		return serveRuntime(ctx, s, c, m.Paths.Socket)
 	}
 	check := func(ctx context.Context) error {
+		if err := checkManagedSignalProfilesRuntime(d, m, installation); err != nil {
+			return err
+		}
 		if _, err := readManagedSignalBinding(d, m); err != nil {
 			return err
 		}

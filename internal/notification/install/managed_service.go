@@ -27,7 +27,7 @@ type managedServices interface {
 	Verify(context.Context, ManagedManifest) error
 }
 
-type userManagedServices struct{}
+type userManagedServices struct{ deliveryInspector *userDeliveryInspector }
 
 func (userManagedServices) command(ctx context.Context, args ...string) error {
 	_, err := process.LimitedOutput(exec.CommandContext(ctx, "systemctl", append([]string{"--user", "--no-pager"}, args...)...), 45*time.Second, 16384)
@@ -87,7 +87,7 @@ func (userManagedServices) Inspect(ctx context.Context) (s managedServiceState, 
 	return s, nil
 }
 
-func (userManagedServices) Verify(ctx context.Context, m ManagedManifest) error {
+func (u userManagedServices) Verify(ctx context.Context, m ManagedManifest) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	api := client.Client{Socket: m.Paths.Socket, Identity: m.Identity}
@@ -96,11 +96,41 @@ func (userManagedServices) Verify(ctx context.Context, m ManagedManifest) error 
 	for {
 		var h worker.Health
 		call, cancelCall := context.WithTimeout(ctx, time.Second)
-		_, err := api.Call(call, protocol.Request{Operation: "system.status"}, &h)
+		var err error
+		if m.Mode == "delivery" {
+			inspector := userDeliveryInspector{}
+			if u.deliveryInspector != nil {
+				inspector = *u.deliveryInspector
+			}
+			api.PeerPID, err = inspector.inspect(call, m, false)
+			if err == nil && api.PeerPID == 0 {
+				err = fmt.Errorf("delivery process is not running")
+			}
+		}
+		if err == nil {
+			_, err = api.Call(call, protocol.Request{Operation: "system.status"}, &h)
+		}
 		cancelCall()
 		if err == nil {
-			if !h.VerificationOnly || h.Identity != m.Identity || h.InstallationRevision != m.Revision || h.RecoveryCommitHash != m.RecoveryCommitHash || h.TelegramRenewalID != m.TelegramRenewalID {
+			profileHash := ""
+			if m.SignalProfiles != nil {
+				profileHash = m.SignalProfiles.Hash
+			}
+			if h.SignalProfilesHash != profileHash {
+				return fmt.Errorf("managed worker has a different effective Signal profile binding")
+			}
+			activationHash := ""
+			if m.DeliveryActivation != nil {
+				activationHash = m.DeliveryActivation.Hash
+			}
+			if h.VerificationOnly != (m.Mode != "delivery") || h.DeliveryActivationHash != activationHash || h.Identity != m.Identity || h.InstallationRevision != m.Revision || h.RecoveryCommitHash != m.RecoveryCommitHash || h.TelegramRenewalID != m.TelegramRenewalID {
 				return fmt.Errorf("managed worker health does not identify the expected verification revision")
+			}
+			if m.Mode == "delivery" {
+				loop, ok := h.Loops["delivery-admission"]
+				if !ok || loop.Condition != "ok" || !loop.ValidUntil.After(time.Now()) {
+					return fmt.Errorf("delivery runtime has no current admission observation")
+				}
 			}
 			if m.SignalVerification != nil {
 				loop, ok := h.Loops["signal-verification"]

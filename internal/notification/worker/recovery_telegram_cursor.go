@@ -39,7 +39,9 @@ func (v TelegramRecoveryCursor) fresh(now time.Time, boot string, up float64) er
 	}
 	elapsed := now.Sub(v.Drain.ObservedAt)
 	mono := up - v.Drain.Uptime
-	if boot != v.Drain.BootID || math.IsNaN(up) || math.IsInf(up, 0) || elapsed < 0 || elapsed >= telegramHandoffLifetime || mono < 0 || mono >= telegramHandoffLifetime.Seconds() || math.Abs(elapsed.Seconds()-mono) > telegramHandoffSkew.Seconds() {
+	// Compare the absolute monotonic deadline. Subtracting fractional uptimes
+	// can round a full ten minutes down and accept an already expired handoff.
+	if boot != v.Drain.BootID || math.IsNaN(up) || math.IsInf(up, 0) || elapsed < 0 || elapsed >= telegramHandoffLifetime || mono < 0 || up >= v.Drain.Uptime+telegramHandoffLifetime.Seconds() || math.Abs(elapsed.Seconds()-mono) > telegramHandoffSkew.Seconds() {
 		return fmt.Errorf("Telegram recovery observation expired or clock changed")
 	}
 	return nil

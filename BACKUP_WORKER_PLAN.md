@@ -1,5 +1,75 @@
 # Implementation plan: server inventory, managed Quadlets, and pull backups
 
+Managed backup cutover update (2026-11-06): the initialized outbound-only
+Telegram profile now has an executable per-producer handoff and report-service
+migration. `backup-worker notification-cutover --local --review` prints pinned
+legacy evidence; `--apply --spec ABS` applies/resumes the exact reviewed request.
+Compatible helper/image probes, exact unit checks and retained setup, notifier,
+attempt, gateway operation, installation and worker leases protect the transition.
+File/SQL intent anchors retain the legacy fence. Accepted history is preserved;
+explicitly reviewed unsent work is exported; ambiguous/incomplete work stays held
+and degrades delivery health without starving fresh reports. Credential-free
+report service/timer/path installation follows exact generation staging/activation.
+`--revoke --spec ABS` drains reports, tombstones the generation and imports receipts,
+retaining the legacy fence. This implements fenced rollback; releasing held rows
+and restoring a new legacy generation remain separate unfinished reconciliation
+work. Signal/recovered gateways and command/LED admission remain unsupported.
+See [the operational guide](examples/notification-worker/BACKUP_CUTOVER.md).
+Earlier dated checkpoints below describe the state before this update.
+
+Legacy delivery evidence update (2026-11-05): the outbox notifier now durably
+reserves each provider attempt and atomically commits its outcome and acceptance.
+Interrupted reservations become ambiguous under an inode-pinned exclusive lease;
+the existing legacy retry/fallback policy is retained. A bounded hash-linked
+journal preserves exact envelopes beyond the outbox's 32-attempt summary.
+`backup-worker delivery-review --local --state-dir` inspects this evidence without
+settling it or granting migration authority. Attempted sources cannot silently
+become fresh shared exports or batch members. Older helper evidence remains
+incomplete; manual test sends are outside this journal. Per-producer generation
+activation, legacy outcome reconciliation, helper capability enforcement and
+report-service cutover/rollback remain unfinished. This supplies a prerequisite
+for the next managed backup cutover transaction, not a completed migration.
+
+Delivery lifecycle update (2026-11-04): `activate-delivery --local --root
+--manifest-hash --qualification-hash` now journals dispatcher activation for
+initialized outbound-only fixed-recipient Telegram workers. Exact fresh
+qualification, runtime/helper capabilities, file/SQL ownership, loaded manager
+and process/socket pins guard activation. Admission is checked at startup,
+periodically and immediately before sending. `deactivate-delivery` restores
+verification without requiring live credentials or unexpired qualification;
+explicit cancellation can supersede an interrupted activation. Ownership survives
+updates, compatible rollback and uninstall. Producer generations stay inactive;
+per-producer admission, recovered/Signal runtime handoff, command/LED activation
+and legacy backup cutover remain unfinished. Native executable and SIGKILL
+fixtures use simulated managers and synthetic credentials, not live qualification.
+This supersedes older statements that every production lifecycle transition is
+unimplemented. See the [delivery guide](examples/notification-worker/DELIVERY_ACTIVATION.md).
+
+Outgoing Signal profile update (2026-11-04): `migrate-signal-profiles --local
+--spec` now journals a proven outgoing transport transition for an already
+supervised recovery verification gateway. Canonical configuration and recovery
+hashes remain unchanged; a separately frozen effective runtime and profile proof
+bind the new socket/inbox pins and affected route revisions. Existing queued
+routes and Telegram evidence are retained. Runtime health exposes the profile
+hash and periodic audits stop the gateway on proof loss. Capability checks,
+interruption/SIGKILL fixtures and native-process tests cover this verification-only
+transition. Production activation, Signal runtime handoff, legacy fixed-recipient
+conversation enrollment and backup cutover remain unfinished. This supersedes
+older checkpoint statements that all outgoing profile migration is unavailable.
+See [the profile migration guide](examples/notification-worker/SIGNAL_VERIFICATION.md#outgoing-profile-migration).
+
+Activation admission update (2026-11-04): `activation-review --local --root`
+now composes the pinned verification revision, latest qualification, local provider
+identity, recovered request seals/cursors and current Telegram handoffs into a
+read-only prerequisite inventory. Worker inspection requires an inactive gateway
+and exclusive installation/worker leases; it performs no shutdown, polling, repair
+or fence changes. Managed Signal verifier health is checked separately from
+outbound profile pins; stale/legacy pins require an explicit migration. A saved
+review grants no authority. Production activation, command admission, Signal runtime
+handoff/profile migration and backup cutover remain unfinished. SQLite inspection
+refuses nonempty WAL/journals without checkpointing or ignoring their contents.
+See [the admission review guide](examples/notification-worker/QUALIFICATION.md#activation-admission-review).
+
 Managed Signal verifier update (2026-11-04): native service setup, resume,
 inspection and uninstall now preserve an immutable endpoint/service binding.
 The gateway can adopt a supervised endpoint directly or upgrade its existing

@@ -249,6 +249,68 @@ older account-relay status command; use `signal-service-inspect` for this separa
 verification installation. Setup dry-run validates inputs only and creates no
 files, leases, sockets or manager activity.
 
+## Outgoing profile migration
+
+After supervised adoption, the canonical gateway configuration still retains the
+original outgoing Signal socket/inbox pins. Migrate already enrolled conversation
+profiles explicitly:
+
+```sh
+deploy --dry-run notification-worker migrate-signal-profiles --local \
+  --spec /home/notify/managed-signal-profiles.json
+deploy notification-worker migrate-signal-profiles --local \
+  --spec /home/notify/managed-signal-profiles.json
+```
+
+Adapt [managed-signal-profiles.json](managed-signal-profiles.json) to the exact
+installation, state, unit directory and exclusions. `runtime_file` must contain
+the unchanged canonical bytes used by the current gateway, for example the
+endpoint's retained `gateway-next.json`. Keep that endpoint publication intact.
+Supply a native executable with the Signal profile migration capability; both
+the new runtime and its replacement recovery helper are checked before stopping
+the gateway. The existing service/account/inbox recovery records remain required.
+
+Each outgoing Signal profile must already have an enrolled `conversation` and
+match the original account/socket/inbox retained by endpoint preparation. The
+installer derives the new transport from the adopted supervised endpoint. It
+refuses unrelated pins, a missing Signal profile, an unsupervised endpoint and
+legacy fixed-recipient profiles. Legacy `/send` recipient configuration needs a
+separate explicit conversation enrollment; this command does not infer one.
+
+The original canonical runtime and worker recovery configuration hashes remain
+unchanged. The migration release retains `signal-profiles.json` and a separate
+effective `signal-runtime.json`, independently bound to the immutable operation,
+installation, worker identity and endpoint. Only outgoing Signal transport pins
+and the affected derived route revisions change in the effective configuration.
+Even a surviving inbox with the same identity receives a new route revision when
+its socket moves. Telegram-only routes and every conversation/destination remain
+unchanged.
+
+Startup verifies the original recovery proof first, then applies the proven route
+revisions to the verification process. It does not rewrite queued route snapshots,
+receipts, provider cursors or recovery anchors. Old queued work keeps its original
+revision and cannot silently acquire the new transport. Its eventual handling
+belongs to explicit production admission/administration. The separate endpoint
+still exposes verification only; this migration enables no delivery, intake,
+replies or command execution.
+
+The ordinary lifecycle journal covers stop/drain, publication, reload, restart
+and health. Use `notification-worker resume --local --root …` after interruption;
+retained artifacts suffice after the original external binary/spec-runtime inputs
+are removed. Retained endpoint publication and account/inbox evidence must remain.
+An exact completed resume checks health without restarting again. Updates and
+compatible binary rollback retain the profile proof; rollback across its
+introduction is refused. Uninstall retains it and removes the gateway before the
+separate verifier as usual. No automatic history cleanup removes these artifacts.
+
+Health reports `signal_profiles_hash`. Readiness requires that exact hash, and the
+periodic Signal audit stops the gateway if the effective bytes or retained proof
+are lost or changed. `activation-review` reports `effective_config_hash` and a
+`signal/profiles` check; matching profile pins satisfy only their binding check.
+Collect new qualification evidence for the new revision. Original Telegram
+renewals are neither polled nor re-dated during migration, and explicit subsequent
+Telegram renewal retains the effective Signal binding.
+
 ## Validation and limits
 
 Tests cover local Unix HTTP, same-user peer checks, denied operations, retained

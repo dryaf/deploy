@@ -79,7 +79,7 @@ func (f *executableSignalService) Verify(ctx context.Context, m SignalServiceMan
 	return f.manager(m).Verify(ctx, m)
 }
 func TestSignalServiceNativeExecutable(t *testing.T) {
-	spec, i, f, p, _ := managedSignalFixture(t)
+	spec, i, f, p, _ := managedSignalFixtureConfigured(t, false, signalProfilesConfiguration)
 	build := exec.Command("go", "build", "-o", spec.BinaryFile, "./cmd/deploy")
 	build.Dir = "../../.."
 	if out, err := process.LimitedOutput(build, time.Minute, 16384); err != nil {
@@ -141,6 +141,11 @@ func TestSignalServiceNativeExecutable(t *testing.T) {
 		log, _ := os.ReadFile(filepath.Join(filepath.Dir(spec.Root), "runtime-output"))
 		t.Fatal(err, string(log))
 	}
+	spec.SignalVerification = nil
+	gateway, err = i.prepare(ctx, "migrate-signal-profiles", spec)
+	if err != nil {
+		t.Fatal("native profile migration", err)
+	}
 	if out, e := process.LimitedOutput(exec.CommandContext(ctx, "systemd-analyze", "--user", "verify", "--man=no", filepath.Join(s.UnitDirectory, signalServiceUnit), filepath.Join(s.UnitDirectory, managedUnit)), 15*time.Second, 16384); e != nil {
 		t.Fatal("unit syntax", e, string(out))
 	}
@@ -153,11 +158,49 @@ func TestSignalServiceNativeExecutable(t *testing.T) {
 	if err = native.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
+	review, err := reviewActivation(ctx, spec.Root, native, service, time.Now)
+	if err != nil {
+		t.Fatal("activation admission review with actual verifier", err)
+	}
+	activationCheck(t, review, "runtime", "drain", "satisfied")
+	activationCheck(t, review, "runtime", "state", "satisfied")
+	activationCheck(t, review, "signal", "supervision", "satisfied")
+	activationCheck(t, review, "signal", "profiles", "satisfied")
+	activationCheck(t, review, "provider/signal", "binding", "satisfied")
+	activationCheck(t, review, "signal", "activation", "blocked")
 	if err = native.EnableStart(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err = native.Verify(ctx, gateway); err != nil {
 		t.Fatal("gateway restart", err)
+	}
+	profilePath := filepath.Join(spec.Root, "releases", gateway.Revision, "signal-runtime.json")
+	profileBytes, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(profilePath, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err = <-native.done:
+		if err == nil {
+			t.Fatal("gateway ignored profile authority loss")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("gateway stayed ready after losing its effective configuration")
+	}
+	native.cmd = nil
+	native.log.Close()
+	native.log = nil
+	if err = os.WriteFile(profilePath, profileBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = native.EnableStart(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = native.Verify(ctx, gateway); err != nil {
+		t.Fatal("restart after restoring profile proof", err)
 	}
 	// A lost endpoint invalidates the live gateway; no account intake is enabled.
 	if err = service.Stop(ctx); err != nil {

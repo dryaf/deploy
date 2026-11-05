@@ -21,7 +21,20 @@ import (
 
 func RunCLI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: deploy backup-worker <setup|update|status|run|list|pull|recover|verify|prune|restore-check|qualify|activate|rotate-key|uninstall|recovery-notifications|recovery-handoff|recovery-led-evidence|recovery-led-clear> [options] [worker]")
+		return fmt.Errorf("usage: deploy backup-worker <setup|update|status|run|list|pull|recover|verify|prune|restore-check|qualify|activate|rotate-key|uninstall|delivery-review|notification-cutover|recovery-notifications|recovery-handoff|recovery-led-evidence|recovery-led-clear> [options] [worker]")
+	}
+	if args[0] == "__notification-cutover-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("cutover probe accepts no arguments")
+		}
+		fmt.Println("backup-notification-cutover-v1")
+		return nil
+	}
+	if args[0] == "notification-cutover" {
+		return runBackupCutoverCLI(args[1:], os.Stdout)
+	}
+	if args[0] == "delivery-review" {
+		return runBackupDeliveryReviewCLI(args[1:], os.Stdout)
 	}
 	if args[0] == "recovery-led-evidence" || args[0] == "recovery-led-clear" {
 		return runBackupLEDRecoveryCLI(args, os.Stdout)

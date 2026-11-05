@@ -8,12 +8,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"syscall"
 	"time"
 
 	"github.com/dryaf/deploy/internal/notification/protocol"
+	"golang.org/x/sys/unix"
 )
 
 type Client struct {
+	PeerPID  uint32 // Optional managed readiness pin; zero preserves ordinary clients.
 	Socket   string
 	Identity protocol.Identity
 }
@@ -33,11 +37,31 @@ func (c Client) Call(ctx context.Context, r protocol.Request, out any) (protocol
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
+	var socketInfo os.FileInfo
+	if c.PeerPID != 0 {
+		info, err := os.Lstat(c.Socket)
+		if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0600 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Getuid()) {
+			return protocol.Identity{}, fmt.Errorf("managed notification socket is unsafe")
+		}
+		socketInfo = info
+	}
 	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", c.Socket)
 	if err != nil {
 		return protocol.Identity{}, fmt.Errorf("notification service unavailable")
 	}
 	defer conn.Close()
+	if c.PeerPID != 0 {
+		raw, err := conn.(*net.UnixConn).SyscallConn()
+		var cred *unix.Ucred
+		var peerErr error
+		if err == nil {
+			err = raw.Control(func(fd uintptr) { cred, peerErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED) })
+		}
+		current, e := os.Lstat(c.Socket)
+		if err != nil || peerErr != nil || cred == nil || cred.Uid != uint32(os.Getuid()) || cred.Pid <= 0 || uint32(cred.Pid) != c.PeerPID || e != nil || !os.SameFile(socketInfo, current) {
+			return protocol.Identity{}, fmt.Errorf("managed notification socket peer changed")
+		}
+	}
 	deadline, _ := ctx.Deadline()
 	_ = conn.SetDeadline(deadline)
 	stop := context.AfterFunc(ctx, func() { conn.Close() })

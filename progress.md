@@ -1,10 +1,464 @@
-# Implementation handoff — 2026-11-03
+# Implementation handoff — 2026-11-06
 
-Work resumed on 2026-11-03 at the user's request. The latest checkpoint below
+Work resumed through 2026-11-06 at the user's request. The latest checkpoint below
 supersedes the original pause and its immediate next-step list. Preserve the
 working tree; no implementation commit has been created.
 
-## Latest checkpoint: managed Signal verification service
+## Latest checkpoint: managed per-producer cutover and backup report migration
+
+Implemented on 2026-11-06 at the user's explicit request. All earlier uncommitted
+work is preserved. No production service, provider, remote host or LED was touched;
+no commit was created.
+
+Supported end-to-end profile: initialized managed outbound-only fixed-recipient
+Telegram, with an enrolled backup producer/route and current delivery admission.
+`backup-worker notification-cutover --local --review` produces exact legacy
+outbox/journal evidence and conservative held decisions. `--apply --spec ABS`
+applies or resumes the pinned request. The specification pins configuration,
+helper, managed manifest, producer epoch, route, generation and reviewed evidence.
+The operational guide is `examples/notification-worker/BACKUP_CUTOVER.md`.
+
+Implementation:
+
+- `install.WithManagedProducer` retains the managed operation, installation and
+  worker leases, verifies immutable artifacts/current admission and exact stopped
+  service identity, and confines Stage/Activate/Revoke to one enrolled producer.
+  The worker's append-only ownership history supplies generation authority;
+  revoked generations cannot be reused. Session operations recheck live leases,
+  file/SQL delivery ownership and admission. Closed sessions lose authority.
+- Backup cutover retains the setup, notifier and stable legacy-attempt leases.
+  It checks the host helper and pinned legacy container capability before
+  stopping owned notifier timer/path, notifier service and Telegram test service.
+  Manager checks reject foreign fragments/drop-ins/aliases, stale loaded units,
+  live PIDs, non-draining KillMode and surviving sender containers.
+- An immutable `notification-cutover.json` fences compatible legacy senders before
+  shared activation; SQL anchors the same intent and owner. Lost/conflicting
+  evidence refuses progress. Compatible old setup/recovery cannot restore legacy
+  delivery. Capture continues: post-fence new work and domain revisions do not
+  invalidate reviewed history; changes to attempt evidence still refuse.
+- Accepted rows and all original IDs/timestamps/attempts/batch/covered_by evidence
+  are retained. Explicit independently supported unsent decisions cannot override
+  counters/reservations/attempts. Ambiguous/incomplete rows stay held, excluded
+  from exports and automatic batching, outstanding in health/coverage, and unable
+  to complete catch-up. They do not consume the bounded export page ahead of
+  fresh work. Legacy evidence remains separate from canonical shared receipts.
+- Exact generation staging precedes report unit installation, activation and
+  shared-owner publication. The gateway restarts and confirms the active
+  generation before report triggers start. Native report service/timer/path use
+  existing fresh evaluation, receipt-import/ack and monitor flows. The service
+  denies messenger credentials, SSH keys, Signal account storage and the archive.
+- `--revoke --spec ABS` stops reports, creates a durable tombstone even for an
+  unactivated handoff, and imports available canonical receipts. It deliberately
+  retains the legacy fence and artifacts. Other producer histories/queues survive
+  both cutover and revocation; the gateway pauses during the transaction.
+
+Validation:
+
+- `go test ./...` passed: backup 35.034s, installer 271.159s, other packages
+  passed/cached. Log: `/tmp/deploy-cutover-all.log`.
+- Final full backup suite passed in 32.935s after capture-resume and lease changes:
+  `/tmp/deploy-cutover-backup-final.log`.
+- Final focused race coverage for cutover, managed producer/delivery, reports,
+  legacy attempts and evaluation passed: backup 25.469s, installer 13.228s,
+  worker 1.713s. Log: `/tmp/deploy-cutover-complete-race.log`.
+- The final manager ownership check also rejects admin/alias/generated report
+  unit name collisions before changing files. Its cutover race suite passed in
+  3.672s: `/tmp/deploy-cutover-manager-final-race.log`.
+- Tests cover all eight interruption boundaries, real SIGKILL at four durable
+  boundaries, exact retry/revocation, wrong pins, worker lease replacement,
+  another producer's unchanged active owner and queue, foreign report units,
+  stop-proof rejection, held-row starvation, contradictory unsent assertions,
+  dry-run flag isolation and capture continuing after intent publication.
+- `go vet ./...`, Linux ARM64 cross-build (`/tmp/deploy-cutover-arm64`) and
+  `git diff --check` passed. No live provider qualification was attempted.
+
+Remaining work (do not treat the supported profile as these broader features):
+
+1. Explicitly reconcile/release held legacy outcomes and restore legacy delivery
+   under a new canonical generation after shared revocation. Current rollback is
+   safely fenced; it never deletes evidence or re-enables legacy sending.
+2. Recovered Telegram handoff, managed Signal account/runtime and backup-relay
+   adoption, legacy conversation enrollment, and command/LED production admission.
+3. Real user-systemd/rootless Podman and live-provider qualification on disposable
+   hosts; native ARM64 execution and physical LED checks remain manual/deferred.
+
+## Previous checkpoint: legacy backup attempt evidence before producer cutover
+
+Continued on 2026-11-05 through 2026-11-06 from the managed dispatcher checkpoint.
+Preserved all prior uncommitted work. No commit, real provider call, service
+installation, remote-host change or LED operation was performed.
+
+The next producer-cutover transaction needs trustworthy legacy outcomes. Review
+found that the old notifier recorded attempts only after provider I/O, and wrote
+acceptance in a later transaction. A crash could therefore leave a possibly sent
+or already accepted event looking unsent. This checkpoint closes those evidence
+gaps before implementing the cross-worker ownership transition.
+
+Completed:
+
+- Added a bounded hash-linked `backup_legacy_delivery_journal` and independent
+  metadata head. Each automatic legacy outbox attempt reserves its exact bounded
+  envelope, provider, archive/writer/epoch and policy/configuration hashes before
+  I/O. Credential bytes are never stored. Outcomes and outbox acceptance commit
+  atomically with provider diagnostics; concurrent domain text changes survive.
+- An exclusive `legacy-delivery.lock` serializes even direct dispatcher callers.
+  Its device/inode digest is retained with the journal head, and live directory/
+  lease identity is rechecked around I/O. Missing/replaced locks, lost head/table/
+  history, changed reservations and exhausted capacity fail closed. Each attempt
+  reserves a journal slot for completion; the 8,192-record limit has no automatic reset or
+  pruning and requires offline reconciliation when exhausted.
+- A later lease holder records an interrupted reservation as ambiguous, keeps the
+  original envelope, opens a delivery outage and defers the next retry by at least
+  a minute. Existing legacy retry/fallback semantics remain: a later attempt may
+  duplicate an uncertain earlier send, but it cannot erase the earlier ambiguity.
+  Completed acceptance is not replayed after a crash. The durable log outlives
+  outbox report refreshes/deletion and the bounded 32-attempt display history.
+- Automatic batching excludes attempted envelopes. The shared export path
+  validates any retained journal and refuses sources or members with legacy
+  attempts, counters or reservations until explicit outcome migration is provided.
+  This prevents a new shared generation from silently treating them as unsent.
+- Added `backup-worker delivery-review --local --state-dir ABS`. It exposes
+  aggregate outcomes, unsettled reservations, journal head and record limit without
+  settling evidence or authorizing cutover. Older helper history is explicitly
+  incomplete. Manual provider test sends are outside this outbox journal. Dry-run
+  validates arguments without opening state. Review opens existing backup state
+  with the normal SQLite/schema lease; it is not a byte-immutable filesystem audit.
+- Added actual SIGKILL at reservation/provider-return/settlement boundaries and
+  regressions for exact payload retention, atomic acceptance, fallback, retries,
+  concurrency, source/lease loss, corrupt history, capacity, export/batch fencing,
+  observational review and CLI scope. README and all three plans describe limits.
+
+Validation:
+
+- Initial complete backup suite passed outside the Unix-socket-restricted sandbox:
+  `/tmp/deploy-legacy-attempts-backup.log` (33.628s).
+- Final focused race suite passed:
+  `/tmp/deploy-legacy-attempts-final-race.log` (2.292s), including reservation loss
+  immediately before I/O and immediately before acceptance commit.
+- Complete backup race suite passed (279.744s):
+  `/tmp/deploy-legacy-attempts-backup-race.log`. It started before the final
+  reservation-tail checks; the focused race run above covers those refinements.
+- Final ordinary backup suite passed (33.548s):
+  `/tmp/deploy-legacy-attempts-backup-final.log`. Final `go vet ./...` and Linux
+  ARM64 CLI cross-build passed after the reservation-tail changes. Binary:
+  `/tmp/deploy-legacy-attempts-arm64`. This is not native ARM64 qualification.
+- Go formatting and `git diff --check` passed. All test/build processes have
+  finished; no test-owned runtime or service is intentionally left running.
+- The first sandbox regression attempt failed only at known Unix socket/systemd
+  restrictions (`/tmp/deploy-legacy-attempts-regression.log`); it is not a pass.
+  No live provider, native ARM64, hardware or actual service qualification ran.
+
+Also completed before this implementation continuation: diagnosed `make test`
+race timeouts and set bounded 90-minute limits in Makefile and the isolated
+notification runner. Ordinary tests and vet passed; race coverage completed
+across the 45-minute run plus the remaining installer tests. Worker race took
+2558.626s; installer had 79 completed tests before the timeout and all remaining
+102 tests completed in 1722.826s. Logs: `/tmp/deploy-make-test-unrestricted.log`
+and `/tmp/deploy-install-remaining-race.log`. This validates the previous code
+checkpoint, not the new journal implementation. Do not repeat the hour-long
+unaffected installer race suite for this backup-only continuation.
+
+Next work:
+
+1. Compose a journaled per-producer/legacy backup cutover under retained notifier,
+   setup, installation and worker leases. Require a compatible helper and exact
+   stopped legacy sender/relay proof; explicitly reconcile old/incomplete,
+   accepted, ambiguous and proven-unsent evidence. Do not infer older sends from
+   an empty journal or a zero attempts counter, or bypass the new export guard.
+2. Stage/activate the exact producer generation, install the credential-free report
+   units and coordinate receipt/status flow. Rollback must drain/revoke and reconcile
+   before restoring legacy authority; do not clear ownership/attempt evidence to
+   make a handoff succeed. This checkpoint does not implement that transaction.
+3. Continue recovered Telegram activation, managed Signal account/runtime handoff,
+   explicit legacy conversation enrollment, command/LED admission, immutable
+   verifier upgrades and later recovery epochs from the earlier checkpoint.
+4. Actual user-systemd/rootless, native ARM64, physical LEDs and live providers
+   remain deferred/manual on explicitly selected disposable targets.
+
+## Previous checkpoint: managed Telegram dispatcher activation/deactivation
+
+Continued on 2026-11-04 from the outgoing Signal profile checkpoint. Preserved
+all existing uncommitted changes. No commit, actual service installation,
+provider call, remote-host change or LED operation was performed.
+
+Completed:
+
+- Added journaled `activate-delivery` / `deactivate-delivery` for initialized,
+  outbound-only fixed-recipient Telegram workers. Exact manifest and latest
+  acknowledged qualification hashes are mandatory; freshness, credentials,
+  UID/architecture and complete observations are checked before activation and
+  publication/start. Recovery, Signal, interaction/commands and LEDs are refused.
+- Runtime and retained helper must advertise delivery support before service stop.
+  Stop/drain, exclusive leases, ownership enrollment, unit/manifest publication,
+  reload/start and health reuse the retained lifecycle journal. Exact retries
+  reuse their immutable admission. Explicit deactivation can supersede an
+  interrupted activation after credential loss or evidence expiry.
+- Permanent independent file and SQL ownership anchors prevent unmanaged startup
+  after activation, deactivation or uninstall, including loss of the owner file.
+  Sealed anchor loss is never silently repaired by resume. Updates/compatible
+  rollback retain ownership and require capable binaries; active delivery must
+  first be deactivated. Rollback normalizes historical delivery unit hashes.
+- The delivery runtime runs the API and dispatcher only. Producer generations
+  remain inactive. Checks before startup, every second and immediately before
+  sending bind manifest/configuration/unit, root/shared lease, ownership and
+  current qualification/credentials. Proof loss terminates runtime; failed
+  admission calls no provider and records no acceptance.
+- Loaded user-manager inspection pins sandbox/network profile, exact typed
+  command, native executable/UID/argv and stable process state. Readiness verifies
+  the Unix socket peer PID, activation hash and current admission loop. Pending
+  lifecycle checks accept only the journal's retained Before/After commands so
+  deactivated installations can update/rollback across a daemon-reload gap.
+- Added qualification `record_hash` and installation `manifest_hash` pins, CLI
+  help, a delivery guide, and updates to README/all three implementation plans.
+  Added the native lifecycle fixture to the isolated validation script.
+
+Validation:
+
+- Focused lifecycle/worker suite passed, including actual SIGKILL at ten
+  activation/deactivation boundaries: `/tmp/deploy-delivery-focused-final.log`
+  (installer 0.925s, worker 0.056s). Covers inactive-generation no-send behavior,
+  explicit generation admission, ownership loss, exact retries, cancellation,
+  stale/failed/pending qualification, credential changes and capability refusal.
+- Expanded update/rollback checks passed:
+  `/tmp/deploy-delivery-rollback-focused.log` (1.353s). Final transition/rollback
+  race checks passed: `/tmp/deploy-delivery-transition-final.log` (6.822s),
+  including refusal of unrelated loaded commands and stale readiness.
+- Final focused race passed: `/tmp/deploy-delivery-race-final.log` (installer
+  74.611s, worker 1.934s; client selected no tests). Subsequent reactivation with
+  a new exact report and unchanged owner passed under race:
+  `/tmp/deploy-delivery-reactivation-final.log` (1.474s). CLI dry-run tree hashes
+  and exact flags passed under race: `/tmp/deploy-delivery-dry-final.log`.
+- Final native executable fixture passed under race:
+  `/tmp/deploy-delivery-native-final.log` (26.446s). Exercises real capability
+  probes, process/Unix-peer identity, unit syntax, activation/resume, credential-
+  loss termination, credential-free deactivation, verification update, compatible
+  rollback and uninstall. Only managers are simulated; no provider is contacted.
+  An initial native setup failed because the Go build output was a hardlink;
+  the fixture now stages an independent private executable before installation.
+- Full repository suite passed outside the known Unix-socket-restricted sandbox:
+  `/tmp/deploy-delivery-all.log` (installer 273.030s, worker 170.929s,
+  deployment 172.391s, backup 34.772s; other packages passed). That run started
+  before the final update/rollback guard fixes and additional test assertions;
+  the final focused race/native runs above cover those changes.
+- Final `go vet ./...` and Linux ARM64 cross-build passed:
+  `/tmp/deploy-delivery-vet-final.log` and
+  `/tmp/deploy-delivery-arm64-final.log`; binary `/tmp/deploy-delivery-arm64-final`.
+  This is not native ARM64 qualification. Go formatting, tracked/new-source
+  whitespace and isolated-script shell syntax checked. All test/build runs have
+  finished; no test-owned runtime or service is intentionally left running.
+- Complete repository race validation, actual user-systemd/rootless operation,
+  reboot/power-loss, physical LEDs and live-provider qualification were not run.
+
+Remaining work:
+
+1. Implement per-producer generation/legacy backup cutover under retained leases.
+   Dispatcher activation alone grants no producer authority and sends no reports.
+2. Extend activation to recovered installations with current Telegram handoffs,
+   managed Signal verifier-to-runtime/account handoff, and command/LED admission.
+3. Add explicit legacy fixed-recipient Signal conversation enrollment and legacy
+   backup-relay adoption; profile migration alone grants no production authority.
+4. Implement immutable verifier binary upgrade/re-enrollment and later recovery
+   epochs. Actual user-systemd/rootless, native ARM64, physical LEDs and live
+   provider qualification remain deferred/manual on selected disposable targets.
+
+## Previous checkpoint: managed outgoing Signal profile migration
+
+Continued on 2026-11-04 from the composed activation admission review. Preserved
+the existing uncommitted implementation. No commit, real service installation,
+live provider call, remote-host change or LED operation was performed.
+
+Completed:
+
+- Added `migrate-signal-profiles --local --spec ABS` for an already recovered,
+  supervised verification gateway with enrolled Signal conversation profiles.
+  The request retains its exact canonical runtime; the installer derives the
+  outgoing socket/inbox pins from the independently retained original and current
+  endpoint. Missing, unrelated or legacy fixed-recipient profiles are refused.
+- The migration retains canonical runtime bytes and recovery configuration hashes.
+  A separate immutable `signal-profiles.json` and effective `signal-runtime.json`
+  live in the migration release. The managed manifest pins their proof hash and
+  immutable operation. Every affected route receives a new derived revision,
+  including the case where a surviving inbox keeps its identity while changing
+  sockets. Unaffected routes, conversations and destinations remain unchanged.
+- Runtime first verifies and opens the original recovery configuration, then binds
+  only the independently proven effective route revisions for that process.
+  Persisted queued messages, receipt history, recovery anchors and provider cursors
+  are not rewritten. `signal_profiles_hash` identifies the effective binding in
+  health. All delivery, provider-intake and command fences remain closed.
+- Candidate and recovery helper require the new capability before gateway stop.
+  The existing lifecycle journal covers stop, drain, publication, reload, restart
+  and health. Resume uses retained inputs. Updates and compatible binary rollback
+  retain the binding; rollback across its introduction is refused. Uninstall
+  retains the proof. The service's periodic Signal audit also checks effective
+  configuration authority and terminates the gateway on loss. Profile audits pin
+  the installation directory and shared lease inode. Unpublished staging leaves
+  the prior revision authoritative and can be retried without malformed operation
+  history; no unit stop occurs before the immutable intent is published.
+- Telegram evidence remains bound to the original canonical recovery configuration;
+  migration does not poll, ACK, rewrite or re-date it. The activation review now
+  exposes the effective configuration hash and validates the retained profile
+  transition before inspecting outgoing profiles. Qualification remains revision-
+  and manifest-bound and must be collected again after the transition.
+
+Validation:
+
+- Initial complete migration/worker suite passed, including eight interruption
+  hooks and five actual SIGKILL boundaries:
+  `/tmp/deploy-signal-profiles-focused4.log` (installer 37.422s, worker 1.165s).
+- Expanded lifecycle, CLI/dry-run, unsupported-source and complete interruption/
+  SIGKILL suite passed: `/tmp/deploy-signal-profiles-final-focused.log` (installer
+  51.968s, worker 1.173s). Covers original recovery byte/config proof, no Telegram
+  re-polling/re-dating, new affected route revisions, retained effective health,
+  compatible binary rollback and a later explicit Telegram renewal.
+- Final unpublished-staging, independent runtime/helper capability rejection and
+  retired-gateway-after-verifier-removal boundaries passed:
+  `/tmp/deploy-signal-profiles-boundaries-final.log` (12.496s).
+- Built gateway/verifier processes passed actual capability and Unix-peer health
+  checks, migration, restart, profile-proof-loss termination, restoration and
+  endpoint-loss cleanup: `/tmp/deploy-signal-profiles-native.log` (12.493s). Only
+  the managers are simulated; no user-systemd units or real accounts are used.
+- Focused race validation passed: `/tmp/deploy-signal-profiles-race.log` (installer
+  170.785s, worker 22.687s). Covers lifecycle, compatible rollback, Telegram
+  preservation/renewal, CLI/dry-run, capability refusal, route-only application,
+  unchanged SQL/queue state and refusal after runtime-loop registration.
+- Final root/lease replacement checks passed under race:
+  `/tmp/deploy-signal-profiles-coordination-race.log` (61.284s). The native process
+  test passed again with those final guards:
+  `/tmp/deploy-signal-profiles-native-final.log` (11.702s).
+- Full repository suite passed outside the known Unix-socket-restricted sandbox:
+  `/tmp/deploy-signal-profiles-all.log` (installer 279.121s, worker 181.658s,
+  deployment 181.358s, backup 37.237s; other packages passed). That run started
+  before the final runtime root/lease audit and additional boundary assertions;
+  the final coordination race, native and boundary runs above cover them.
+- Final `go vet ./...` and Linux ARM64 cross-build passed:
+  `/tmp/deploy-signal-profiles-vet-final.log` and
+  `/tmp/deploy-signal-profiles-arm64-final.log`; binary
+  `/tmp/deploy-signal-profiles-arm64`. This is not native ARM64 qualification.
+- Example JSON, isolated script shell syntax, Go formatting and tracked/new-source
+  whitespace checked. All test/build runs have finished; no test-owned runtime or
+  service is intentionally left running. The complete repository race suite and
+  actual user-systemd/rootless/hardware/live-provider qualification were not run.
+
+Remaining work:
+
+1. Implement the journaled production activation/deactivation transaction consuming
+   fresh admission evidence under retained leases. The review remains observational.
+2. Implement the managed verifier-to-runtime/account handoff with current provider
+   and command admission. Profile alignment alone grants no production authority.
+3. Add explicit legacy fixed-recipient conversation enrollment, legacy backup-relay
+   adoption and managed backup cutover. This migration supports already enrolled
+   conversation profiles, not recipient inference from legacy secrets.
+4. Implement immutable verifier binary upgrade/re-enrollment and later recovery
+   epochs; qualify actual user-systemd/rootless operation on disposable hosts.
+   Native ARM64/physical LED qualification remains deferred/manual; live provider
+   checks need explicitly selected accounts and destinations.
+
+## Previous checkpoint: composed activation admission review
+
+Continued on 2026-11-04 from the managed Signal verification service checkpoint.
+Implemented the read-only admission inventory needed before a production
+activation transaction. The working tree was clean at the start of this session;
+existing repository content was preserved. No commit, real service installation,
+provider call, remote-host change or LED operation has been performed.
+
+Completed:
+
+- Added `notification-worker activation-review --local --root ABS` and the public
+  `ReviewActivation` API. The result pins the completed managed revision and worker
+  identity, timestamps observations and sorts checks by scope/stage. It reports
+  explicit blockers for production lifecycle, producer cutover, Signal runtime,
+  command and LED activation. All authority flags remain false; a saved review
+  cannot authorize any later operation.
+- The review checks installation artifacts and unit ownership under the operation
+  lease. Worker inspection additionally requires an inactive gateway and exclusive
+  installation/worker leases. It does not stop/restart services. Busy runtimes,
+  missing records, changed coordination inodes, state/schema/enrollment drift and
+  unfinished migrations cannot become admission evidence.
+- Added `worker.ReviewManagedAdmission` for initialized and recovered state. It
+  checks current schema/identity/enrollment, retained ownership history, exact
+  publication/adoption and live recovery anchors. Recovered command request seals
+  and Signal cursors are checked without changing quarantine or cursor state.
+  The command check reconstructs the complete original request inventory and
+  verifies retained fence bodies, not just row counts. A changed same-count fence
+  is covered by an explicit regression.
+- Original and renewed Telegram handoffs now share session-level freshness
+  verification with this review. All provider checks retain the same worker lease;
+  the exact latest managed renewal is required. Expiry, reboot, settling and missing
+  renewal authority cannot fall back to old evidence. No polling/ACK occurs.
+- Qualification uses only the latest acknowledged record and exact current
+  revision/credentials/architecture/UID/time. A later failure, pending record,
+  missing inputs or stale binding blocks the check. Offline Telegram credential
+  checks enforce bot/destination identity. Signal outgoing profiles are compared
+  with the adopted account/socket/inbox pins; legacy or stale profiles require an
+  explicit migration. Managed verifier health still grants no send/intake authority.
+- Read-only regression tests found that SQLite `mode=ro` can create WAL/SHM files
+  on an initialized WAL-mode database. The review now uses an immutable reader only
+  after proving WAL/rollback journals contain no pending bytes. Nonempty journals
+  block review without checkpointing, ignoring or repairing them. Retained tree
+  hashes cover absence of state writes.
+- The first extended race run found an existing floating-point Telegram deadline
+  bug: subtracting fractional uptimes could round exactly ten minutes down and
+  admit an expired handoff. Freshness now compares the absolute monotonic deadline;
+  deterministic tests cover fractional uptimes immediately before, at and after it.
+- Secret and coordination reads use nonblocking opens so FIFO substitutions cannot
+  hang admission review. Provider tests cover malformed, redirected, public and
+  FIFO credentials. Native fixtures cover the actual CLI subprocess and the
+  separate verifier process; the CLI fixture is included in the isolated script.
+
+Validation:
+
+- Expanded focused installation/worker/provider suite passed:
+  `/tmp/deploy-activation-review-focused.log` (installer 6.881s, worker 2.462s,
+  provider 0.004s). Final complete-request-inventory tests passed:
+  `/tmp/deploy-activation-review-final-focused.log` (worker 3.355s, installer 7.384s).
+- Fractional-deadline, original Telegram freshness and admission tests passed:
+  `/tmp/deploy-activation-review-deadline.log` (worker 5.333s).
+- The actual CLI subprocess passed: `/tmp/deploy-activation-review-cli-native.log`
+  (0.975s). Native CLI plus gateway/verifier process checks passed after the final
+  guard changes: `/tmp/deploy-activation-review-native-final.log` (9.544s).
+- All provider tests passed under race after the nonblocking credential change:
+  `/tmp/deploy-activation-review-provider-final.log` (1.034s).
+- Full repository suite passed outside the socket-restricted sandbox:
+  `/tmp/deploy-activation-review-all-unsandboxed.log` (deployment 200.394s,
+  installer 250.705s, worker 203.219s, backup 40.589s; other packages passed).
+  This run started before the final request-inventory/deadline guard tightening;
+  the final focused, native and race runs listed here cover those last changes.
+- Final focused race suite passed after both guard changes, including original
+  Telegram freshness, renewal composition, read-only admission, changed request
+  fences, profile/lease drift and the fractional deadline regression:
+  `/tmp/deploy-activation-review-race-final.log` (worker 102.999s, installer 60.581s,
+  provider 1.017s). The complete repository race suite was not run this turn.
+- Final `go vet ./...` and Linux ARM64 cross-build passed:
+  `/tmp/deploy-activation-review-vet-final.log` and
+  `/tmp/deploy-activation-review-arm64-final.log`; executable
+  `/tmp/deploy-activation-review-arm64`. No native ARM64 qualification is claimed.
+- The initial native process run hit the sandbox Unix `setsockopt` denial:
+  `/tmp/deploy-activation-review-native.log`. The authorized rerun passed
+  (`/tmp/deploy-activation-review-native-unsandboxed.log`, 9.824s). The original
+  sandbox full-suite attempt was interrupted and its remaining owned test processes
+  terminated; it is not counted as a passed run.
+- The first extended race run failed the pre-existing fractional deadline boundary
+  (no data-race finding): `/tmp/deploy-activation-review-race.log`. It is not counted
+  as passed. The corrected final race run above passed.
+- Go formatting, tracked/new-file whitespace and isolated script shell syntax
+  checked. All test/build runs have finished; no test-owned runtime or service is
+  intentionally left running. Native tests used simulated managers and synthetic
+  accounts; no actual user-systemd, provider or hardware qualification is claimed.
+
+Remaining work:
+
+1. Implement the journaled production activation/deactivation transaction consuming
+   fresh admission evidence under retained leases. The review exposes requirements;
+   it deliberately supplies no durable grant or production command admission.
+2. Migrate outbound Signal profile pins through a proven configuration/route
+   transition, then implement the managed verifier-to-runtime/account handoff.
+3. Implement immutable verifier binary upgrade/re-enrollment and replacement for
+   later recovery epochs; finish legacy backup relay adoption and backup cutover.
+4. Qualify actual user-systemd/rootless operation on disposable hosts. Native ARM64
+   and physical LED qualification remain deferred/manual; live provider checks need
+   explicitly chosen test accounts/destinations.
+
+## Previous checkpoint: managed Signal verification service
 
 Continued through 2026-11-04. Added the separate native user-service lifecycle
 for an already enrolled Signal verification endpoint and gateway supervision

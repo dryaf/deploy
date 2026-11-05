@@ -117,9 +117,8 @@ func backupTransferTx(ctx context.Context, s *backupState, fn func(*sql.Tx) erro
 	return tx.Commit()
 }
 
-// The future shared report service holds notifier.lock across this bounded pass.
-// Normal notifier dispatch never calls it: production ownership migration is not
-// yet enabled. SQLite transactions are always closed before local socket I/O.
+// The shared report service holds notifier.lock across this bounded pass.
+// Normal notifier dispatch never calls it; the managed cutover selects the owner. SQLite transactions are always closed before local socket I/O.
 func transferBackupNotifications(ctx context.Context, s *backupState, api backupNotificationAPI) error {
 	var b backupNotificationBinding
 	var snap *notify.Snapshot

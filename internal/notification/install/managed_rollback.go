@@ -43,6 +43,9 @@ func reviewManagedRollback(root, revision string) (review managedRollback, binar
 		return review, nil, nil, fmt.Errorf("rollback requires a completed lifecycle operation; resume or uninstall unfinished work first")
 	}
 	review.Current = j.Intent.After
+	if review.Current.Mode == "delivery" {
+		return review, nil, nil, fmt.Errorf("deactivate delivery before rollback")
+	}
 	if review.Current.Root != root || (revision == review.Current.Revision && review.Current.Mode != "uninstalled") {
 		return review, nil, nil, fmt.Errorf("select a different retained revision of this installation")
 	}
@@ -86,6 +89,13 @@ func reviewManagedRollback(root, revision string) (review managedRollback, binar
 			// Uninstall changes only the mode of a retained manifest.
 			candidate := *m
 			candidate.Mode = "verification"
+			candidate.DeliveryActivation = nil
+			candidate.DeliveryOwnerHash = review.Current.DeliveryOwnerHash
+			unit, e := renderManagedUnit(candidate)
+			if e != nil {
+				return review, nil, nil, e
+			}
+			candidate.UnitHash = managedDigest([]byte(unit))
 			// Renewal changes the audit pin, not the executable revision. A
 			// binary rollback always retains the current Telegram evidence.
 			candidate.TelegramRenewalID = review.Current.TelegramRenewalID
@@ -100,7 +110,7 @@ func reviewManagedRollback(root, revision string) (review managedRollback, binar
 		return review, nil, nil, fmt.Errorf("revision has no retained installation intent")
 	}
 	a, b := review.Current, review.Selected
-	if a.Installation != b.Installation || a.Root != b.Root || a.Paths.State != b.Paths.State || a.UnitDirectory != b.UnitDirectory || a.Identity != b.Identity || a.RecoveryCommitHash != b.RecoveryCommitHash || a.ConfigHash != b.ConfigHash || protocol.Hash(a.SignalVerification) != protocol.Hash(b.SignalVerification) || a.Schema != b.Schema || a.HelperHash != b.HelperHash || a.HelperRevision != b.HelperRevision || protocol.Hash(a.Paths.DeniedPaths) != protocol.Hash(b.Paths.DeniedPaths) {
+	if a.Installation != b.Installation || a.Root != b.Root || a.Paths.State != b.Paths.State || a.UnitDirectory != b.UnitDirectory || a.Identity != b.Identity || a.RecoveryCommitHash != b.RecoveryCommitHash || a.ConfigHash != b.ConfigHash || protocol.Hash(a.SignalProfiles) != protocol.Hash(b.SignalProfiles) || protocol.Hash(a.SignalVerification) != protocol.Hash(b.SignalVerification) || a.Schema != b.Schema || a.HelperHash != b.HelperHash || a.HelperRevision != b.HelperRevision || protocol.Hash(a.Paths.DeniedPaths) != protocol.Hash(b.Paths.DeniedPaths) {
 		return review, nil, nil, fmt.Errorf("rollback cannot cross configuration, schema, identity or recovery-helper changes")
 	}
 	if _, err = verifyManagedArtifacts(d, b); err != nil {

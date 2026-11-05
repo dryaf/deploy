@@ -4,8 +4,10 @@ The local CLI can now record dated operator observations for a completed managed
 verification installation. It does not run the checks, contact providers or the
 LED daemon, install services, or enable production delivery or chat commands.
 `qualified` and `activation_allowed` remain false even when all evidence is present.
-The production lifecycle, final recovery publication and migration gates remain
-unfinished. Existing fixture tests are not live qualification evidence.
+The separate [managed delivery transition](DELIVERY_ACTIVATION.md) can consume
+this evidence for initialized outbound-only Telegram state. Recovered/Signal,
+producer cutover and command/LED activation remain unfinished. Existing fixture
+tests are not live qualification evidence.
 
 Generate a private report before testing the installation:
 
@@ -99,6 +101,9 @@ Reports expire 30 days after creation. Every update/rollback revision, configura
 or credential change requires new evidence. `evidence_complete` additionally
 requires all generated checks to have passed, required environment attestations,
 and a committed acknowledgement. It still does not mean production qualified.
+`record_hash` is the exact acknowledged record pin consumed by `activate-delivery`.
+During delivery, status evaluates the original activation binding; deactivate
+before collecting or importing a new report.
 
 History is limited to 64 records, with at most 32 abandoned JSON temporaries in
 the report directory. Records are hash-linked and the independent head detects
@@ -112,3 +117,58 @@ The development host's known `218/CAPABILITIES` user-systemd probe failure remai
 unresolved. Physical LED tests and native ARM64 execution remain deferred; leave
 those checks pending until they are actually performed. No real provider receipt,
 host reboot or external-monitor test was performed by adding this feature.
+
+## Activation admission review
+
+Inspect the prerequisites for the exact managed verification revision:
+
+```sh
+deploy notification-worker activation-review --local \
+  --root /home/notify/.local/share/deploy/notification-installation
+```
+
+The JSON result contains the manifest hash, revision, worker identity, observation
+time and sorted `checks` with `scope`, `stage`, `state` and a fixed `reason` code.
+States are `satisfied`, `blocked` and `not_required`. Successful JSON output means
+the review completed, including any blockers it found. `activation_allowed`,
+`delivery_enabled`, `intake_enabled` and `execution_enabled` remain false;
+`requires_activation_recheck` is always true. Keep the output private. It is an
+observation, not a reusable activation token.
+
+The review reads the latest qualification record and current credential
+fingerprints. A newer failed/partial/pending report supersedes earlier success.
+It checks local Telegram bot/destination identity without a provider request.
+Signal profiles must match the enrolled account, socket and recovered inbox;
+old outbound pins and legacy send profiles are reported as requiring an explicit
+migration. `migrate-signal-profiles` supplies that proven transition for already
+enrolled conversation profiles; legacy fixed-recipient enrollment remains separate.
+After migration, the review exposes its `effective_config_hash` and validates
+`signal/profiles` before checking the effective outgoing pins. New qualification
+evidence must match the new manifest/revision. A configured conversation also
+needs its corresponding intake adapter.
+
+Worker-state checks require the gateway to have been stopped by the operator.
+The review never stops it automatically. It holds the installation operation lease
+and, when the gateway is inactive, the exclusive installation and worker leases.
+A running/busy gateway returns blocked drain/state checks. The separate Signal
+verifier should stay running: its managed process/socket health and publication
+are inspected. Verification health does not imply delivery or intake authority.
+No service is installed, enabled, reloaded or restarted by review.
+
+Recovered state checks include exact publication/adoption proof, current database
+anchors, historical request seals, retained Signal cursors and the latest Telegram
+handoff. Telegram's same-boot wall/monotonic freshness and settling deadline are
+rechecked without polling, acknowledging, renewing or re-dating observations.
+Missing/latest-incomplete evidence never permits fallback to an older drain.
+
+The database inspection creates no state files and performs no repairs. A nonempty
+SQLite WAL or rollback journal blocks inspection; it is neither ignored nor
+checkpointed by this command. Use the existing managed recovery/resume procedure
+for interrupted runtime work before reviewing again. Dry-run validates only local
+flag syntax and defers installation, manager, endpoint and state checks.
+
+For supported initialized outbound-only Telegram installations, the installation
+activation check identifies the available `activate-delivery` transition. The
+review still grants no authority and keeps explicit blockers for producer cutover,
+recovered/Signal runtime handoff and command/LED admission. Qualification evidence
+alone does not perform those transitions.

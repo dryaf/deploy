@@ -25,6 +25,40 @@ func (i managedInstaller) probeRecovery(ctx context.Context, d *safefs.Directory
 }
 
 func openManagedStore(m ManagedManifest, c Runtime) (*worker.Store, error) {
+	s, err := openCanonicalManagedStore(m, c)
+	if err != nil {
+		return nil, err
+	}
+	if m.DeliveryOwnerHash != "" {
+		if err = s.RequireManagedDeliveryOwner(deliveryOwner(m, c), m.DeliveryOwnerHash); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
+	if m.SignalProfiles == nil {
+		return s, nil
+	}
+	d, err := privateManagedDir(m.Root, true)
+	if err != nil {
+		s.Close()
+		return nil, err
+	}
+	effective, err := managedEffectiveRuntime(d, m, c)
+	d.Close()
+	if err == nil {
+		err = s.BindSignalProfileRoutes(effective.Worker, m.SignalProfiles.Hash)
+	}
+	if err != nil {
+		s.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func openCanonicalManagedStore(m ManagedManifest, c Runtime) (*worker.Store, error) {
+	if m.Mode == "delivery" {
+		return worker.OpenManagedDelivery(m.Paths.State, c.Worker, m.Identity, m.Revision, deliveryOwner(m, c), m.DeliveryOwnerHash, m.DeliveryActivation.Hash)
+	}
 	if m.TelegramRenewalID != "" {
 		d, err := privateManagedDir(m.Root, true)
 		if err != nil {

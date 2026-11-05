@@ -51,7 +51,7 @@ func setupReportFixture(t *testing.T) (*backupEvaluationFixture, *reportAPI, bac
 		testutil.Must(t, os.WriteFile(*path, []byte("https://monitor.example/"+name), 0600))
 	}
 	owner := backupNotificationOwner{Schema: 1, Mode: "shared", Binding: f.binding, Socket: f.client.Socket}
-	// Only tests synthesize the completed handoff; no production CLI writes it.
+	// This fixture synthesizes the handoff; production uses the cutover coordinator.
 	testutil.Must(t, f.state.put("notification_owner", owner))
 	api := &reportAPI{fixture: f, t: t}
 	calls := []string{}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/notification/worker"
@@ -19,17 +20,20 @@ import (
 // managedInstaller coordinates files and a user manager. Its crash hook is only
 // supplied by tests; every hook follows a durable boundary or external effect.
 type managedInstaller struct {
-	services          managedServices
-	signalProbe       func(context.Context, *safefs.Directory, string, string) error
-	signalCheck       func(context.Context, ManagedManifest) error
-	probe             func(context.Context, *safefs.Directory, string, string, bool) error
-	recoveryProbe     func(context.Context, *safefs.Directory, string, string) error
-	helperProbe       func(context.Context, *safefs.Directory, string, string) error
-	telegramProbe     func(context.Context, *safefs.Directory, string, string) error
-	telegramTransport http.RoundTripper
-	ledProbe          func(context.Context, *safefs.Directory, string, string) error
-	ledAPI            func(string) worker.LEDAPI
-	fault             func(string) error
+	deliveryProbe       func(context.Context, *safefs.Directory, string, string) error
+	deliveryInspect     func(context.Context, ManagedManifest, bool) error
+	services            managedServices
+	signalProbe         func(context.Context, *safefs.Directory, string, string) error
+	signalProfilesProbe func(context.Context, *safefs.Directory, string, string) error
+	signalCheck         func(context.Context, ManagedManifest) error
+	probe               func(context.Context, *safefs.Directory, string, string, bool) error
+	recoveryProbe       func(context.Context, *safefs.Directory, string, string) error
+	helperProbe         func(context.Context, *safefs.Directory, string, string) error
+	telegramProbe       func(context.Context, *safefs.Directory, string, string) error
+	telegramTransport   http.RoundTripper
+	ledProbe            func(context.Context, *safefs.Directory, string, string) error
+	ledAPI              func(string) worker.LEDAPI
+	fault               func(string) error
 }
 
 func newManagedInstaller() managedInstaller {
@@ -76,7 +80,7 @@ func (i managedInstaller) prepare(ctx context.Context, operation string, spec Ma
 // The operation lease protects the check through durable intent publication.
 func (i managedInstaller) prepareExpected(ctx context.Context, operation string, spec ManagedSpec, expected string) (ManagedManifest, error) {
 	var zero ManagedManifest
-	if operation != "setup" && operation != "update" && operation != "migrate-schema" && operation != "migrate-led" && operation != "adopt-recovery" && operation != "upgrade-helper" && operation != "adopt-signal" && operation != "supervise-signal" {
+	if operation != "setup" && operation != "update" && operation != "migrate-schema" && operation != "migrate-led" && operation != "adopt-recovery" && operation != "upgrade-helper" && operation != "adopt-signal" && operation != "supervise-signal" && operation != "migrate-signal-profiles" {
 		return zero, fmt.Errorf("invalid preparation operation")
 	}
 	if (operation == "adopt-signal" || operation == "supervise-signal") != (spec.SignalVerification != nil) {
@@ -172,6 +176,12 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 			return zero, e
 		}
 		b := j.Intent.After
+		if b.Mode == "delivery" {
+			return zero, fmt.Errorf("deactivate delivery before changing the installation")
+		}
+		if b.DeliveryOwnerHash != "" && operation != "update" && operation != "upgrade-helper" {
+			return zero, fmt.Errorf("delivery-enrolled state requires an explicit future migration")
+		}
 		before = &b
 		if b.RecoveryCommitHash != "" && (operation == "adopt-recovery" || operation == "migrate-schema" || operation == "migrate-led") {
 			return zero, fmt.Errorf("recovered runtime migration requires ancestor support")
@@ -294,6 +304,29 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		m.RecoveryCommitHash = before.RecoveryCommitHash
 		m.TelegramRenewalID = before.TelegramRenewalID
 		m.SignalVerification = before.SignalVerification
+		m.SignalProfiles = before.SignalProfiles
+		m.DeliveryOwnerHash = before.DeliveryOwnerHash
+	}
+	var profileManifest signalProfilesManifest
+	var profileRuntime []byte
+	var profileOperation string
+	if operation == "migrate-signal-profiles" {
+		profileOperation, err = safefs.NewID("n")
+		if err != nil {
+			return zero, err
+		}
+		if before == nil || before.SignalVerification == nil {
+			return zero, fmt.Errorf("Signal profile migration requires an adopted endpoint")
+		}
+		endpoint, e := readManagedSignalBinding(d, *before)
+		if e != nil {
+			return zero, e
+		}
+		profileManifest, profileRuntime, err = prepareSignalProfiles(*before, raw, endpoint, profileOperation)
+		if err != nil {
+			return zero, err
+		}
+		m.SignalProfiles = &ManagedSignalProfiles{Operation: profileOperation, Hash: protocol.Hash(profileManifest)}
 	}
 	var signalEndpoint SignalVerificationManifest
 	var signalOperation string
@@ -320,7 +353,7 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	if operation == "adopt-recovery" {
 		m.RecoveryCommitHash = spec.RecoveryCommitHash
 	}
-	if operation == "migrate-schema" || operation == "migrate-led" || operation == "adopt-recovery" || operation == "upgrade-helper" || operation == "adopt-signal" || operation == "supervise-signal" {
+	if operation == "migrate-schema" || operation == "migrate-led" || operation == "adopt-recovery" || operation == "upgrade-helper" || operation == "adopt-signal" || operation == "supervise-signal" || operation == "migrate-signal-profiles" {
 		m.HelperRevision = m.Revision
 		m.HelperHash = m.BinaryHash
 	}
@@ -349,7 +382,7 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	if err == nil {
 		err = frozenManagedFile(release, "runtime.json", raw, 0600)
 	}
-	if err == nil && (operation == "migrate-schema" || operation == "migrate-led" || operation == "adopt-recovery" || operation == "upgrade-helper" || operation == "adopt-signal" || operation == "supervise-signal") {
+	if err == nil && (operation == "migrate-schema" || operation == "migrate-led" || operation == "adopt-recovery" || operation == "upgrade-helper" || operation == "adopt-signal" || operation == "supervise-signal" || operation == "migrate-signal-profiles") {
 		err = frozenManagedFile(release, "recovery-helper", binary, 0700)
 	}
 	release.Close()
@@ -386,12 +419,36 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	if err = i.probeSignalVerification(ctx, d, m); err != nil {
 		return zero, err
 	}
+	if err = i.probeSignalProfiles(ctx, d, m); err != nil {
+		return zero, err
+	}
+	if err = i.probeDelivery(ctx, d, m); err != nil {
+		return zero, err
+	}
 	if err = i.checkSignalVerification(ctx, m); err != nil {
 		return zero, err
 	}
 	opid, err := safefs.NewID("n")
 	if err != nil {
 		return zero, err
+	}
+	if operation == "migrate-signal-profiles" {
+		opid = profileOperation
+		profileRelease, e := d.Sub("releases/" + revision)
+		if e != nil {
+			return zero, e
+		}
+		err = profileRelease.WriteJSON("signal-profiles.json", profileManifest, false)
+		if err == nil {
+			err = frozenManagedFile(profileRelease, "signal-runtime.json", profileRuntime, 0600)
+		}
+		profileRelease.Close()
+		if err != nil {
+			return zero, err
+		}
+		if err = i.boundary("signal-profiles-retained"); err != nil {
+			return zero, err
+		}
 	}
 	if operation == "adopt-signal" || operation == "supervise-signal" {
 		opid = signalOperation
@@ -512,7 +569,7 @@ func (i managedInstaller) uninstall(ctx context.Context, root string) (ManagedMa
 		return zero, fmt.Errorf("installation root moved")
 	}
 	interrupted := j.Phase != "complete"
-	if interrupted && (j.Intent.Operation == "migrate-schema" || j.Intent.Operation == "migrate-led" || j.Intent.Operation == "adopt-recovery" || j.Intent.Operation == "renew-telegram" || j.Intent.Operation == "upgrade-helper" || j.Intent.Operation == "adopt-signal" || j.Intent.Operation == "supervise-signal") {
+	if interrupted && (j.Intent.Operation == "migrate-schema" || j.Intent.Operation == "migrate-led" || j.Intent.Operation == "adopt-recovery" || j.Intent.Operation == "renew-telegram" || j.Intent.Operation == "upgrade-helper" || j.Intent.Operation == "adopt-signal" || j.Intent.Operation == "supervise-signal" || j.Intent.Operation == "migrate-signal-profiles") {
 		return zero, fmt.Errorf("resume the pending migration before uninstalling")
 	}
 	if interrupted && j.Intent.Operation == "uninstall" {
@@ -522,6 +579,9 @@ func (i managedInstaller) uninstall(ctx context.Context, root string) (ManagedMa
 		return zero, err
 	}
 	b := j.Intent.After
+	if b.Mode == "delivery" {
+		return zero, fmt.Errorf("deactivate delivery before uninstalling")
+	}
 	if b.Mode == "uninstalled" {
 		return i.resumeLocked(ctx, d, j)
 	}
@@ -625,6 +685,14 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 		return m, fmt.Errorf("installed unit is missing")
 	}
 	if j.Phase == "complete" {
+		if m.Mode == "delivery" {
+			if err = checkDeliveryAdmission(d, m, c, time.Now().UTC()); err != nil {
+				return m, err
+			}
+			if err = i.inspectDelivery(ctx, m, false); err != nil {
+				return m, err
+			}
+		}
 		if j.Intent.Operation == "migrate-led" {
 			if err = verifyManagedLEDCompletion(ctx, d, j, c); err != nil {
 				return m, err
@@ -659,6 +727,17 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 	}
 	if err = i.probeSignalVerification(ctx, d, m); err != nil {
 		return m, err
+	}
+	if err = i.probeSignalProfiles(ctx, d, m); err != nil {
+		return m, err
+	}
+	if err = i.probeDelivery(ctx, d, m); err != nil {
+		return m, err
+	}
+	if m.DeliveryOwnerHash != "" {
+		if err = i.inspectDeliveryTransition(ctx, j); err != nil {
+			return m, err
+		}
 	}
 	if m.Mode != "uninstalled" {
 		if err = i.checkSignalVerification(ctx, m); err != nil {
@@ -737,6 +816,9 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 	if err = i.renewTelegram(ctx, d, j, c, lease, operationLease); err != nil {
 		return m, err
 	}
+	if err = i.deliveryState(ctx, d, j, c); err != nil {
+		return m, err
+	}
 	s, err := openManagedStore(m, c)
 	if err != nil {
 		return m, err
@@ -768,6 +850,11 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 	}
 	if err = i.advance(d, &j, "files"); err != nil {
 		return m, err
+	}
+	if m.Mode == "delivery" {
+		if err = checkDeliveryAdmission(d, m, c, time.Now().UTC()); err != nil {
+			return m, err
+		}
 	}
 	if m.SignalVerification != nil {
 		if _, err = readManagedSignalBinding(d, m); err != nil {
@@ -853,7 +940,15 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 	s = nil
 	lease.Close()
 	lease = nil
-	if m.Mode == "verification" {
+	if m.Mode == "verification" || m.Mode == "delivery" {
+		if m.Mode == "delivery" {
+			if err = checkDeliveryAdmission(d, m, c, time.Now().UTC()); err != nil {
+				return m, err
+			}
+			if err = i.inspectDelivery(ctx, m, false); err != nil {
+				return m, err
+			}
+		}
 		if _, err = inspectManagedService(ctx, i.services, m, false); err != nil {
 			return m, err
 		}

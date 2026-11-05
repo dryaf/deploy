@@ -219,12 +219,16 @@ func (u userSignalServiceManager) verifyOnce(ctx context.Context, m SignalServic
 }
 
 func checkSignalServiceProcess(pid uint32, m SignalServiceManifest) error {
+	return checkManagedNativeProcess(pid, m.executable(), m.commandArgs())
+}
+
+func checkManagedNativeProcess(pid uint32, executable string, expectedArgs []string) error {
 	root := fmt.Sprintf("/proc/%d", pid)
 	before, err := os.ReadFile(root + "/stat")
 	if err != nil {
 		return err
 	}
-	expected, err := os.Stat(m.executable())
+	expected, err := os.Stat(executable)
 	if err != nil {
 		return err
 	}
@@ -237,7 +241,7 @@ func checkSignalServiceProcess(pid uint32, m SignalServiceManifest) error {
 		return fmt.Errorf("Signal verifier process owner differs")
 	}
 	argv, err := os.ReadFile(root + "/cmdline")
-	if err != nil || !bytes.Equal(argv, []byte(strings.Join(m.commandArgs(), "\x00")+"\x00")) {
+	if err != nil || !bytes.Equal(argv, []byte(strings.Join(expectedArgs, "\x00")+"\x00")) {
 		return fmt.Errorf("Signal verifier process arguments differ")
 	}
 	after, err := os.ReadFile(root + "/stat")

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/notification/worker"
 	"github.com/dryaf/deploy/internal/safefs"
 	"github.com/dryaf/deploy/internal/ui"
@@ -17,11 +18,17 @@ import (
 )
 
 func runManagedCLI(args []string) error {
-	if args[0] == "__managed-signal-supervision-probe" || args[0] == "__managed-signal-verification-probe" || args[0] == "__managed-probe" || args[0] == "__managed-migration-probe" || args[0] == "__managed-led-migration-probe" || args[0] == "__managed-recovery-probe" || args[0] == "__managed-telegram-renewal-probe" || args[0] == "__managed-helper-upgrade-probe" {
+	if args[0] == "__managed-delivery-probe" || args[0] == "__managed-signal-profiles-probe" || args[0] == "__managed-signal-supervision-probe" || args[0] == "__managed-signal-verification-probe" || args[0] == "__managed-probe" || args[0] == "__managed-migration-probe" || args[0] == "__managed-led-migration-probe" || args[0] == "__managed-recovery-probe" || args[0] == "__managed-telegram-renewal-probe" || args[0] == "__managed-helper-upgrade-probe" {
 		if len(args) != 1 {
 			return fmt.Errorf("probe takes no arguments")
 		}
 		capability := managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion()}
+		if args[0] == "__managed-delivery-probe" {
+			capability.Delivery = 1
+		}
+		if args[0] == "__managed-signal-profiles-probe" {
+			capability.SignalProfiles = 1
+		}
 		if args[0] == "__managed-signal-verification-probe" || args[0] == "__managed-signal-supervision-probe" {
 			capability.SignalVerification = 1
 			if args[0] == "__managed-signal-supervision-probe" {
@@ -58,7 +65,7 @@ func runManagedCLI(args []string) error {
 		return fmt.Errorf("managed operations require --local and explicit paths")
 	}
 	allowed := map[string]map[string]bool{
-		"supervise-signal": {"local": true, "spec": true}, "adopt-signal": {"local": true, "spec": true}, "upgrade-helper": {"local": true, "spec": true}, "adopt-recovery": {"local": true, "spec": true}, "setup": {"local": true, "spec": true}, "update": {"local": true, "spec": true}, "migrate-schema": {"local": true, "spec": true}, "migrate-led": {"local": true, "spec": true},
+		"migrate-signal-profiles": {"local": true, "spec": true}, "supervise-signal": {"local": true, "spec": true}, "adopt-signal": {"local": true, "spec": true}, "upgrade-helper": {"local": true, "spec": true}, "adopt-recovery": {"local": true, "spec": true}, "setup": {"local": true, "spec": true}, "update": {"local": true, "spec": true}, "migrate-schema": {"local": true, "spec": true}, "migrate-led": {"local": true, "spec": true},
 		"resume": {"local": true, "root": true}, "uninstall": {"local": true, "root": true},
 		"renew-telegram":      {"local": true, "root": true},
 		"rollback":            {"local": true, "root": true, "from-revision": true},
@@ -74,7 +81,7 @@ func runManagedCLI(args []string) error {
 		return fmt.Errorf("option is not valid for managed operation")
 	}
 	var spec ManagedSpec
-	if args[0] == "setup" || args[0] == "update" || args[0] == "migrate-schema" || args[0] == "migrate-led" || args[0] == "adopt-recovery" || args[0] == "upgrade-helper" || args[0] == "adopt-signal" || args[0] == "supervise-signal" {
+	if args[0] == "setup" || args[0] == "update" || args[0] == "migrate-schema" || args[0] == "migrate-led" || args[0] == "adopt-recovery" || args[0] == "upgrade-helper" || args[0] == "adopt-signal" || args[0] == "supervise-signal" || args[0] == "migrate-signal-profiles" {
 		b, err := readManagedInput(*specPath, 1<<20)
 		if err != nil {
 			return err
@@ -112,7 +119,7 @@ func runManagedCLI(args []string) error {
 				Review managedRollback `json:"review"`
 			}{true, v})
 		}
-		if args[0] == "setup" || args[0] == "update" || args[0] == "migrate-schema" || args[0] == "migrate-led" || args[0] == "adopt-recovery" || args[0] == "upgrade-helper" || args[0] == "adopt-signal" || args[0] == "supervise-signal" {
+		if args[0] == "setup" || args[0] == "update" || args[0] == "migrate-schema" || args[0] == "migrate-led" || args[0] == "adopt-recovery" || args[0] == "upgrade-helper" || args[0] == "adopt-signal" || args[0] == "supervise-signal" || args[0] == "migrate-signal-profiles" {
 			raw, e := readManagedInput(spec.RuntimeFile, safefs.MaxRecordBytes)
 			if e != nil {
 				return e
@@ -127,6 +134,11 @@ func runManagedCLI(args []string) error {
 				}
 				if managedDigest(raw) != p.NextGatewaySHA256 {
 					return fmt.Errorf("staged Signal configuration pin changed")
+				}
+			}
+			if args[0] == "migrate-signal-profiles" {
+				if e = reviewSignalProfilesInput(spec, raw); e != nil {
+					return e
 				}
 			}
 			binary, e := readManagedInput(spec.BinaryFile, maxManagedBinary)
@@ -154,7 +166,7 @@ func runManagedCLI(args []string) error {
 	switch args[0] {
 	case "renew-telegram":
 		m, err = i.prepareTelegramRenewal(ctx, *root)
-	case "setup", "update", "migrate-schema", "migrate-led", "adopt-recovery", "upgrade-helper", "adopt-signal", "supervise-signal":
+	case "setup", "update", "migrate-schema", "migrate-led", "adopt-recovery", "upgrade-helper", "adopt-signal", "supervise-signal", "migrate-signal-profiles":
 		m, err = i.prepare(ctx, args[0], spec)
 	case "resume":
 		m, err = i.resume(ctx, *root)
@@ -192,11 +204,12 @@ func runManagedCLI(args []string) error {
 			return e
 		}
 		return json.NewEncoder(os.Stdout).Encode(struct {
-			Manifest  ManagedManifest `json:"manifest"`
-			Operation string          `json:"operation"`
-			Phase     string          `json:"phase"`
-			Qualified bool            `json:"qualified"`
-		}{j.Intent.After, j.Intent.Operation, j.Phase, false})
+			ManifestHash string          `json:"manifest_hash"`
+			Manifest     ManagedManifest `json:"manifest"`
+			Operation    string          `json:"operation"`
+			Phase        string          `json:"phase"`
+			Qualified    bool            `json:"qualified"`
+		}{protocol.Hash(j.Intent.After), j.Intent.After, j.Intent.Operation, j.Phase, false})
 	case "__managed-serve":
 		return serveManaged(ctx, *root, *revision)
 	default:
@@ -249,7 +262,7 @@ func serveManaged(ctx context.Context, root, revision string) error {
 		return err
 	}
 	m := j.Intent.After
-	if m.Root != root || m.Revision != revision || m.Mode != "verification" || managedPhase(j.Phase) < managedPhase("published") {
+	if m.Root != root || m.Revision != revision || (m.Mode != "verification" && m.Mode != "delivery") || managedPhase(j.Phase) < managedPhase("published") {
 		return fmt.Errorf("installation is not ready for verification service")
 	}
 	if err = validateManagedPointer(d, j, true); err != nil {
@@ -313,5 +326,12 @@ func serveManaged(ctx context.Context, root, revision string) error {
 	if err = s.RequireInactiveProducers(); err != nil {
 		return err
 	}
-	return serveManagedSignalRuntime(ctx, d, s, c, m)
+	if m.Mode == "delivery" {
+		return serveManagedDelivery(ctx, d, s, c, m, lease, nil)
+	}
+	c, err = managedEffectiveRuntime(d, m, c)
+	if err != nil {
+		return err
+	}
+	return serveManagedSignalRuntime(ctx, d, s, c, m, lease)
 }

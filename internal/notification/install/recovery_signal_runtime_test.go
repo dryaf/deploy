@@ -30,6 +30,9 @@ func signalRuntimeCLIArgumentsSetup(t *testing.T, beforeRecovery func(string, st
 	return signalRuntimeCLIArgumentsProviders(t, beforeRecovery, false)
 }
 func signalRuntimeCLIArgumentsProviders(t *testing.T, beforeRecovery func(string, string), telegram bool) []string {
+	return signalRuntimeCLIArgumentsConfigured(t, beforeRecovery, telegram, nil)
+}
+func signalRuntimeCLIArgumentsConfigured(t *testing.T, beforeRecovery func(string, string), telegram bool, configure func(*Runtime)) []string {
 	t.Helper()
 	ctx := context.Background()
 	c, config := signalRuntimeCLIConfiguration(t)
@@ -52,6 +55,9 @@ func signalRuntimeCLIArgumentsProviders(t *testing.T, beforeRecovery func(string
 		t.Fatal(err)
 	}
 	c.Signal.InboxIdentity = inbox.Cursor().Identity
+	if configure != nil {
+		configure(&c)
+	}
 	writeRuntime(t, config, c)
 	if err = inbox.Close(); err != nil {
 		t.Fatal(err)

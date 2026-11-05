@@ -221,7 +221,26 @@ func enqueueBackupDaily(tx *sql.Tx, c WorkerInstallation, now time.Time, summary
 }
 
 func drainNotificationOutbox(ctx context.Context, state *backupState, c WorkerInstallation, send notification.Sender, now time.Time) (err error) {
+	return drainNotificationOutboxWith(ctx, state, c, send, now, nil)
+}
+
+func drainNotificationOutboxWith(ctx context.Context, state *backupState, c WorkerInstallation, send notification.Sender, now time.Time, fault func(string) error) (err error) {
 	if err = requireLegacyNotificationOwner(state); err != nil {
+		return err
+	}
+	check, unlock, err := lockLegacyDelivery(ctx, state)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	journal, err := openLegacyDeliveryJournal(ctx, state)
+	if err != nil {
+		return err
+	}
+	if err = check(); err != nil {
+		return err
+	}
+	if err = journal.recover(ctx, state, now); err != nil {
 		return err
 	}
 	release, err := backupCommandDeliveryGuard(state)
@@ -255,6 +274,10 @@ func drainNotificationOutbox(ctx context.Context, state *backupState, c WorkerIn
 		if err = protocol.StrictBackupJSON([]byte(raw), &p.event); err != nil {
 			rows.Close()
 			return err
+		}
+		if p.event.ID != p.id {
+			rows.Close()
+			return fmt.Errorf("legacy notification payload identity changed")
 		}
 		events = append(events, p)
 	}
@@ -293,36 +316,55 @@ func drainNotificationOutbox(ctx context.Context, state *backupState, c WorkerIn
 		}
 		accepted := false
 		for _, provider := range providers {
+			if err = check(); err != nil {
+				return err
+			}
 			if err = requireLegacyNotificationOwner(state); err != nil {
 				return err
 			}
 			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < 11*time.Second {
 				break
 			}
-			attempt, deliveryErr := send(ctx, provider, c.Policy.Notifications, p.event)
-			p.event.Attempts = append(p.event.Attempts, attempt)
-			if len(p.event.Attempts) > 32 {
-				p.event.Attempts = p.event.Attempts[len(p.event.Attempts)-32:]
+			intent, eligible, e := journal.reserve(ctx, state, c, provider, p.event)
+			if e != nil {
+				return e
 			}
-			raw, _ := json.Marshal(p.event)
-			if _, err = state.db.Exec("UPDATE outbox SET record=? WHERE id=?", string(raw), p.id); err != nil {
+			if !eligible {
+				break
+			}
+			if err = backupRecoveryBoundary(fault, "legacy-attempt-reserved"); err != nil {
 				return err
 			}
-			if err = state.put("delivery/"+provider, attempt); err != nil {
+			if err = check(); err != nil {
 				return err
 			}
-			if deliveryErr == nil && attempt.Accepted {
-				accepted = true
+			if err = requireLegacyNotificationOwner(state); err != nil {
+				return err
+			}
+			if err = backupTransferTx(ctx, state, func(tx *sql.Tx) error {
+				return checkLegacyDeliveryHead(tx, journal.head)
+			}); err != nil {
+				return err
+			}
+			attempt, deliveryErr := send(ctx, provider, c.Policy.Notifications, intent.Event)
+			if err = backupRecoveryBoundary(fault, "legacy-provider-returned"); err != nil {
+				return err
+			}
+			if err = check(); err != nil {
+				return err
+			}
+			accepted, err = journal.settle(ctx, state, attempt, deliveryErr, false, time.Now().UTC())
+			if err != nil {
+				return err
+			}
+			if err = backupRecoveryBoundary(fault, "legacy-attempt-settled"); err != nil {
+				return err
+			}
+			if accepted {
 				break
 			}
 		}
-		raw, _ := json.Marshal(p.event)
-		if accepted {
-			if _, err = state.db.Exec("UPDATE outbox SET accepted=?,attempts=attempts+1,record=? WHERE id=?", time.Now().UTC().Format(eventTimeLayout), string(raw), p.id); err != nil {
-				return err
-			}
-
-		} else {
+		if !accepted {
 			if err = markDeliveryOutage(state, now); err != nil {
 				return err
 			}
@@ -330,7 +372,7 @@ func drainNotificationOutbox(ctx context.Context, state *backupState, c WorkerIn
 			if retry > 6*time.Hour {
 				retry = 6 * time.Hour
 			}
-			if _, err = state.db.Exec("UPDATE outbox SET due=?,attempts=attempts+1,record=? WHERE id=?", now.Add(retry).UTC().Format(eventTimeLayout), string(raw), p.id); err != nil {
+			if _, err = state.db.Exec("UPDATE outbox SET due=?,attempts=attempts+1 WHERE id=? AND accepted IS NULL", now.Add(retry).UTC().Format(eventTimeLayout), p.id); err != nil {
 				return err
 			}
 			if c.Policy.Monitoring.DailyDeliveryPingURLFile != "" {

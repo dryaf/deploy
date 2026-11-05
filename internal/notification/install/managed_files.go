@@ -21,6 +21,8 @@ import (
 )
 
 type managedCapabilities struct {
+	Delivery             int `json:"delivery,omitempty"`
+	SignalProfiles       int `json:"signal_profiles,omitempty"`
 	SignalService        int `json:"signal_service,omitempty"`
 	SignalSupervision    int `json:"signal_supervision,omitempty"`
 	SignalVerification   int `json:"signal_verification,omitempty"`
@@ -170,6 +172,8 @@ func probeManagedCapability(ctx context.Context, d *safefs.Directory, name, hash
 		(probe == "__managed-telegram-renewal-probe" && c.TelegramRenewal != 1) ||
 		(probe == "__managed-signal-verification-probe" && c.SignalVerification != 1) ||
 		(probe == "__managed-signal-supervision-probe" && (c.SignalSupervision != 1 || c.SignalVerification != 1)) ||
+		(probe == "__managed-signal-profiles-probe" && c.SignalProfiles != 1) ||
+		(probe == "__managed-delivery-probe" && c.Delivery != 1) ||
 		(probe == "__signal-verification-service-probe" && c.SignalService != 1) {
 		return fmt.Errorf("executable cannot safely resume this installation/schema")
 	}
@@ -227,6 +231,24 @@ func verifyManagedArtifactsPolicy(d *safefs.Directory, m ManagedManifest, migrat
 	c, err := managedRuntime(d, m)
 	if err != nil {
 		return c, err
+	}
+	if m.DeliveryOwnerHash != "" {
+		if err := deliveryPolicy(m, c); err != nil {
+			return c, err
+		}
+		if protocol.Hash(deliveryOwner(m, c)) != m.DeliveryOwnerHash {
+			return c, fmt.Errorf("delivery owner hash changed")
+		}
+	}
+	if m.DeliveryActivation != nil {
+		if _, _, err := readDeliveryAdmission(d, m, c); err != nil {
+			return c, err
+		}
+	}
+	if m.SignalProfiles != nil {
+		if _, e := managedEffectiveRuntime(d, m, c); e != nil {
+			return c, e
+		}
 	}
 	if m.SignalVerification != nil {
 		if _, e := readManagedSignalBinding(d, m); e != nil {

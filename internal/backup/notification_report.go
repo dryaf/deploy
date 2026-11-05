@@ -92,10 +92,16 @@ func runSharedBackupReportWith(ctx context.Context, c WorkerInstallation, state 
 	if err != nil {
 		return err
 	}
+	if err = requireBackupCutoverOwner(state, owner); err != nil {
+		return err
+	}
 	if deps.API == nil {
 		deps.API = client.Client{Socket: owner.Socket, Identity: owner.Binding.Identity}
 	}
 	evaluate := func() (evaluation backupNotificationEvaluation, err error) {
+		if err = requireBackupCutoverOwner(state, owner); err != nil {
+			return evaluation, err
+		}
 		clock := deps.Clock()
 		err = backupTransferTx(ctx, state, func(tx *sql.Tx) error {
 			current, err := readBackupNotificationOwner(tx)
@@ -148,6 +154,11 @@ func runSharedBackupReportWith(ctx context.Context, c WorkerInstallation, state 
 		if err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM notification_obligations o JOIN notification_exports e ON e.id=o.representative WHERE o.disposition='open' AND e.state IN ('retry_wait','blocked','ambiguous','fenced','expired'))").Scan(&failed); err != nil {
 			return err
 		}
+		var held bool
+		if err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM backup_notification_legacy WHERE disposition='held')").Scan(&held); err != nil {
+			return err
+		}
+		failed = failed || held
 		if failed || transferErr != nil {
 			if err = markSharedDeliveryOutage(tx, now); err != nil {
 				return err

@@ -19,6 +19,8 @@ import (
 )
 
 type Store struct {
+	deliveryActivationHash string
+	signalProfilesHash     string
 	verificationOnly       bool // Immutable for this open instance; set before exposing any runtime API.
 	installationRevision   string
 	recoveryCommitHash     string
@@ -162,6 +164,16 @@ func openStore(path string, c Config, create bool, fault func(string) error, req
 	s.lease, err = d.Lock("worker.lock", true, false)
 	if err != nil {
 		return nil, err
+	}
+	if !requireCurrent {
+		f, e := d.Open(managedDeliveryOwnerFile, os.O_RDONLY|unix.O_NONBLOCK, 0)
+		if e == nil {
+			f.Close()
+			return nil, fmt.Errorf("state is enrolled in managed delivery; use its installation lifecycle")
+		}
+		if !os.IsNotExist(e) {
+			return nil, e
+		}
 	}
 	var recoveryProof RecoveryCheckpointProof
 	if recoveryCommit != "" {
@@ -313,6 +325,15 @@ func openStore(path string, c Config, create bool, fault func(string) error, req
 		}
 		if requireCurrent && version != currentSchema {
 			return nil, fmt.Errorf("managed notification state requires an explicit schema migration")
+		}
+		if !requireCurrent {
+			var enrolled int
+			if err = s.db.QueryRow("SELECT count(*) FROM metadata WHERE key=?", managedDeliveryOwnerKey).Scan(&enrolled); err != nil {
+				return nil, err
+			}
+			if enrolled != 0 {
+				return nil, fmt.Errorf("database retains managed delivery ownership; use its installation lifecycle")
+			}
 		}
 		legacyOwnership = version < 5
 		var recovering int

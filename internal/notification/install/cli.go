@@ -183,9 +183,13 @@ func decodeRuntime(data []byte) (c Runtime, err error) {
 
 func RunCLI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: notification-worker <init|serve|status|setup|update|migrate-schema|migrate-led|adopt-recovery|adopt-signal|supervise-signal|signal-service-setup|signal-service-resume|signal-service-inspect|signal-service-uninstall|upgrade-helper|renew-telegram|rollback|resume|uninstall|installation-status|qualification-template|qualify|qualification-status|queue-inspect|producer-retire|receipts-inspect|receipts-compact|message-review|message-decide|message-decision-status|snapshot|snapshot-verify|recovery-prepare|recovery-status|recovery-checkpoint|recovery-checkpoint-verify|recovery-publication-prepare|recovery-publication-verify|recovery-publish|recovery-signal-install|recovery-signal-handoff|recovery-signal-podman-handoff|signal-verification-prepare|signal-verification-serve|recovery-telegram-check|led-migrate|recovery-led-review|recovery-led-preserve|recovery-led-adopt|recovery-led-handoff|recovery-led-import-cleanup|recovery-fence-producer|recovery-review|recovery-decide|notify-test|signal-inbox-init|signal-link-status|signal-service-status|signal-recovery-status|signal-link-resolve|__signal-relay> --local [options]; production activation is not available")
+		return fmt.Errorf("usage: notification-worker <init|serve|status|setup|update|migrate-schema|migrate-led|adopt-recovery|adopt-signal|supervise-signal|migrate-signal-profiles|signal-service-setup|signal-service-resume|signal-service-inspect|signal-service-uninstall|upgrade-helper|renew-telegram|rollback|resume|uninstall|installation-status|qualification-template|qualify|qualification-status|activation-review|activate-delivery|deactivate-delivery|queue-inspect|producer-retire|receipts-inspect|receipts-compact|message-review|message-decide|message-decision-status|snapshot|snapshot-verify|recovery-prepare|recovery-status|recovery-checkpoint|recovery-checkpoint-verify|recovery-publication-prepare|recovery-publication-verify|recovery-publish|recovery-signal-install|recovery-signal-handoff|recovery-signal-podman-handoff|signal-verification-prepare|signal-verification-serve|recovery-telegram-check|led-migrate|recovery-led-review|recovery-led-preserve|recovery-led-adopt|recovery-led-handoff|recovery-led-import-cleanup|recovery-fence-producer|recovery-review|recovery-decide|notify-test|signal-inbox-init|signal-link-status|signal-service-status|signal-recovery-status|signal-link-resolve|__signal-relay> --local [options]; Signal/recovery/command activation is not available")
 	}
 	switch args[0] {
+	case "activate-delivery", "deactivate-delivery":
+		return runDeliveryCLI(args, os.Stdout)
+	case "activation-review":
+		return runActivationReviewCLI(args[1:], os.Stdout)
 	case "signal-service-setup", "signal-service-resume", "signal-service-uninstall", "signal-service-inspect", "__signal-service-serve", "__signal-verification-service-probe":
 		return runSignalServiceCLI(args, os.Stdout)
 	case "signal-verification-prepare":
@@ -248,7 +252,7 @@ func RunCLI(args []string) error {
 		return runMessageAdministrationCLI(args, os.Stdout)
 	case "queue-inspect", "receipts-inspect":
 		return runInspectionCLI(args, os.Stdout)
-	case "__managed-signal-supervision-probe", "supervise-signal", "adopt-signal", "__managed-signal-verification-probe", "setup", "update", "migrate-schema", "migrate-led", "adopt-recovery", "upgrade-helper", "__managed-helper-upgrade-probe", "renew-telegram", "__managed-telegram-renewal-probe", "rollback", "resume", "uninstall", "installation-status", "__managed-probe", "__managed-migration-probe", "__managed-led-migration-probe", "__managed-recovery-probe", "__managed-serve":
+	case "__managed-delivery-probe", "__managed-signal-profiles-probe", "migrate-signal-profiles", "__managed-signal-supervision-probe", "supervise-signal", "adopt-signal", "__managed-signal-verification-probe", "setup", "update", "migrate-schema", "migrate-led", "adopt-recovery", "upgrade-helper", "__managed-helper-upgrade-probe", "renew-telegram", "__managed-telegram-renewal-probe", "rollback", "resume", "uninstall", "installation-status", "__managed-probe", "__managed-migration-probe", "__managed-led-migration-probe", "__managed-recovery-probe", "__managed-serve":
 		return runManagedCLI(args)
 	}
 	if args[0] == "recovery-led-review" || args[0] == "recovery-led-preserve" || args[0] == "recovery-led-adopt" {

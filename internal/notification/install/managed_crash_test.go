@@ -19,10 +19,11 @@ import (
 )
 
 type managedCrashInput struct {
-	Spec                ManagedSpec
-	Operation, Boundary string
-	Service             managedServiceState
-	Revision            string
+	ManifestHash, QualificationHash string
+	Spec                            ManagedSpec
+	Operation, Boundary             string
+	Service                         managedServiceState
+	Revision                        string
 }
 
 func TestManagedCrashHelper(t *testing.T) {
@@ -62,7 +63,20 @@ func TestManagedCrashHelper(t *testing.T) {
 		return syscall.Kill(os.Getpid(), syscall.SIGKILL)
 	}}
 	i.signalProbe = func(context.Context, *safefs.Directory, string, string) error { return nil }
+	i.signalProfilesProbe = func(context.Context, *safefs.Directory, string, string) error { return nil }
 	i.signalCheck = func(ctx context.Context, m ManagedManifest) error {
+		if m.SignalVerification.ServiceRoot != "" {
+			service, e := inspectSignalServiceRetained(m.SignalVerification.SignalVerificationReference, false)
+			if e != nil {
+				return e
+			}
+			v, e := openSignalEndpointVerifierService(ctx, m.SignalVerification.Root, m.SignalVerification.ManifestHash, service.binding())
+			if e != nil {
+				return e
+			}
+			defer v.close()
+			return v.check(ctx)
+		}
 		v, e := openSignalEndpointVerifier(ctx, m.SignalVerification.Root, m.SignalVerification.ManifestHash)
 		if e != nil {
 			return e
@@ -76,7 +90,15 @@ func TestManagedCrashHelper(t *testing.T) {
 	i.ledAPI = func(string) worker.LEDAPI { return api }
 	i.recoveryProbe = func(context.Context, *safefs.Directory, string, string) error { return nil }
 	i.ledProbe = func(context.Context, *safefs.Directory, string, string) error { return nil }
-	if in.Operation == "renew-telegram" {
+	if in.Operation == "activate-delivery" || in.Operation == "deactivate-delivery" {
+		i.services = &fakeDeliveryServices{f}
+		i.deliveryProbe = func(context.Context, *safefs.Directory, string, string) error { return nil }
+		i.deliveryInspect = func(ctx context.Context, m ManagedManifest, _ bool) error {
+			_, err := inspectManagedService(ctx, f, m, false)
+			return err
+		}
+		_, err = i.prepareDelivery(context.Background(), in.Operation, in.Spec.Root, in.ManifestHash, in.QualificationHash, false)
+	} else if in.Operation == "renew-telegram" {
 		_, err = i.prepareTelegramRenewal(context.Background(), in.Spec.Root)
 	} else if in.Operation == "uninstall" {
 		_, err = i.uninstall(context.Background(), in.Spec.Root)

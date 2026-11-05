@@ -29,7 +29,7 @@ func coalesceBackupBacklog(tx *sql.Tx, now time.Time, shared bool) error {
 	// Automatic shared batching only considers never-represented sources. A
 	// sending/ambiguous or previously accepted attempt cannot enter a new batch.
 	if shared {
-		filter = " AND NOT EXISTS(SELECT 1 FROM notification_members m WHERE m.obligation=b.id) "
+		filter = " AND NOT EXISTS(SELECT 1 FROM notification_members m WHERE m.obligation=b.id) AND NOT EXISTS(SELECT 1 FROM backup_notification_legacy l WHERE l.source=b.id AND l.disposition='held') "
 	}
 	rows, err := tx.Query("SELECT id,kind,created,record FROM outbox b WHERE accepted IS NULL AND covered_by IS NULL AND kind NOT IN ('daily','delivery-catchup','batch') AND due<=? "+filter+" ORDER BY created,id LIMIT 128", now.UTC().Format(eventTimeLayout))
 	if err != nil {
@@ -45,16 +45,21 @@ func coalesceBackupBacklog(tx *sql.Tx, now time.Time, shared bool) error {
 			rows.Close()
 			return err
 		}
-		if oldest == "" {
-			oldest = created
-		}
-		ids = append(ids, id)
-		counts[kind]++
 		var event notification.NotificationEvent
 		if err = protocol.StrictBackupJSON([]byte(raw), &event); err != nil {
 			rows.Close()
 			return err
 		}
+		// Keep attempted envelopes under their original identities. In particular,
+		// an ambiguous send must not become an apparently unsent batch member.
+		if len(event.Attempts) != 0 {
+			continue
+		}
+		if oldest == "" {
+			oldest = created
+		}
+		ids = append(ids, id)
+		counts[kind]++
 		if len(messages) < 8 {
 			messages = append(messages, event.Message)
 		}

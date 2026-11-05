@@ -33,24 +33,27 @@ type ManagedSpec struct {
 }
 
 type ManagedManifest struct {
-	SignalVerification *ManagedSignalBinding `json:"signal_verification,omitempty"`
-	TelegramRenewalID  string                `json:"telegram_renewal_id,omitempty"`
-	RecoveryCommitHash string                `json:"recovery_commit_hash,omitempty"`
-	Version            int                   `json:"version"`
-	Installation       string                `json:"installation"`
-	Revision           string                `json:"revision"`
-	Root               string                `json:"root"`
-	UnitDirectory      string                `json:"unit_directory"`
-	Paths              ServicePaths          `json:"paths"`
-	Identity           protocol.Identity     `json:"identity"`
-	RuntimeHash        string                `json:"runtime_hash"`
-	ConfigHash         string                `json:"config_hash"`
-	BinaryHash         string                `json:"binary_hash"`
-	HelperRevision     string                `json:"helper_revision,omitempty"`
-	HelperHash         string                `json:"helper_hash"`
-	UnitHash           string                `json:"unit_hash"`
-	Schema             int                   `json:"schema"`
-	Mode               string                `json:"mode"` // verification or uninstalled; never production authority.
+	DeliveryOwnerHash  string                     `json:"delivery_owner_hash,omitempty"`
+	DeliveryActivation *ManagedDeliveryActivation `json:"delivery_activation,omitempty"`
+	SignalProfiles     *ManagedSignalProfiles     `json:"signal_profiles,omitempty"`
+	SignalVerification *ManagedSignalBinding      `json:"signal_verification,omitempty"`
+	TelegramRenewalID  string                     `json:"telegram_renewal_id,omitempty"`
+	RecoveryCommitHash string                     `json:"recovery_commit_hash,omitempty"`
+	Version            int                        `json:"version"`
+	Installation       string                     `json:"installation"`
+	Revision           string                     `json:"revision"`
+	Root               string                     `json:"root"`
+	UnitDirectory      string                     `json:"unit_directory"`
+	Paths              ServicePaths               `json:"paths"`
+	Identity           protocol.Identity          `json:"identity"`
+	RuntimeHash        string                     `json:"runtime_hash"`
+	ConfigHash         string                     `json:"config_hash"`
+	BinaryHash         string                     `json:"binary_hash"`
+	HelperRevision     string                     `json:"helper_revision,omitempty"`
+	HelperHash         string                     `json:"helper_hash"`
+	UnitHash           string                     `json:"unit_hash"`
+	Schema             int                        `json:"schema"`
+	Mode               string                     `json:"mode"` // verification or uninstalled; never production authority.
 }
 
 type managedIntent struct {
@@ -140,6 +143,19 @@ func managedHelperName(m ManagedManifest) string {
 }
 
 func (m ManagedManifest) validate() error {
+	if m.DeliveryOwnerHash != "" && (!safefs.DigestPattern.MatchString(m.DeliveryOwnerHash) || m.RecoveryCommitHash != "" || m.SignalVerification != nil || m.SignalProfiles != nil || m.TelegramRenewalID != "") {
+		return fmt.Errorf("invalid delivery ownership binding")
+	}
+	if m.Mode == "delivery" {
+		if m.DeliveryOwnerHash == "" || m.DeliveryActivation == nil || !safefs.ValidID(m.DeliveryActivation.Operation, "n") || !safefs.DigestPattern.MatchString(m.DeliveryActivation.Hash) {
+			return fmt.Errorf("delivery mode has no activation authority")
+		}
+	} else if m.DeliveryActivation != nil {
+		return fmt.Errorf("inactive mode carries delivery activation")
+	}
+	if m.SignalProfiles != nil && (m.SignalProfiles.validate() != nil || m.SignalVerification == nil || m.SignalVerification.ServiceRoot == "") {
+		return fmt.Errorf("Signal profiles require a pinned supervised endpoint")
+	}
 	if m.SignalVerification != nil {
 		if m.SignalVerification.validate() != nil || !safefs.ValidID(m.SignalVerification.Operation, "n") || m.RecoveryCommitHash == "" {
 			return fmt.Errorf("invalid managed Signal verification binding")
@@ -166,7 +182,7 @@ func (m ManagedManifest) validate() error {
 		return fmt.Errorf("invalid recovery helper revision")
 	}
 
-	if m.Version != managedVersion || !safefs.ValidID(m.Installation, "n") || !safefs.ValidID(m.Revision, "n") || !m.Identity.Valid() || !managedPath(m.Root) || !managedPath(m.UnitDirectory) || m.Schema < 6 || (m.Mode != "verification" && m.Mode != "uninstalled") {
+	if m.Version != managedVersion || !safefs.ValidID(m.Installation, "n") || !safefs.ValidID(m.Revision, "n") || !m.Identity.Valid() || !managedPath(m.Root) || !managedPath(m.UnitDirectory) || m.Schema < 6 || (m.Mode != "verification" && m.Mode != "delivery" && m.Mode != "uninstalled") {
 		return fmt.Errorf("invalid notification installation manifest")
 	}
 	for _, h := range []string{m.RuntimeHash, m.ConfigHash, m.BinaryHash, m.HelperHash, m.UnitHash} {
@@ -194,7 +210,10 @@ func (m ManagedManifest) validate() error {
 
 func (j managedJournal) validate() error {
 	i := j.Intent
-	if i.Version != managedVersion || !safefs.ValidID(i.ID, "n") || i.After.validate() != nil || (i.Operation != "setup" && i.Operation != "update" && i.Operation != "uninstall" && i.Operation != "migrate-schema" && i.Operation != "migrate-led" && i.Operation != "adopt-recovery" && i.Operation != "renew-telegram" && i.Operation != "upgrade-helper" && i.Operation != "adopt-signal" && i.Operation != "supervise-signal") {
+	if i.Operation == "activate-delivery" || i.Operation == "deactivate-delivery" {
+		return validateDeliveryJournal(j)
+	}
+	if i.Version != managedVersion || !safefs.ValidID(i.ID, "n") || i.After.validate() != nil || (i.Operation != "setup" && i.Operation != "update" && i.Operation != "uninstall" && i.Operation != "migrate-schema" && i.Operation != "migrate-led" && i.Operation != "adopt-recovery" && i.Operation != "renew-telegram" && i.Operation != "upgrade-helper" && i.Operation != "adopt-signal" && i.Operation != "supervise-signal" && i.Operation != "migrate-signal-profiles") {
 		return fmt.Errorf("invalid installation operation")
 	}
 	if i.Supersedes != nil {
@@ -216,11 +235,24 @@ func (j managedJournal) validate() error {
 		return nil
 	}
 	if i.Before == nil {
-		if i.Operation != "setup" || i.BeforeUnit != "" || i.After.HelperHash != i.After.BinaryHash || i.After.RecoveryCommitHash != "" || i.After.TelegramRenewalID != "" || i.After.SignalVerification != nil {
+		if i.After.DeliveryOwnerHash != "" || i.After.DeliveryActivation != nil {
+			return fmt.Errorf("setup carries delivery authority")
+		}
+		if i.Operation != "setup" || i.BeforeUnit != "" || i.After.HelperHash != i.After.BinaryHash || i.After.RecoveryCommitHash != "" || i.After.TelegramRenewalID != "" || i.After.SignalVerification != nil || i.After.SignalProfiles != nil {
 			return fmt.Errorf("missing prior installation")
 		}
 	} else {
 		b := i.Before
+		if b.Mode == "delivery" || b.DeliveryOwnerHash != i.After.DeliveryOwnerHash || protocol.Hash(b.DeliveryActivation) != protocol.Hash(i.After.DeliveryActivation) {
+			return fmt.Errorf("delivery changes require explicit activation/deactivation")
+		}
+		if i.Operation == "migrate-signal-profiles" {
+			if b.Mode != "verification" || b.SignalProfiles != nil || b.SignalVerification == nil || b.SignalVerification.ServiceRoot == "" || i.After.SignalProfiles == nil || i.After.SignalProfiles.Operation != i.ID || b.RuntimeHash != i.After.RuntimeHash || b.ConfigHash != i.After.ConfigHash {
+				return fmt.Errorf("invalid managed Signal profile migration")
+			}
+		} else if protocol.Hash(b.SignalProfiles) != protocol.Hash(i.After.SignalProfiles) {
+			return fmt.Errorf("managed operation changed Signal profile binding")
+		}
 		if i.Operation != "adopt-signal" && i.Operation != "supervise-signal" && protocol.Hash(b.SignalVerification) != protocol.Hash(i.After.SignalVerification) {
 			return fmt.Errorf("managed operation changed Signal endpoint binding")
 		}
@@ -262,7 +294,7 @@ func (j managedJournal) validate() error {
 			if b.Schema != i.After.Schema || b.Mode != "verification" || b.ConfigHash == i.After.ConfigHash || i.After.HelperRevision != i.After.Revision || i.After.HelperHash != i.After.BinaryHash {
 				return fmt.Errorf("invalid managed LED mapping migration")
 			}
-		} else if i.Operation == "upgrade-helper" || i.Operation == "adopt-signal" || i.Operation == "supervise-signal" {
+		} else if i.Operation == "upgrade-helper" || i.Operation == "adopt-signal" || i.Operation == "supervise-signal" || i.Operation == "migrate-signal-profiles" {
 			if b.Mode != "verification" || b.Schema != i.After.Schema || i.After.HelperRevision != i.After.Revision || i.After.HelperHash != i.After.BinaryHash {
 				return fmt.Errorf("invalid managed helper upgrade")
 			}
@@ -316,6 +348,10 @@ func renderManagedUnit(m ManagedManifest) (string, error) {
 		return "", fmt.Errorf("verification unit template changed")
 	}
 	body = strings.Replace(body, old, next, 1)
+	if m.Mode == "delivery" {
+		body = strings.Replace(body, "Description=Verify staged deploy notification worker", "Description=Qualified deploy Telegram delivery worker", 1)
+		body = strings.Replace(body, "RestrictAddressFamilies=AF_UNIX\n", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n", 1)
+	}
 	if m.SignalVerification != nil && m.SignalVerification.ServiceRoot != "" {
 		body = strings.Replace(body, "[Unit]\n", "[Unit]\nRequires="+signalServiceUnit+"\nAfter="+signalServiceUnit+"\n", 1)
 	}

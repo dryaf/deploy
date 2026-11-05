@@ -11,7 +11,7 @@ import (
 
 // The shared-delivery ledger is additive to the backup schema. Installation of
 // this ledger does not select shared mode or transfer authority from the legacy
-// notifier. The eventual handoff must hold the notifier/ownership leases.
+// notifier. The managed handoff must hold the notifier/ownership leases.
 func installNotificationProducer(tx *sql.Tx, identity notify.Identity, p notify.Producer) error {
 	if !identity.Valid() || !p.Valid() {
 		return fmt.Errorf("invalid notification enrollment")

@@ -596,10 +596,26 @@ The private backup evaluator now builds reports from current catalogue, verifica
 run and host-probe evidence, committing incident changes and exports together.
 Healthy status expires with its supporting evidence.
 The gated report-service entry point connects evaluation, delivery and independent
-monitoring. Native units can be rendered and verified offline; production ownership
-handoff and installation are not enabled. Compatible legacy senders honor the local
+monitoring. A managed Telegram-only cutover now installs and activates these native units;
+see [backup cutover](examples/notification-worker/BACKUP_CUTOVER.md) for exact
+review, apply/resume and fenced revocation commands. Compatible legacy senders honor the local
 ownership fence, and compatible setup/recovery refuses to restore legacy delivery
 while that fence is present.
+The legacy outbox notifier now reserves every provider attempt durably before
+sending and commits the outcome together with outbox acceptance. A reservation
+left by a crash is recorded as ambiguous before any later attempt; the existing
+legacy retry/fallback policy still applies and can produce duplicates after an
+uncertain outcome. Attempted events are not automatically folded into fresh
+batches or exported as proven-unsent shared work. Inspect the retained evidence
+with `deploy backup-worker delivery-review --local --state-dir /absolute/state`.
+This command does not settle reservations, send messages or authorize cutover.
+Older helper history is explicitly incomplete. The journal retains exact bounded
+envelopes and has an 8,192-record limit (two records per attempt); exhaustion or
+lost/corrupt journal/lease evidence stops legacy sending and requires offline
+reconciliation. It has no automatic pruning or reset. Manual provider test sends
+are outside this outbox journal. Managed cutover preserves accepted history, exports explicitly reviewed unsent
+work, and holds ambiguous/incomplete outcomes without resending. Releasing held
+outcomes and restoring legacy delivery after shared revocation remain unfinished.
 The shared worker now journals delivery ownership outside SQLite and resumes exact
 interrupted transitions. Missing or conflicting ownership history fails closed;
 older ownership records migrate as explicitly incomplete historical evidence.
@@ -1574,6 +1590,34 @@ reports are retained; changed bindings and expired reports cannot count as curre
 These commands perform no live checks and grant no activation authority. See the
 [qualification evidence guide](examples/notification-worker/QUALIFICATION.md).
 
+`activation-review --local --root …` composes the current revision, qualification,
+provider bindings, retained recovery/cursor evidence and command prerequisites
+into a read-only JSON review. Worker-state checks require an inactive gateway and
+exclusive leases; the command never stops it. Managed Signal verification health
+and current Telegram handoffs are checked without provider polling. Stale outbound
+Signal pins and unfinished production transitions remain explicit blockers. All
+activation/delivery/intake/execution flags remain false. See the
+[admission review guide](examples/notification-worker/QUALIFICATION.md#activation-admission-review).
+
+`activate-delivery --local --root … --manifest-hash … --qualification-hash …`
+now journals dispatcher activation for initialized outbound-only Telegram workers.
+Exact current qualification, permanent file/SQL ownership, executable capabilities,
+loaded service/process pins and activation health guard the transition. Runtime
+rechecks admission periodically and before sending. `deactivate-delivery` returns
+to verification even after credential loss or qualification expiry; ownership
+survives update, compatible rollback and uninstall. Producer generations remain
+inactive and need separate explicit admission. Recovered/Signal, command/LED and
+legacy backup cutover remain unfinished. See the
+[delivery activation guide](examples/notification-worker/DELIVERY_ACTIVATION.md).
+
+`migrate-signal-profiles --local --spec …` derives outgoing Signal conversation
+pins from an adopted supervised endpoint and freezes a separate effective runtime.
+It retains canonical recovery bytes, queued route snapshots and Telegram evidence;
+affected routes get a new revision. Capability checks, lifecycle resume and runtime
+health bind the transition. Production activation and the Signal runtime handoff
+remain open. See the
+[profile migration guide](examples/notification-worker/SIGNAL_VERIFICATION.md#outgoing-profile-migration).
+
 Signal linking now enters the same account lease as both relays through the
 pinned container's deploy entry point. Interrupted or failed attempts block
 relinking and relay startup until explicit account-state review. Local
@@ -1625,7 +1669,8 @@ unmanaged staging upgrades are transactional, and older snapshots remain readabl
 in quarantine. The explicit managed schema 9 → 10/helper migration is available;
 other schema transitions and configuration migrations remain unfinished.
 
-Production activation, other managed schema/configuration migrations, Signal
+Recovered/Signal activation, producer cutover, command/LED admission, other
+managed schema/configuration migrations, Signal
 service/account handoff and later recovery epochs remain unfinished. Offline systemd
 validation and temporary executable/socket tests do not establish that all
 restrictions work in a real user manager.

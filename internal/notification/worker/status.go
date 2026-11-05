@@ -214,6 +214,8 @@ func (s *Store) eligibility(tx *sql.Tx, m protocol.Message, budget time.Duration
 }
 
 type Health struct {
+	DeliveryActivationHash string                        `json:"delivery_activation_hash,omitempty"`
+	SignalProfilesHash     string                        `json:"signal_profiles_hash,omitempty"`
 	SignalVerificationHash string                        `json:"signal_verification_hash,omitempty"`
 	TelegramRenewalID      string                        `json:"telegram_renewal_id,omitempty"`
 	RecoveryCommitHash     string                        `json:"recovery_commit_hash,omitempty"`
@@ -264,7 +266,7 @@ func (s *Store) clockSafe() bool {
 }
 
 func (s *Store) Health(ctx context.Context) (h Health, err error) {
-	h = Health{SignalVerificationHash: s.signalVerificationHash, Identity: s.identity, Condition: "ok", Subjects: map[string][]protocol.Subject{}, VerificationOnly: s.verificationOnly, InstallationRevision: s.installationRevision, RecoveryCommitHash: s.recoveryCommitHash, TelegramRenewalID: s.telegramRenewalID}
+	h = Health{DeliveryActivationHash: s.deliveryActivationHash, SignalProfilesHash: s.signalProfilesHash, SignalVerificationHash: s.signalVerificationHash, Identity: s.identity, Condition: "ok", Subjects: map[string][]protocol.Subject{}, VerificationOnly: s.verificationOnly, InstallationRevision: s.installationRevision, RecoveryCommitHash: s.recoveryCommitHash, TelegramRenewalID: s.telegramRenewalID}
 	active := map[string]bool{}
 	retired := map[string]*ProducerRetirement{}
 	for _, p := range s.config.Producers {

@@ -15,12 +15,18 @@ func managedSignalFixture(t *testing.T) (ManagedSpec, managedInstaller, *fakeMan
 	return managedSignalFixtureProviders(t, false)
 }
 func managedSignalFixtureProviders(t *testing.T, telegram bool) (ManagedSpec, managedInstaller, *fakeManagedServices, SignalVerificationManifest, ManagedManifest) {
+	return managedSignalFixtureConfigured(t, telegram, nil)
+}
+func managedSignalFixtureConfigured(t *testing.T, telegram bool, configure func(*Runtime), unitDirectories ...string) (ManagedSpec, managedInstaller, *fakeManagedServices, SignalVerificationManifest, ManagedManifest) {
 	t.Helper()
 	base := t.TempDir()
 	if err := os.Chmod(base, 0700); err != nil {
 		t.Fatal(err)
 	}
 	spec := ManagedSpec{Version: 1, Root: filepath.Join(base, "installation"), UnitDirectory: filepath.Join(base, "units"), BinaryFile: filepath.Join(base, "input-deploy")}
+	if len(unitDirectories) == 1 {
+		spec.UnitDirectory = unitDirectories[0]
+	}
 	if err := os.Mkdir(spec.UnitDirectory, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +49,7 @@ func managedSignalFixtureProviders(t *testing.T, telegram bool) (ManagedSpec, ma
 		v.close()
 		return nil
 	}
-	s := signalVerificationFixtureProviders(t, func(config, state string) {
+	s := signalVerificationFixtureConfigured(t, func(config, state string) {
 		spec.State = state
 		spec.RuntimeFile = config
 		if _, e := i.prepare(context.Background(), "setup", spec); e != nil {
@@ -52,7 +58,7 @@ func managedSignalFixtureProviders(t *testing.T, telegram bool) (ManagedSpec, ma
 		if e := f.Stop(context.Background()); e != nil {
 			t.Fatal(e)
 		}
-	}, telegram)
+	}, telegram, configure)
 	i.telegramProbe = nop
 	i.telegramTransport = &managedTelegramTransport{}
 	spec.RecoveryCommitHash = s.CommitHash

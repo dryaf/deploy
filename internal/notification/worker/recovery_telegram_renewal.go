@@ -181,6 +181,10 @@ func verifyRenewedTelegramHandoff(ctx context.Context, path string, c Config, co
 		return out, err
 	}
 	defer s.close()
+	return s.verifyRenewedHandoff(ctx, renewalHash, clock)
+}
+
+func (s *publishedTelegramSession) verifyRenewedHandoff(ctx context.Context, renewalHash string, clock telegramRenewalClock) (out PublishedTelegramHandoff, err error) {
 	j, err := s.openRenewal(ctx, nil, nil)
 	if err != nil {
 		return out, err
@@ -210,5 +214,5 @@ func verifyRenewedTelegramHandoff(ctx context.Context, path string, c Config, co
 	if err = ctx.Err(); err != nil {
 		return out, err
 	}
-	return PublishedTelegramHandoff{Version: 1, CommitHash: commit, Cursor: cursor, CheckedAt: at, ExpiresAt: cursor.Drain.ObservedAt.Add(telegramHandoffLifetime), RequiresActivationRecheck: true, RenewalHash: renewalHash}, nil
+	return PublishedTelegramHandoff{Version: 1, CommitHash: s.publication.CommitHash, Cursor: cursor, CheckedAt: at, ExpiresAt: cursor.Drain.ObservedAt.Add(telegramHandoffLifetime), RequiresActivationRecheck: true, RenewalHash: renewalHash}, nil
 }
