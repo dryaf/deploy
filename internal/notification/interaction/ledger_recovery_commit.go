@@ -145,7 +145,11 @@ CREATE TABLE interactive_recovery_result_floors(id TEXT PRIMARY KEY,revision INT
 		if _, err = tx.Exec("UPDATE interactive_recovery_commit SET proof=? WHERE singleton=1", string(raw)); err != nil {
 			return err
 		}
-		pin, _ := json.Marshal(ledgerIdentityPin{Producer: l.producer, Identity: summary.Challenge.Identity, RecoveryOperation: summary.Challenge.Operation, RecoveryCommit: protocol.Hash(proof)})
+		priorPin, e := readLedgerPin(tx)
+		if e != nil {
+			return e
+		}
+		pin, _ := json.Marshal(ledgerIdentityPin{Producer: l.producer, Identity: summary.Challenge.Identity, RecoveryOperation: summary.Challenge.Operation, RecoveryCommit: protocol.Hash(proof), Ancestor: priorPin.Ancestor})
 		if _, err = tx.Exec("UPDATE interactive_identity SET body=? WHERE singleton=1", string(pin)); err != nil {
 			return err
 		}

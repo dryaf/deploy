@@ -13,13 +13,15 @@ const signalServiceUnit = "deploy-notification-signal-verification.service"
 const signalServiceEndpointBinding = "managed-service.json"
 
 type SignalServiceSpec struct {
-	Version       int                         `json:"version"`
-	Operation     string                      `json:"operation"`
-	Root          string                      `json:"root"`
-	UnitDirectory string                      `json:"unit_directory"`
-	BinaryFile    string                      `json:"binary_file"`
-	BinarySHA256  string                      `json:"binary_sha256"`
-	Endpoint      SignalVerificationReference `json:"endpoint"`
+	Version       int                          `json:"version"`
+	Operation     string                       `json:"operation"`
+	Root          string                       `json:"root"`
+	UnitDirectory string                       `json:"unit_directory"`
+	BinaryFile    string                       `json:"binary_file"`
+	BinarySHA256  string                       `json:"binary_sha256"`
+	Endpoint      SignalVerificationReference  `json:"endpoint"`
+	Previous      *SignalVerificationReference `json:"previous,omitempty"`
+	Runtime       *SignalServiceRuntime        `json:"runtime,omitempty"`
 }
 type SignalServiceManifest struct {
 	Spec            SignalServiceSpec          `json:"spec"`
@@ -43,6 +45,11 @@ type signalServiceJournal struct {
 }
 
 func (s SignalServiceSpec) validate() error {
+	if s.Runtime != nil {
+		if err := s.Runtime.validate(s); err != nil {
+			return err
+		}
+	}
 	if s.Version != 1 || !safefs.ValidID(s.Operation, "n") || !safefs.DigestPattern.MatchString(s.BinarySHA256) || s.Endpoint.validate() != nil || s.Endpoint.ServiceRoot != "" {
 		return fmt.Errorf("invalid Signal service specification")
 	}
@@ -59,6 +66,12 @@ func (s SignalServiceSpec) validate() error {
 	if managedWithin(s.BinaryFile, s.Root) || managedWithin(s.BinaryFile, s.Endpoint.Root) {
 		return fmt.Errorf("stage Signal service executable outside managed roots")
 	}
+	if s.Previous != nil {
+		p := *s.Previous
+		if p.validate() != nil || p.ServiceRoot == "" || p.Root != s.Endpoint.Root || p.ManifestHash != s.Endpoint.ManifestHash || managedWithin(p.ServiceRoot, s.Root) || managedWithin(s.Root, p.ServiceRoot) || managedWithin(s.BinaryFile, p.ServiceRoot) {
+			return fmt.Errorf("Signal replacement requires a separate retained predecessor and the same endpoint")
+		}
+	}
 	return nil
 }
 func (m SignalServiceManifest) binding() signalServiceBinding {
@@ -72,6 +85,18 @@ func (m SignalServiceManifest) validate() error {
 	}
 	if err := m.Endpoint.validate(); err != nil {
 		return err
+	}
+	if m.Spec.Runtime != nil {
+		if _, err := signalProductionConfig(m); err != nil {
+			return err
+		}
+		for _, input := range []string{m.Spec.Runtime.CLIFile, m.Spec.Runtime.AccountFile} {
+			for _, root := range []string{m.Endpoint.Spec.AccountState, m.Endpoint.Spec.InboxDestination, m.Endpoint.Installation.Source, m.Endpoint.Spec.GatewayState} {
+				if managedWithin(input, root) {
+					return fmt.Errorf("Signal runtime input overlaps retained state")
+				}
+			}
+		}
 	}
 	if m.Endpoint.Spec.Root != m.Spec.Endpoint.Root || m.Endpoint.ManifestHash != m.Spec.Endpoint.ManifestHash || m.RootInode == 0 || m.OperationInode == 0 || m.RuntimeInode == 0 {
 		return fmt.Errorf("invalid Signal service authority")
@@ -102,7 +127,14 @@ func renderSignalService(m SignalServiceManifest) (string, error) {
 	if err := m.Spec.validate(); err != nil {
 		return "", err
 	}
-	return "[Unit]\nDescription=Verify recovered deploy Signal account\nBefore=" + managedUnit + "\nStartLimitIntervalSec=60\nStartLimitBurst=3\n\n[Service]\nType=exec\nExecStart=" + systemdPath(m.executable()) + " notification-worker __signal-service-serve --local --root " + systemdArgument(m.Spec.Root) + " --operation " + systemdArgument(m.Spec.Operation) + "\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=35\nKillMode=control-group\nUMask=0077\nNoNewPrivileges=true\nPrivateUsers=true\nPrivateDevices=true\nProtectSystem=strict\nProtectHome=read-only\nReadWritePaths=" + systemdPath(m.Spec.Endpoint.Root) + "\nCapabilityBoundingSet=\nAmbientCapabilities=\nRestrictAddressFamilies=AF_UNIX\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryMax=256M\nTasksMax=64\nLimitNOFILE=1024\nCPUQuota=100%\n\n[Install]\nWantedBy=default.target\n", nil
+	body := "[Unit]\nDescription=Verify recovered deploy Signal account\nBefore=" + managedUnit + "\nStartLimitIntervalSec=60\nStartLimitBurst=3\n\n[Service]\nType=exec\nExecStart=" + systemdPath(m.executable()) + " notification-worker __signal-service-serve --local --root " + systemdArgument(m.Spec.Root) + " --operation " + systemdArgument(m.Spec.Operation) + "\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=35\nKillMode=control-group\nUMask=0077\nNoNewPrivileges=true\nPrivateUsers=true\nPrivateDevices=true\nProtectSystem=strict\nProtectHome=read-only\nReadWritePaths=" + systemdPath(m.Spec.Endpoint.Root) + "\nCapabilityBoundingSet=\nAmbientCapabilities=\nRestrictAddressFamilies=AF_UNIX\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryMax=256M\nTasksMax=64\nLimitNOFILE=1024\nCPUQuota=100%\n\n[Install]\nWantedBy=default.target\n"
+	if m.Spec.Runtime != nil {
+		body = strings.Replace(body, "Description=Verify recovered deploy Signal account", "Description=Managed recovered deploy Signal account", 1)
+		body = strings.Replace(body, "ReadWritePaths="+systemdPath(m.Spec.Endpoint.Root), "ReadWritePaths="+systemdPath(m.Spec.Endpoint.Root)+" "+systemdPath(m.Endpoint.Spec.AccountState)+" "+systemdPath(m.Endpoint.Spec.InboxDestination), 1)
+		body = strings.Replace(body, "RestrictAddressFamilies=AF_UNIX", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6", 1)
+		body = strings.Replace(body, "MemoryMax=256M", "MemoryMax=512M", 1)
+	}
+	return body, nil
 }
 func (m SignalServiceManifest) commandArgs() []string {
 	return []string{m.executable(), "notification-worker", "__signal-service-serve", "--local", "--root", m.Spec.Root, "--operation", m.Spec.Operation}

@@ -179,7 +179,7 @@ func (r *recoveryReconciler) preserveOriginal(ctx context.Context) (string, erro
 	if err != nil {
 		return "", err
 	}
-	err = verifySnapshotDB(ctx, db, SnapshotManifest{Identity: r.journal.Before, Schema: m.Schema}, r.config)
+	err = verifyRetainedSnapshotSQL(ctx, r.stage, db, r.journal.originalSnapshot(m.Schema), r.config)
 	closeErr := db.Close()
 	if err != nil {
 		return "", err

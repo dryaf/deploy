@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "operation": "n-REPLACE_WITH_NEW_32_HEX_DIGITS",
+  "adoption": {
+    "spec": {},
+    "inbox": {},
+    "recovery": {}
+  },
+  "gateway_config": "/home/backup/private/gateway.json",
+  "gateway_sha256": "EXACT_GATEWAY_CONFIG_SHA256",
+  "gateway_state": "/home/backup/.local/state/deploy/notification-worker",
+  "commit_hash": "PUBLISHED_GATEWAY_COMMIT_HASH",
+  "relay_destination": "/home/backup/.local/share/deploy/installed-signal-inbox"
+}

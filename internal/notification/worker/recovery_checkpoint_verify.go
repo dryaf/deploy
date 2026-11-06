@@ -16,6 +16,8 @@ import (
 // canonical epoch. It is historical evidence, not completed publication, current
 // provider freshness, permission to execute, or permission to clear a fault.
 type RecoveryCheckpointProof struct {
+	OriginalRuntimeHash    string            `json:"original_runtime_hash,omitempty"`
+	AncestorHash           string            `json:"ancestor_hash,omitempty"`
 	Version                int               `json:"version"`
 	Operation              string            `json:"operation"`
 	Snapshot               string            `json:"snapshot"`

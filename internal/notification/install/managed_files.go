@@ -21,10 +21,22 @@ import (
 )
 
 type managedCapabilities struct {
+	SignalNextRecovery   int `json:"signal_next_recovery,omitempty"`
+	NextRecovery         int `json:"next_recovery,omitempty"`
+	LEDDelivery          int `json:"led_delivery,omitempty"`
+	SignalConversations  int `json:"signal_conversations,omitempty"`
+	SignalProduction     int `json:"signal_production,omitempty"`
+	CommandRecovery      int `json:"command_recovery,omitempty"`
+	TelegramHandoff      int `json:"telegram_handoff,omitempty"`
+	Commands             int `json:"commands,omitempty"`
+	CommandEnrollment    int `json:"command_enrollment,omitempty"`
+	CommandPolicy        int `json:"command_policy,omitempty"`
+	DeliveryRecovery     int `json:"delivery_recovery,omitempty"`
 	LegacyOwnership      int `json:"legacy_ownership,omitempty"`
 	Delivery             int `json:"delivery,omitempty"`
 	SignalProfiles       int `json:"signal_profiles,omitempty"`
 	SignalService        int `json:"signal_service,omitempty"`
+	SignalReplacement    int `json:"signal_replacement,omitempty"`
 	SignalSupervision    int `json:"signal_supervision,omitempty"`
 	SignalVerification   int `json:"signal_verification,omitempty"`
 	HelperUpgrade        int `json:"helper_upgrade,omitempty"`
@@ -166,9 +178,22 @@ func probeManagedCapability(ctx context.Context, d *safefs.Directory, name, hash
 		return err
 	}
 	if c.Version != managedVersion || c.Schema != worker.StorageSchemaVersion() ||
+		(probe == "__managed-signal-replacement-probe" && c.SignalReplacement != 1) ||
+		(probe == "__managed-signal-production-probe" && (c.SignalProduction != 1 || c.SignalReplacement != 1)) ||
+		(probe == "__managed-signal-conversations-probe" && (c.SignalConversations != 1 || c.SignalProfiles != 1)) ||
+		(probe == "__signal-verification-replacement-probe" && c.SignalReplacement != 1) ||
+		(probe == "__managed-command-recovery-probe" && c.CommandRecovery != 1) ||
+		(probe == "__managed-telegram-handoff-probe" && c.TelegramHandoff != 1) ||
+		(probe == "__managed-commands-probe" && c.Commands != 1) ||
+		(probe == "__managed-command-policy-probe" && c.CommandPolicy != 1) ||
+		(probe == "__managed-command-enrollment-probe" && c.CommandEnrollment != 1) ||
+		(probe == "__managed-led-delivery-probe" && c.LEDDelivery != 1) ||
+		(probe == "__managed-delivery-recovery-probe" && c.DeliveryRecovery != 1) ||
 		(probe == "__managed-legacy-probe" && c.LegacyOwnership != 1) ||
 		(probe == "__managed-migration-probe" && c.SchemaMigration != 1) ||
 		(probe == "__managed-led-migration-probe" && c.LEDMappingMigration != 1) ||
+		(probe == "__managed-next-recovery-probe" && c.NextRecovery != 1) ||
+		(probe == "__signal-next-recovery-probe" && c.SignalNextRecovery != 1) ||
 		(probe == "__managed-recovery-probe" && c.RecoveryVerification != 1) ||
 		(probe == "__managed-helper-upgrade-probe" && c.HelperUpgrade != 1) ||
 		(probe == "__managed-telegram-renewal-probe" && c.TelegramRenewal != 1) ||
@@ -176,6 +201,7 @@ func probeManagedCapability(ctx context.Context, d *safefs.Directory, name, hash
 		(probe == "__managed-signal-supervision-probe" && (c.SignalSupervision != 1 || c.SignalVerification != 1)) ||
 		(probe == "__managed-signal-profiles-probe" && c.SignalProfiles != 1) ||
 		(probe == "__managed-delivery-probe" && c.Delivery != 1) ||
+		(probe == "__signal-production-service-probe" && (c.SignalProduction != 1 || c.SignalService != 1 || c.SignalReplacement != 1)) ||
 		(probe == "__signal-verification-service-probe" && c.SignalService != 1) {
 		return fmt.Errorf("executable cannot safely resume this installation/schema")
 	}
@@ -202,15 +228,15 @@ func verifyManagedArtifacts(d *safefs.Directory, m ManagedManifest) (Runtime, er
 	return verifyManagedArtifactsVersion(d, m, false)
 }
 func verifyManagedArtifactsVersion(d *safefs.Directory, m ManagedManifest, migrationSource bool) (Runtime, error) {
-	return verifyManagedArtifactsPolicy(d, m, migrationSource, "")
+	return verifyManagedArtifactsPolicy(d, m, migrationSource, "", nil)
 }
 func verifyManagedArtifactsPendingTelegram(d *safefs.Directory, m ManagedManifest, id string) (Runtime, error) {
 	if id == "" || m.TelegramRenewalID != id {
 		return Runtime{}, fmt.Errorf("invalid pending Telegram operation")
 	}
-	return verifyManagedArtifactsPolicy(d, m, false, id)
+	return verifyManagedArtifactsPolicy(d, m, false, id, nil)
 }
-func verifyManagedArtifactsPolicy(d *safefs.Directory, m ManagedManifest, migrationSource bool, pendingTelegram string) (Runtime, error) {
+func verifyManagedArtifactsPolicy(d *safefs.Directory, m ManagedManifest, migrationSource bool, pendingTelegram string, successor *SignalVerificationReference) (Runtime, error) {
 	var c Runtime
 	if err := m.validate(); err != nil {
 		return c, err
@@ -235,7 +261,7 @@ func verifyManagedArtifactsPolicy(d *safefs.Directory, m ManagedManifest, migrat
 		return c, err
 	}
 	if m.DeliveryOwnerHash != "" {
-		if err := deliveryPolicy(m, c); err != nil {
+		if err := deliveryPolicyWithSuccessor(m, c, successor); err != nil {
 			return c, err
 		}
 		if protocol.Hash(deliveryOwner(m, c)) != m.DeliveryOwnerHash {
@@ -247,13 +273,18 @@ func verifyManagedArtifactsPolicy(d *safefs.Directory, m ManagedManifest, migrat
 			return c, err
 		}
 	}
+	if m.Commands != nil {
+		if _, err := readManagedCommandAdmission(d, m, c); err != nil {
+			return c, err
+		}
+	}
 	if m.SignalProfiles != nil {
-		if _, e := managedEffectiveRuntime(d, m, c); e != nil {
+		if _, e := managedEffectiveRuntimePolicy(d, m, c, successor); e != nil {
 			return c, e
 		}
 	}
 	if m.SignalVerification != nil {
-		if _, e := readManagedSignalBinding(d, m); e != nil {
+		if _, e := readManagedSignalBindingPolicy(d, m, successor); e != nil {
 			return c, e
 		}
 	}
@@ -270,7 +301,7 @@ func verifyManagedArtifactsPolicy(d *safefs.Directory, m ManagedManifest, migrat
 				return c, e
 			}
 		}
-		receipt, e := readManagedTelegramReceipt(d, m)
+		receipt, e := readManagedTelegramReceiptPolicy(d, m, successor)
 		if e != nil {
 			return c, e
 		}

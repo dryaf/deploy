@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dryaf/deploy/internal/notification/interaction"
 	"github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/safefs"
 	"golang.org/x/sys/unix"
@@ -19,8 +20,15 @@ import (
 )
 
 type Store struct {
+	runtimeLEDAPI          LEDAPI
+	runtimeLEDCheck        func(context.Context) error
+	managedCommandPolicy   *interaction.Config
+	managedCommandMode     string
+	managedCommandHash     string
+	managedCommandCheck    func(context.Context) error
 	deliveryActivationHash string
 	signalProfilesHash     string
+	signalProfileRoutes    map[string]Route
 	verificationOnly       bool // Immutable for this open instance; set before exposing any runtime API.
 	installationRevision   string
 	recoveryCommitHash     string
@@ -32,6 +40,7 @@ type Store struct {
 	ledOperationFault      func(string) error // Private durable-boundary test hook.
 	db                     *sql.DB
 	dir                    *safefs.Directory
+	runtimeEvidenceDir     *safefs.Directory // Read-only ancestor audit overlay; never a runtime authority.
 	lease                  *safefs.Lock
 	mu                     sync.Mutex // Only local state transitions, never external I/O.
 	identity               protocol.Identity
@@ -179,6 +188,9 @@ func openStore(path string, c Config, create bool, fault func(string) error, req
 	}
 	var recoveryProof RecoveryCheckpointProof
 	if recoveryCommit != "" {
+		if err = absentOriginalFile(d, nextRecoveryName(recoveryCommit)); err != nil {
+			return nil, fmt.Errorf("next recovery is prepared: %w", err)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 		s.recoveryPublication, recoveryProof, err = verifyCompletedPublication(ctx, d, s.lease, c, recoveryCommit)
@@ -389,6 +401,9 @@ func openStore(path string, c Config, create bool, fault func(string) error, req
 		return nil, err
 	}
 	if err = s.recoverAttempts(); err != nil {
+		return nil, err
+	}
+	if err = s.verifyInstallationRetirement(context.Background()); err != nil {
 		return nil, err
 	}
 	if err = s.verifyRetirements(context.Background()); err != nil {

@@ -19,14 +19,18 @@ install: build
 
 clean:
 	rm -f $(BINARY_NAME)
-.PHONY: test test-image-deploy-integration
+.PHONY: test test-all test-image-deploy-integration
 
+# Default implementation loop: regular tests and static checks, without -race.
 test:
-	go test ./...
+	go test -timeout=25m ./...
+	go vet ./...
+
+# Opt-in qualification after implementation; intentionally slower than test.
+test-all: test
 	# SQLite proof audits and crash/resume fixtures need more time under -race.
 	# Match the bounded suite timeout in test-notification-worker-isolated.sh.
 	go test -race -timeout=90m ./...
-	go vet ./...
 
 .PHONY: test-backup-foundations
 
@@ -54,7 +58,7 @@ test-deploy-vm-crash:
 	./scripts/test-deploy-vm-crash.sh
 
 # Required before publishing a deploy binary.
-release-check: test test-image-deploy-isolated test-backup-worker-isolated test-notification-worker-isolated test-deploy-vm-crash
+release-check: test-all test-image-deploy-isolated test-backup-worker-isolated test-notification-worker-isolated test-deploy-vm-crash
 
 .PHONY: backup-artifacts backup-images test-backup-worker
 backup-artifacts:

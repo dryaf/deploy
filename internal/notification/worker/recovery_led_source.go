@@ -197,7 +197,9 @@ func (r *recoveryReconciler) validateLEDSourceLimit(source recoveryLEDSource, id
 			continue
 		}
 		if err := validateLEDFaultIdentity(f.ID, f.Binding, f.Identity, r.journal.Before, source.Layout.Legacy); err != nil {
-			return err
+			if err = r.validateAncestorLEDFault(f); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

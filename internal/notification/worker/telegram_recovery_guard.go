@@ -63,7 +63,7 @@ func guardTelegramRecoveryInput(tx *sql.Tx, in interaction.Inbound) error {
 	if in.Provider != "telegram" {
 		return nil
 	}
-	proof, err := readTelegramRecoveryCursor(tx, in.Account)
+	proof, err := telegramAdmissionCursor(tx, in.Account)
 	if err != nil {
 		return err
 	}

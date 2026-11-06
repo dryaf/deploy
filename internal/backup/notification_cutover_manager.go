@@ -94,7 +94,16 @@ func (u *backupCutoverManager) Prepare(ctx context.Context, c WorkerInstallation
 	}
 	defer root.Close()
 	u.legacy = map[string]string{}
-	for _, name := range []string{"deploy-backup-notifier.container", "deploy-backup-test-telegram.container", "deploy-backup-notifier.timer", "deploy-backup-notifier.path"} {
+	names := []string{"deploy-backup-notifier.container", "deploy-backup-notifier.timer", "deploy-backup-notifier.path"}
+	for _, provider := range []string{c.Policy.Notifications.Primary, c.Policy.Notifications.Fallback} {
+		if provider != "" {
+			names = append(names, "deploy-backup-test-"+provider+".container")
+		}
+	}
+	if c.Policy.Notifications.Signal != nil {
+		names = append(names, "deploy-backup-signal.container")
+	}
+	for _, name := range names {
 		base := ".config/systemd/user/"
 		if strings.HasSuffix(name, ".container") {
 			base = ".config/containers/systemd/"
@@ -146,13 +155,28 @@ func (u *backupCutoverManager) Prepare(ctx context.Context, c WorkerInstallation
 	if err != nil || strings.TrimSpace(string(output)) != "backup-notification-cutover-v1" {
 		return fmt.Errorf("legacy image lacks notification cutover fencing")
 	}
+	if c.Policy.Notifications.Signal != nil {
+		cmd := exec.CommandContext(ctx, "/proc/self/fd/3", "backup-worker", "__notification-signal-migration-probe")
+		cmd.ExtraFiles = []*os.File{helper}
+		output, err := process.LimitedOutput(cmd, 15*time.Second, 1024)
+		if err != nil || strings.TrimSpace(string(output)) != "backup-notification-signal-migration-v1" {
+			return fmt.Errorf("backup helper lacks Signal notification migration support")
+		}
+	}
 	return nil
 }
 func (u *backupCutoverManager) StopLegacy(ctx context.Context) error {
 	if err := cutoverSystemctl(ctx, "disable", "--now", "deploy-backup-notifier.timer", "deploy-backup-notifier.path"); err != nil {
 		return err
 	}
-	if err := cutoverSystemctl(ctx, "stop", "deploy-backup-notifier.service", "deploy-backup-test-telegram.service"); err != nil {
+	services := []string{}
+	for name := range u.legacy {
+		if strings.HasSuffix(name, ".service") {
+			services = append(services, name)
+		}
+	}
+	slices.Sort(services)
+	if err := cutoverSystemctl(ctx, append([]string{"stop"}, services...)...); err != nil {
 		return err
 	}
 	for name, path := range u.legacy {
@@ -161,7 +185,8 @@ func (u *backupCutoverManager) StopLegacy(ctx context.Context) error {
 		}
 	}
 	// Completed systemd stop is insufficient if a detached old container survives.
-	for _, name := range []string{"systemd-deploy-backup-notifier", "systemd-deploy-backup-test-telegram"} {
+	for _, service := range services {
+		name := "systemd-" + strings.TrimSuffix(service, ".service")
 		out, err := cutoverCommand(ctx, "podman", "ps", "--filter", "name=^"+name+"$", "--format", "{{.Names}}")
 		if err != nil {
 			return err

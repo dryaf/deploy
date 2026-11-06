@@ -17,6 +17,7 @@ import (
 // commit; this journal survives that commit unchanged as historical evidence.
 type backupNotificationRecovery struct {
 	Version                 int
+	Ancestor                string `json:"ancestor,omitempty"`
 	Binding                 backupNotificationBinding
 	Owner                   backupNotificationOwner
 	Challenge               notify.RecoveryChallenge
@@ -35,12 +36,20 @@ type backupRecoveryPage struct {
 }
 
 func requireNotificationRecoveryInactive(tx *sql.Tx) error {
+	if err := requireNoPendingMigrationCycle(tx); err != nil {
+		return err
+	}
+	return requireNotificationRecoverySettled(tx)
+}
+
+func requireNotificationRecoverySettled(tx *sql.Tx) error {
 	var count int
 	if err := tx.QueryRow("SELECT count(*) FROM meta WHERE key IN ('notification_recovery','notification_recovery_commit_intent','notification_recovery_commit')").Scan(&count); err != nil {
 		return err
 	}
 	if count != 0 {
-		return fmt.Errorf("backup notification recovery is fenced")
+		_, err := readRecoveryActivation(tx, true)
+		return err
 	}
 	return nil
 }
@@ -83,8 +92,16 @@ func beginBackupNotificationRecoveryWith(ctx context.Context, s *backupState, ch
 			return err
 		}
 		err = backupNotificationMeta(tx, "notification_recovery", &journal)
+		ancestor := ""
+		if err == nil && journal.Challenge.Operation != ch.Operation && owner.Mode == "shared" {
+			ancestor, err = retainBackupRecoveryAncestor(tx, s, journal, fault)
+			if err != nil {
+				return err
+			}
+			err = sql.ErrNoRows
+		}
 		if err == nil {
-			if journal.Version != 1 || journal.Binding != owner.Binding || owner.Mode != "fenced" || owner.Socket != journal.Owner.Socket ||
+			if !backupRecoveryJournalValid(journal) || journal.Binding != owner.Binding || owner.Mode != "fenced" || owner.Socket != journal.Owner.Socket ||
 				journal.Challenge.Operation != ch.Operation || journal.Challenge.Identity != ch.Identity || journal.Challenge.Producer != ch.Producer {
 				return fmt.Errorf("another backup recovery is already prepared")
 			}
@@ -119,7 +136,14 @@ func beginBackupNotificationRecoveryWith(ctx context.Context, s *backupState, ch
 		if _, err = tx.Exec("CREATE TABLE backup_notification_recovery_records(seq INTEGER PRIMARY KEY,hash TEXT NOT NULL,body TEXT NOT NULL)"); err != nil {
 			return err
 		}
-		journal = backupNotificationRecovery{Version: 1, Binding: owner.Binding, Owner: owner, Challenge: ch, CapturedAt: clock.Now, Clock: clock}
+		journal = backupNotificationRecovery{Version: 1, Ancestor: ancestor, Binding: owner.Binding, Owner: owner, Challenge: ch, CapturedAt: clock.Now, Clock: clock}
+		if ancestor != "" {
+			journal.Version = 2
+		}
+		_, inherited, err := readBackupRecoveryAncestors(tx, journal, nil)
+		if err != nil {
+			return err
+		}
 		manifest := &journal.Manifest
 		manifest.ImportedReceipts = notify.Cursor{Identity: owner.Binding.Identity, Producer: owner.Binding.Producer}
 		var rawIdentity, rawProducer string
@@ -165,7 +189,7 @@ FROM notification_exports e JOIN backup_notification_transfers t ON t.event=e.id
 				return err
 			}
 			m := record.Message
-			if seq != journal.Records+1 || seq > manifest.HighestIssued || m.Sequence != seq || m.ID != id || m.Producer != producer || m.Generation != owner.Binding.Generation || m.Route != owner.Binding.Route {
+			if seq != journal.Records+1 || seq > manifest.HighestIssued || m.Sequence != seq || m.ID != id || m.Producer != producer || (m.Generation != owner.Binding.Generation && notify.Hash(inherited[m.ID]) != notify.Hash(m)) || m.Route != owner.Binding.Route {
 				return fmt.Errorf("backup recovery export sequence or binding mismatch")
 			}
 			if err = m.Validate(); err != nil {
@@ -253,6 +277,9 @@ FROM notification_exports e JOIN backup_notification_transfers t ON t.event=e.id
 }
 
 func verifyBackupRecoveryExport(tx *sql.Tx, j backupNotificationRecovery) error {
+	if _, _, err := readBackupRecoveryAncestors(tx, j, nil); err != nil {
+		return err
+	}
 	var rawIdentity, rawProducer string
 	var version int
 	var issued uint64
@@ -280,7 +307,7 @@ func verifyBackupRecoveryExport(tx *sql.Tx, j backupNotificationRecovery) error 
 	if err := tx.QueryRow("SELECT count(*),COALESCE(sum(length(CAST(body AS BLOB))),0) FROM backup_notification_recovery_records").Scan(&records, &bytes); err != nil {
 		return err
 	}
-	if j.Version != 1 || records != j.Records || records != j.Manifest.HighestIssued || bytes != j.Bytes ||
+	if !backupRecoveryJournalValid(j) || records != j.Records || records != j.Manifest.HighestIssued || bytes != j.Bytes ||
 		j.Manifest.HighestAcknowledged > j.Manifest.HighestIssued || j.Manifest.CompactedThrough != 0 || j.Manifest.OutcomeCheckpoint != "" ||
 		j.Manifest.ImportedReceipts.Identity != j.Binding.Identity || j.Manifest.ImportedReceipts.Producer != j.Binding.Producer {
 		return fmt.Errorf("backup recovery export is incomplete or inconsistent")

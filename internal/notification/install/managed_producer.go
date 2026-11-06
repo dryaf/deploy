@@ -54,6 +54,46 @@ type ManagedProducerSession interface {
 	RevokeLegacy() error
 }
 
+// ManagedRecoveryProducerSession is available only while the canonical worker
+// lease is held by the managed lifecycle coordinator.
+type ManagedRecoveryProducerSession interface {
+	RequireRecoveryCommit(context.Context, protocol.RecoveryProducerCommit) error
+}
+
+// Remigration preserves both tombstones before staging a fresh shared owner.
+type ManagedRemigrationProducerSession interface {
+	RequireRevokedPredecessors(shared, legacy string) error
+}
+
+func (s *managedProducerSession) RequireRevokedPredecessors(shared, legacy string) error {
+	if err := s.check(); err != nil {
+		return err
+	}
+	if !protocol.ValidToken(shared) || !protocol.ValidToken(legacy) || shared == legacy || shared == s.request.Generation || legacy == s.request.Generation {
+		return fmt.Errorf("remigration requires three distinct generations")
+	}
+	for _, generation := range []string{shared, legacy} {
+		status, err := s.store.OwnershipStatus(s.request.Producer, generation)
+		if err != nil {
+			return err
+		}
+		if status.State != "revoked" || status.Active {
+			return fmt.Errorf("predecessor generation is not revoked")
+		}
+	}
+	return nil
+}
+
+func (s *managedProducerSession) RequireRecoveryCommit(ctx context.Context, proof protocol.RecoveryProducerCommit) error {
+	if err := s.check(); err != nil {
+		return err
+	}
+	if proof.Cursor.Producer != s.request.Producer || proof.Generation.Generation != s.request.Generation || s.manifest.DeliveryRecovery == nil {
+		return fmt.Errorf("recovery producer request changed")
+	}
+	return s.store.RequireRecoveredProducer(ctx, proof)
+}
+
 type managedProducerSession struct {
 	request  ManagedProducerRequest
 	manifest ManagedManifest
@@ -133,8 +173,15 @@ func (s *managedProducerSession) RequireLegacyUnsent(ctx context.Context, m prot
 	if err := s.check(); err != nil {
 		return err
 	}
-	if s.request.LegacyGeneration == "" || m.Producer != s.request.Producer || m.Generation != s.request.Generation {
+	if s.request.LegacyGeneration == "" || m.Producer != s.request.Producer {
 		return fmt.Errorf("message is outside the legacy restoration scope")
+	}
+	status, err := s.store.OwnershipStatus(m.Producer, m.Generation)
+	if err != nil {
+		return err
+	}
+	if status.Active || status.State != "revoked" {
+		return fmt.Errorf("legacy export generation is not revoked")
 	}
 	return s.store.RequireLegacyUnsent(ctx, m)
 }
@@ -152,8 +199,15 @@ func (s *managedProducerSession) RequireLegacyAccepted(ctx context.Context, m pr
 	if err := s.check(); err != nil {
 		return err
 	}
-	if s.request.LegacyGeneration == "" || m.Producer != s.request.Producer || m.Generation != s.request.Generation {
+	if s.request.LegacyGeneration == "" || m.Producer != s.request.Producer {
 		return fmt.Errorf("message outside legacy scope")
+	}
+	status, err := s.store.OwnershipStatus(m.Producer, m.Generation)
+	if err != nil {
+		return err
+	}
+	if status.Active || status.State != "revoked" {
+		return fmt.Errorf("legacy export generation is not revoked")
 	}
 	return s.store.RequireLegacyAccepted(ctx, m)
 }
@@ -190,10 +244,11 @@ func (i managedInstaller) withManagedProducer(ctx context.Context, r ManagedProd
 	if err != nil {
 		return err
 	}
-	if j.Phase != "complete" || j.Intent.After.Root != r.Root || protocol.Hash(j.Intent.After) != r.ManifestHash {
+	pendingCommands := j.Phase != "complete" && (j.Intent.Operation == "enable-commands" || j.Intent.Operation == "disable-commands" || isManagedCommandPolicyOperation(j.Intent.Operation)) && r.Revoke && (r.LegacyGeneration == "" || r.LegacyRevoke)
+	if (j.Phase != "complete" && !pendingCommands) || j.Intent.After.Root != r.Root || protocol.Hash(j.Intent.After) != r.ManifestHash {
 		return fmt.Errorf("producer cutover manifest changed or lifecycle is unfinished")
 	}
-	if err = validateManagedPointer(d, j, true); err != nil {
+	if err = validateManagedPointer(d, j, !pendingCommands || managedPhase(j.Phase) >= managedPhase("published")); err != nil {
 		return err
 	}
 	m := j.Intent.After
@@ -272,7 +327,12 @@ func (i managedInstaller) withManagedProducer(ctx context.Context, r ManagedProd
 		return err
 	}
 	defer lease.Close()
-	s, err := openManagedStore(m, c)
+	var s *worker.Store
+	if pendingCommands {
+		s, err = openCanonicalManagedStore(m, c)
+	} else {
+		s, err = openManagedStore(m, c)
+	}
 	if err != nil {
 		return err
 	}
@@ -297,10 +357,10 @@ func (i managedInstaller) withManagedProducer(ctx context.Context, r ManagedProd
 				return err
 			}
 		}
-		if err := validateManagedPointer(d, j, true); err != nil {
+		if err := validateManagedPointer(d, j, !pendingCommands || managedPhase(j.Phase) >= managedPhase("published")); err != nil {
 			return err
 		}
-		if err := s.RequireManagedDeliveryOwner(deliveryOwner(m, c), m.DeliveryOwnerHash); err != nil {
+		if err := requireDeliveryOwner(s, m, c); err != nil {
 			return err
 		}
 		if !r.Revoke || r.LegacyGeneration != "" && !r.LegacyRevoke {
@@ -325,6 +385,9 @@ func (i managedInstaller) withManagedProducer(ctx context.Context, r ManagedProd
 	if err = i.boundary("producer-committed"); err != nil {
 		return err
 	}
+	if pendingCommands {
+		return nil
+	} // Leave the unfinished command operation stopped for explicit resume/cancellation.
 	// Revocation is durable even if the remaining runtime cannot restart (for
 	// example, expired qualification). Never undo the tombstone on this error.
 	if err = i.services.EnableStart(ctx); err != nil {

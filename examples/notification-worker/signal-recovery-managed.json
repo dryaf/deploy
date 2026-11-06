@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "operation": "REPLACE_WITH_ONE_RETAINED_n_ID_AND_32_LOWERCASE_HEX_DIGITS",
+  "gateway_config": "/home/notify/.config/deploy-notification/retained-runtime.json",
+  "gateway_sha256": "REPLACE_WITH_CURRENT_CANONICAL_GATEWAY_CONFIG_SHA256",
+  "gateway_state": "/home/notify/.local/state/deploy-notification",
+  "commit_hash": "REPLACE_WITH_NEXT_GATEWAY_PUBLICATION_COMMIT",
+  "relay_destination": "/home/notify/.local/state/signal-inbox-next",
+  "previous": {
+    "root": "/home/notify/.local/state/signal-verification-previous",
+    "manifest_hash": "REPLACE_WITH_PREVIOUS_ENDPOINT_MANIFEST_HASH",
+    "service_root": "/home/notify/.local/state/signal-service-previous",
+    "service_hash": "REPLACE_WITH_PREVIOUS_SERVICE_MANIFEST_HASH"
+  }
+}

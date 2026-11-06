@@ -75,7 +75,11 @@ func TestStagedTelegramRejectsMutationActivation(t *testing.T) {
 	d.Permission = "job.request"
 	c.Worker.Interaction.Workers[0].Commands["status"] = d
 	writeRuntime(t, path, c)
-	if _, err := ReadRuntime(path); err == nil {
+	parsed, err := ReadRuntime(path)
+	if err != nil {
+		t.Fatal("mutation configuration cannot be staged", err)
+	}
+	if unmanagedCommandPolicy(parsed) == nil {
 		t.Fatal("unqualified mutation enabled")
 	}
 }

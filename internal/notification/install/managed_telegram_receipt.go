@@ -42,7 +42,10 @@ func prepareManagedTelegramRequest(ctx context.Context, d *safefs.Directory, j m
 
 // Validate the installation copy without acquiring the worker lease. Completed
 // resume/status also work while the verification service holds that lease.
-func readManagedTelegramReceipt(d *safefs.Directory, m ManagedManifest) (out managedTelegramReceipt, err error) {
+func readManagedTelegramReceipt(d *safefs.Directory, m ManagedManifest) (managedTelegramReceipt, error) {
+	return readManagedTelegramReceiptPolicy(d, m, nil)
+}
+func readManagedTelegramReceiptPolicy(d *safefs.Directory, m ManagedManifest, successor *SignalVerificationReference) (out managedTelegramReceipt, err error) {
 	if m.TelegramRenewalID == "" {
 		return out, fmt.Errorf("no managed Telegram renewal")
 	}
@@ -55,7 +58,7 @@ func readManagedTelegramReceipt(d *safefs.Directory, m ManagedManifest) (out man
 		return
 	}
 	a := intent.After
-	if intent.Operation != "renew-telegram" || intent.ID != m.TelegramRenewalID || a.Installation != m.Installation || a.Root != m.Root || a.Paths.State != m.Paths.State || a.UnitDirectory != m.UnitDirectory || a.Identity != m.Identity || (a.ConfigHash != m.ConfigHash && !managedSignalConfigBridge(d, a, m)) || a.Schema != m.Schema || a.RecoveryCommitHash != m.RecoveryCommitHash {
+	if intent.Operation != "renew-telegram" || intent.ID != m.TelegramRenewalID || a.Installation != m.Installation || a.Root != m.Root || a.Paths.State != m.Paths.State || a.UnitDirectory != m.UnitDirectory || a.Identity != m.Identity || (a.ConfigHash != m.ConfigHash && !managedSignalConfigBridgePolicy(d, a, m, successor)) || a.Schema != m.Schema || a.RecoveryCommitHash != m.RecoveryCommitHash {
 		return out, fmt.Errorf("managed Telegram receipt authority changed")
 	}
 	var request managedTelegramRequest

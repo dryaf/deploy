@@ -191,7 +191,7 @@ func verifyCompletedPublication(ctx context.Context, d *safefs.Directory, lease 
 	if err = j.validate(c); err != nil {
 		return
 	}
-	if j.Phase != "quarantined" || j.CandidateHash != proof.CandidateDatabaseHash || j.Snapshot.DatabaseHash != proof.SourceDatabaseHash || j.Before != proof.Before || j.After != proof.After || j.Operation != proof.Operation || j.Snapshot.ID != proof.Snapshot {
+	if j.RuntimeHash != proof.OriginalRuntimeHash || j.Snapshot.RecoveryHash != proof.AncestorHash || j.Phase != "quarantined" || j.CandidateHash != proof.CandidateDatabaseHash || j.Snapshot.DatabaseHash != proof.SourceDatabaseHash || j.Before != proof.Before || j.After != proof.After || j.Operation != proof.Operation || j.Snapshot.ID != proof.Snapshot {
 		return p, proof, fmt.Errorf("published recovery gate changed")
 	}
 	return

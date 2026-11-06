@@ -16,6 +16,7 @@ import (
 type recoveryCrashInput struct {
 	Request  RecoveryRequest
 	Boundary string
+	Parent   *RecoveryStatus
 }
 
 func TestSignalRecoveryCrashChild(t *testing.T) {
@@ -39,7 +40,11 @@ func TestSignalRecoveryCrashChild(t *testing.T) {
 		}
 		return nil
 	}}
-	_, err = c.run(context.Background(), path, input.Request, svc, apply, verify)
+	if input.Parent == nil {
+		_, err = c.run(context.Background(), path, input.Request, svc, apply, verify)
+	} else {
+		_, err = c.runNext(context.Background(), path, *input.Parent, input.Request, &nextRecoveryServiceFixture{recoveryServiceFixture: svc}, apply, verify)
+	}
 	t.Fatal("missing SIGKILL", err)
 }
 func TestSignalRecoverySIGKILL(t *testing.T) {
@@ -49,7 +54,7 @@ func TestSignalRecoverySIGKILL(t *testing.T) {
 			if err := svc.Stop(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			raw, err := json.Marshal(recoveryCrashInput{req, point})
+			raw, err := json.Marshal(recoveryCrashInput{Request: req, Boundary: point})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -103,5 +108,43 @@ func TestSignalRecoveryInheritedChildLease(t *testing.T) {
 	done, err := FenceRecovery(context.Background(), path, req, svc, apply, verify)
 	if err != nil || done.Phase != "complete" {
 		t.Fatal(done, err)
+	}
+}
+
+func TestSignalNextRecoverySIGKILL(t *testing.T) {
+	for _, point := range []string{"next_recovery_intent", "next_recovery_root", "next_recovery_retire_" + recoveryCompleteFile, "next_recovery_retire_" + recoveryResultFile, "next_recovery_retire_" + recoveryFenceFile, "recovery_fence", "recovery_result", "recovery_complete"} {
+		t.Run(point, func(t *testing.T) {
+			path, parent, svc := completedRecoveryFixture(t)
+			req := nextRequest(t, parent)
+			if err := svc.Stop(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(recoveryCrashInput{Request: req, Boundary: point, Parent: &parent})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(filepath.Join(path, "crash-input.json"), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestSignalRecoveryCrashChild$", "-test.timeout=15s")
+			cmd.Env = append(os.Environ(), "DEPLOY_SIGNAL_RECOVERY_CRASH="+path)
+			output, err := process.LimitedOutput(cmd, 20*time.Second, 8192)
+			if err == nil || cmd.ProcessState == nil {
+				t.Fatal("child did not crash", err, string(output))
+			}
+			status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Fatal("unexpected exit", string(output))
+			}
+			requireRuntime(t, path, false)
+			apply, verify, calls := recoveryCallbacks(t, path)
+			done, err := FenceNextRecovery(context.Background(), path, parent, req, svc, apply, verify)
+			if err != nil || done.RuntimeAllowed || done.Phase != "complete" {
+				t.Fatal(done, err)
+			}
+			if (point == "recovery_result" || point == "recovery_complete") && *calls != 0 {
+				t.Fatal("completed effect repeated")
+			}
+		})
 	}
 }

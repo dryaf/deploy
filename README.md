@@ -4,8 +4,14 @@ Implementation status and remaining acceptance gates are tracked in
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md), with the original acceptance
 criteria mapped in [ACCEPTANCE_MATRIX.md](ACCEPTANCE_MATRIX.md). The initialized Telegram
 backup profile supports [reviewed held-outcome release and canonical legacy
-rollback](examples/notification-worker/BACKUP_CUTOVER.md). Broader recovered/Signal,
-command/LED activation and external qualification remain incomplete.
+rollback and remigration](examples/notification-worker/BACKUP_CUTOVER.md).
+Managed [delivery](examples/notification-worker/DELIVERY_ACTIVATION.md),
+[commands](examples/notification-worker/COMMAND_ACTIVATION.md),
+[native Signal](examples/notification-worker/SIGNAL_PRODUCTION.md) and
+[aggregate LED recovery](examples/notification-worker/LED_RECOVERY_RUNTIME.md)
+now have explicit supported workflows. Later complete managed recovery epochs,
+legacy backup Signal adoption and some configuration migrations remain incomplete.
+Live provider/hardware qualification is deferred to the operator.
 
 **Deploy Go applications and existing registry images to a Linux VPS with rootless Podman and Quadlet.**
 
@@ -432,6 +438,11 @@ and PAM application integration follow outside this tool change.
 make test
 ```
 
+Use `make test` during implementation: it runs regular tests and `go vet`, without
+the race detector. Run `make test-all` explicitly after implementation to add the
+slower race suite; investigate and refine any race findings at that stage. Isolated
+integration and release checks remain separate, explicit qualification steps.
+
 The normal suite executes the transaction shell script with fake Podman/systemd
 commands and real temporary files, including file restoration, failed rollback,
 read-only directories, write/flush failures, target lock contention, and
@@ -592,7 +603,12 @@ vulnerability/uptime producer integration, including migration and qualification
 The [interactive command plan](INTERACTIVE_WORKER_PLAN.md) tracks the partial
 implementation of durable worker commands, scoped permissions, confirmation,
 native/opaque notification references, gateway discovery and paginated queries,
-and staged Telegram/Signal intake. Backup has read-only command staging and locally
+and staged Telegram/Signal intake. Managed installations support explicit command
+admission, disable/drain and durable permission narrowing; see
+[command activation](examples/notification-worker/COMMAND_ACTIVATION.md).
+Narrowing survives restart and supported first recovery; permission expansion and
+configuration/enrollment migration remain incomplete.
+Backup has read-only command staging and locally
 tested reminder handlers. Its private shared exporter now preserves original reply
 context, maps batch/daily/catch-up obligations, persists cancellation intent, and
 replays pinned submissions and receipt acknowledgements through the local gateway.
@@ -622,7 +638,9 @@ lost/corrupt journal/lease evidence stops legacy sending and requires offline
 reconciliation. It has no automatic pruning or reset. Manual provider test sends
 are outside this outbox journal. Managed cutover preserves accepted history, exports explicitly reviewed unsent
 work, and holds ambiguous/incomplete outcomes without resending. Releasing held
-outcomes and restoring legacy delivery after shared revocation remain unfinished.
+outcomes, restoring legacy delivery after shared revocation and returning to a
+fresh shared generation use the explicit initialized Telegram workflows in
+[BACKUP_CUTOVER.md](examples/notification-worker/BACKUP_CUTOVER.md).
 The shared worker now journals delivery ownership outside SQLite and resumes exact
 interrupted transitions. Missing or conflicting ownership history fails closed;
 older ownership records migrate as explicitly incomplete historical evidence.
@@ -658,9 +676,10 @@ the same command resumes interruption or lost output only when its full verified
 manifest matches the prepared operation. It refuses a running worker, missing
 state, changed snapshot or configuration. Global `--dry-run` checks arguments and
 configuration without opening either state or snapshot. Preparation never starts
-services, sends messages or publishes the candidate. Final recovered-state
-publication and managed lifecycle recovery remain unfinished; ordinary startup
-will continue to refuse this quarantined installation.
+services, sends messages or publishes the candidate. Continue the explicit
+publication/adoption workflow below; ordinary startup refuses this quarantine.
+An enrolled managed installation uses the separately pinned preparation described
+in the [delivery guide](examples/notification-worker/DELIVERY_ACTIVATION.md).
 
 Review the durable recovery stages without advancing them:
 
@@ -827,9 +846,10 @@ publication and historical artifacts together. Independent checkpoint/image
 verification remains available after the swap.
 
 `canonical_installed: true` reports the completed database transition. Normal
-startup remains blocked, and delivery/execution flags remain false. Managed
-activation, current service/provider handoffs and subsequent recovery epochs are
-still unfinished; publication does not start a service or enable notifications.
+startup remains blocked, and delivery/execution flags remain false. Publication
+does not start a service or enable notifications. First-recovery admission follows
+explicit adoption, provider handoff and fresh qualification; later complete
+managed recovery epochs remain unfinished.
 
 An existing managed verification installation can now adopt the published identity:
 
@@ -891,9 +911,10 @@ no service and does not rewrite the gateway or relay service configuration. The
 returned `installation_hash` pins the completed installation. The Go APIs
 `VerifyInstalledSignalRuntime` and `OpenInstalledInboxVerification` inspect it;
 the verification instance refuses receiving, listing and acknowledging messages.
-An ordinary relay start remains blocked at both paths. Managed Signal account
-handoff, endpoint cutover and production activation still need implementation.
-Do not remove the fences to enable a receiver manually.
+An ordinary relay start remains blocked at both paths. The separate
+[native Signal production workflow](examples/notification-worker/SIGNAL_PRODUCTION.md)
+performs supported managed handoff and endpoint admission. Do not remove fences
+to enable a receiver manually.
 
 Inspect the original Telegram handoff after gateway publication with:
 
@@ -957,8 +978,9 @@ After renewal, only the verification service is restarted. It independently
 audits the exact completion while holding its lifetime worker lease. Health
 includes `telegram_renewal_id`; updates, compatible binary rollbacks and uninstall
 preserve that pin. Verification restart remains possible after observation expiry,
-but cannot renew freshness or admit commands. Later production activation still
-needs a fresh check and cutoff installation.
+but cannot renew freshness or admit commands. Production activation consumes fresh
+checks and cutoff evidence through the separate
+[command handoff](examples/notification-worker/COMMAND_ACTIVATION.md#recovered-telegram-intake).
 
 Renewal keeps the original publication, canonical inbox, request mappings and
 operational offset unchanged. It stores sanitized provider pages in a separate
@@ -987,9 +1009,9 @@ even if the successor is interrupted. Retain the root
 `telegram-renewal-ACCOUNT_HASH.json` and the full
 `recovery/OPERATION/telegram-renewals/ACCOUNT_HASH/` archive together with the managed
 request/receipt. The managed local Telegram shutdown and verification restart are
-implemented. Signal service handoff, installing the renewed Telegram cutoff into
-production admission and production activation remain unfinished; renewal itself
-grants no intake authority.
+implemented. Installing the renewed cutoff into production admission is a
+separate explicit command handoff; renewal itself grants no intake authority.
+Signal uses its separate native production service workflow.
 
 The producer reconciliation stage now preserves retained acceptance,
 reconstructs missing payloads as ambiguous and records unknown compacted history.
@@ -1016,7 +1038,10 @@ An internal Telegram recovery polling stage can then quarantine returned updates
 persisting pages and a separate progress journal before acknowledging them.
 Restart begins at offset zero; damaged or rolled-back progress blocks further
 polling. An empty response records a dated observation and keeps intake disabled.
-This stage is tested with fake providers and is not wired to a production CLI.
+The explicit `recovery-telegram-drain` CLI requires an exact recovery operation
+and acknowledgement that other receivers are stopped. Tests use fake providers.
+See [Telegram recovery intake preparation](examples/notification-worker/TELEGRAM_RECOVERY_INTAKE.md)
+for pinned history import, drain, request sealing and cursor commit.
 Signal relay snapshots and restore quarantine are also available as internal APIs.
 Restore preserves live evidence, stages a separate candidate under a new epoch,
 and fences normal relay operations. Interrupted restores resume with the same epoch;
@@ -1098,13 +1123,13 @@ visible; uncertain commands keep their admission fence and surviving revision
 floors. Original receipts remain historical, and installation creates no new
 receipts, replies, confirmations or grants. Its journal supports crash and
 lost-response replay. Ordinary command execution/result APIs reject historical IDs.
-A separate internal step can seal the recovered request inventory after available
+The explicit `recovery-requests-seal` step seals the recovered request inventory after available
 provider and command mappings have been imported. Known requests keep their original
 identities, targets and deadlines. Unmapped inputs are durably blocked from becoming
 commands, queries or confirmation replies; fresh authorization requires a new request
 identity. Signal inventory requires retained relay identities, including for redacted
 inbox rows. Sealing does not prove complete provider history or enable intake.
-Telegram recovery can now internally commit a cursor handoff bound to the completed
+`recovery-telegram-cursor` commits a cursor handoff bound to the completed
 drain and sealed request inventory. Polling restarts at zero; unmapped input at or
 before the drain observation plus five seconds is rejected without creating commands
 or replies. Commit and activation validation require the same boot, consistent clocks
@@ -1135,15 +1160,15 @@ and cursor staging now preserve multiple missing ranges across subsequent relay
 recoveries. Version-3 snapshots record their separate historical event counts.
 Gateway request sealing verifies surviving input against the immutable snapshot
 when the relay has lost it; opaque rows remain explicitly missing evidence.
-The worker remains quarantined. Managed receiver shutdown and fresh activation checks,
-LED ownership reconciliation and managed installation/activation
-remain pending; no restore command is enabled.
+The worker remains quarantined until explicit publication and adoption. Managed
+receiver handoffs and fresh qualification precede the separate supported delivery
+and command activation workflows; cursor staging alone cannot activate them.
 
 A synthetic vulnerability specialist tests risk decisions,
 rescan jobs and health publication through the same interfaces. Shared backup
-notification migration and report-service installation, a real vulnerability scanner,
-recovery tooling and production activation remain
-unfinished. See the interactive plan for staging commands and the
+notification migration/report-service installation and first-recovery activation
+have explicit workflows linked above. A real vulnerability scanner remains future
+work. See the interactive plan for staging commands and the
 [backup command configuration example](examples/notification-worker/backup-commands.json).
 Local tests do not establish live provider or ARM64 qualification.
 
@@ -1235,8 +1260,8 @@ deploy notification-worker recovery-led-review --local \
 ```
 
 This requires a configured absolute `led_socket`, the existing recovery quarantine,
-and an available worker lease. It does not create a quarantine or stop services;
-there is still no operator restore/activation command. It compares the restored
+and an available worker lease. It does not create a quarantine, stop services or
+perform publication/activation. It compares the restored
 reconciliation database, the preserved original database (including newer faults),
 and read-only daemon observations. JSON output distinguishes snapshot-only and
 post-snapshot faults, cleanup intents, mapping revisions, unrecognized states and
@@ -1378,8 +1403,8 @@ exchange returns the same historical summary without refreshing its evidence.
 A different recovery operation is rejected before the producer is fenced.
 Neither provider delivery nor command recovery, ownership handoff, active cursor
 publication or service startup is performed. Prepare quarantine first with
-`notification-worker recovery-prepare`. Final recovered-state publication and
-managed service orchestration remain unfinished.
+`notification-worker recovery-prepare`, then finish explicit publication and
+[recovered reporting activation](examples/notification-worker/BACKUP_RECOVERY_ACTIVATION.md).
 
 After reviewing that completion, perform the local producer handoff:
 
@@ -1496,19 +1521,20 @@ Uncertain/not-sent outcomes cannot be imported; an ordinary registry absence is
 not a cleanup receipt. Missing or changed history fails closed. Newer fault IDs
 remain fenced, and the full original union stays archived. Imports make no domain
 or healthy-status claim and do not release quarantine. Worker-wide aggregate
-cleanup and managed producer cleanup orchestration remain unfinished.
+cleanup uses the separate [runtime procedure](examples/notification-worker/LED_RECOVERY_RUNTIME.md)
+after publication and fresh managed admission.
 
 The mutation path passed seven SIGKILL cases and integration against the pinned
 pi-status-led daemon's mock hardware driver. Physical LED testing remains deferred.
-Managed LED-binding migration in verification mode is described below. Production
-activation, UID/socket changes and runtime-wide fault reconciliation remain
-unfinished. Runtime ownership primitives now verify inherited faults against the
+Managed LED-binding migration in verification mode is described below. Qualified
+LED delivery and explicit aggregate recovery are supported; general UID/socket
+changes remain unfinished. Runtime ownership primitives verify inherited faults against the
 committed adoption/preservation/inventory chain and report `inherited_led_faults`
 per binding. Such faults keep output critical or unknown, cannot be reused as new
 incarnations, and are excluded from normal Set/Clear and cleanup selection.
-Missing or changed proof fails closed. These primitives are tested using a fenced
-candidate; worker-wide reconciliation and final recovered-state publication are
-still required before a recovered service can run.
+Missing or changed proof fails closed. Tests cover both fenced candidates and
+published recovered delivery, including explicit cleanup against the pinned daemon
+with mock hardware. No physical-output qualification is implied.
 
 A staged worker can also run in explicit verification mode:
 
@@ -1607,22 +1633,24 @@ activation/delivery/intake/execution flags remain false. See the
 [admission review guide](examples/notification-worker/QUALIFICATION.md#activation-admission-review).
 
 `activate-delivery --local --root … --manifest-hash … --qualification-hash …`
-now journals dispatcher activation for initialized outbound-only Telegram workers.
+journals qualified managed dispatcher/LED activation for the supported Telegram
+and recovered native Signal profiles.
 Exact current qualification, permanent file/SQL ownership, executable capabilities,
 loaded service/process pins and activation health guard the transition. Runtime
 rechecks admission periodically and before sending. `deactivate-delivery` returns
 to verification even after credential loss or qualification expiry; ownership
 survives update, compatible rollback and uninstall. Producer generations remain
-inactive and need separate explicit admission. Recovered/Signal, command/LED and
-legacy backup cutover remain unfinished. See the
+inactive and need separate explicit admission. Commands also require separate
+read/all admission. See the
 [delivery activation guide](examples/notification-worker/DELIVERY_ACTIVATION.md).
 
 `migrate-signal-profiles --local --spec …` derives outgoing Signal conversation
 pins from an adopted supervised endpoint and freezes a separate effective runtime.
 It retains canonical recovery bytes, queued route snapshots and Telegram evidence;
 affected routes get a new revision. Capability checks, lifecycle resume and runtime
-health bind the transition. Production activation and the Signal runtime handoff
-remain open. See the
+health bind the transition. Legacy fixed profiles require an explicit mapping to
+an existing enrolled conversation; native production activation remains a separate
+qualified transition. See the
 [profile migration guide](examples/notification-worker/SIGNAL_VERIFICATION.md#outgoing-profile-migration).
 
 Signal linking now enters the same account lease as both relays through the
@@ -1723,8 +1751,9 @@ process budgets, and distinguish unsupported validator features from integrity
 findings. These checks are not a filesystem/network sandbox or an application
 restore test. The dedicated worker validator still needs platform qualification.
 
-Run `make test-backup-worker` for the worker and foundation checks, or `make test` for the
-complete unit/process suite, race detector, and vet. In a workspace with a
+Run `make test` for the complete regular unit/process suite and vet during
+implementation. `make test-all` adds race detection after implementation;
+`make test-backup-worker` is a narrower, explicit worker/foundation race check. In a workspace with a
 read-only home cache, set `GOCACHE` and `XDG_CACHE_HOME` to writable temporary
 directories. `make test-backup-worker-isolated` checks staged SSH trust isolation,
 automatic update recovery (including trust files) after SIGKILL, and the
@@ -1895,13 +1924,18 @@ because their transactions and locking rules are coordinated. Tests live beside
 the code they exercise and are grouped by feature. Embedded shell/Python assets
 live in the package that embeds them.
 
-`make build` builds `./cmd/deploy`. `make test` runs every package's unit tests,
-race tests and vet checks. The isolated integration scripts build their tagged
+`make build` builds `./cmd/deploy`. `make test` runs every package's regular tests
+and vet checks. `make test-all` runs those checks and then the race suite. Race
+checking is deliberately opt-in during development, not an every-iteration gate.
+Regular tests have a 25-minute package limit for the retained-history/crash fixtures;
+this is an upper bound, not a forced wait, and normal Go test caching remains
+enabled. The isolated integration scripts build their tagged
 test binaries from `internal/deployment` or `internal/backup`.
 
 ### Release verification
 
-`make release-check` requires the normal/race/vet suite, both isolated rootless
+`make release-check` depends on `test-all` and requires the normal/race/vet suite,
+both isolated rootless
 Podman suites (image deployment and backup worker recovery), and the VM interruption
 matrix. `make test-backup-worker-isolated` runs the backup suite separately.
 There is no checked-in CI workflow; CI and branch/release protections must be

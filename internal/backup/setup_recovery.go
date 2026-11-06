@@ -167,7 +167,7 @@ func restoreWorkerHelper(root *safefs.Directory, journal *WorkerSetupJournal) er
 }
 
 func rollbackWorkerInstallation(root, stateRoot *safefs.Directory, journal *WorkerSetupJournal, state *backupState, a *backupArchive) error {
-	if err := requireLegacyNotificationOwner(state); err != nil {
+	if err := requireWorkerSetupOwner(state, journal); err != nil {
 		return err
 	}
 	if err := rollbackWorkerFiles(root, journal); err != nil {
@@ -203,7 +203,7 @@ func rollbackWorkerInstallation(root, stateRoot *safefs.Directory, journal *Work
 }
 
 func finishWorkerRollback(stateRoot *safefs.Directory, journal *WorkerSetupJournal, state *backupState) error {
-	if err := requireLegacyNotificationOwner(state); err != nil {
+	if err := requireWorkerSetupOwner(state, journal); err != nil {
 		return err
 	}
 	if _, err := process.LimitedOutput(exec.Command("systemctl", "--user", "daemon-reload"), 15*time.Second, 4096); err != nil {
@@ -211,7 +211,7 @@ func finishWorkerRollback(stateRoot *safefs.Directory, journal *WorkerSetupJourn
 	}
 	for _, unit := range journal.EnabledUnits {
 		allowed := false
-		for _, owned := range workerActivationUnits {
+		for _, owned := range workerActivationUnitsFor(journal.Shared != nil) {
 			allowed = allowed || unit == owned
 		}
 		if !allowed {
@@ -244,7 +244,7 @@ func finishWorkerRollback(stateRoot *safefs.Directory, journal *WorkerSetupJourn
 }
 
 func recoverWorkerSetupLocked(home string, root, stateRoot *safefs.Directory, journal *WorkerSetupJournal) error {
-	if err := requireLegacyWorkerSetup(home, journal); err != nil {
+	if err := requireWorkerSetupOwnership(home, journal); err != nil {
 		return err
 	}
 	if !journal.RecoveryNeeded {
@@ -253,11 +253,11 @@ func recoverWorkerSetupLocked(home string, root, stateRoot *safefs.Directory, jo
 		}
 		return nil
 	}
-	if journal.Schema != 1 || !config.WorkerAbsolutePath(journal.ArchivePath) {
+	if ((journal.Schema != 1 || journal.Shared != nil) && (journal.Schema != 2 || journal.Shared == nil)) || !config.WorkerAbsolutePath(journal.ArchivePath) {
 		return fmt.Errorf("invalid recovery journal")
 	}
 	if journal.Updating {
-		if err := stopWorkerUnits(); err != nil {
+		if err := stopWorkerUnitsFor(journal.Shared != nil); err != nil {
 			return err
 		}
 	}
@@ -313,7 +313,7 @@ func recoverWorkerSetup(home string) error {
 }
 
 func prepareWorkerRecovery(root, stateRoot *safefs.Directory, journal *WorkerSetupJournal, state *backupState, a *backupArchive) error {
-	if err := requireLegacyNotificationOwner(state); err != nil {
+	if err := requireWorkerSetupOwner(state, journal); err != nil {
 		return err
 	}
 	journal.ArchivePath = a.dir.File().Name()
@@ -336,7 +336,7 @@ func prepareWorkerRecovery(root, stateRoot *safefs.Directory, journal *WorkerSet
 			return err
 		}
 		journal.BeforeHelper = &helper
-		journal.EnabledUnits = enabledWorkerUnits()
+		journal.EnabledUnits = enabledWorkerUnitsFor(journal.Shared != nil)
 	}
 	source, err := os.Open("/proc/self/exe")
 	if err != nil {

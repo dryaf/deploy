@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dryaf/deploy/internal/notification/protocol"
+	"github.com/dryaf/deploy/internal/notification/worker"
 	"github.com/dryaf/deploy/internal/safefs"
 )
 
@@ -18,6 +19,12 @@ func managedSignalFixtureProviders(t *testing.T, telegram bool) (ManagedSpec, ma
 	return managedSignalFixtureConfigured(t, telegram, nil)
 }
 func managedSignalFixtureConfigured(t *testing.T, telegram bool, configure func(*Runtime), unitDirectories ...string) (ManagedSpec, managedInstaller, *fakeManagedServices, SignalVerificationManifest, ManagedManifest) {
+	return managedSignalFixtureWithProducerRecovery(t, telegram, configure, nil, unitDirectories...)
+}
+func managedSignalFixtureWithProducerRecovery(t *testing.T, telegram bool, configure func(*Runtime), producerRecovery signalProducerRecoveryFixture, unitDirectories ...string) (ManagedSpec, managedInstaller, *fakeManagedServices, SignalVerificationManifest, ManagedManifest) {
+	return managedSignalFixtureWithProducerRecoveryBootstrap(t, telegram, configure, producerRecovery, false, unitDirectories...)
+}
+func managedSignalFixtureWithProducerRecoveryBootstrap(t *testing.T, telegram bool, configure func(*Runtime), producerRecovery signalProducerRecoveryFixture, bootstrap bool, unitDirectories ...string) (ManagedSpec, managedInstaller, *fakeManagedServices, SignalVerificationManifest, ManagedManifest) {
 	t.Helper()
 	base := t.TempDir()
 	if err := os.Chmod(base, 0700); err != nil {
@@ -49,7 +56,7 @@ func managedSignalFixtureConfigured(t *testing.T, telegram bool, configure func(
 		v.close()
 		return nil
 	}
-	s := signalVerificationFixtureConfigured(t, func(config, state string) {
+	s := signalVerificationFixtureConfiguredBootstrap(t, func(config, state string) {
 		spec.State = state
 		spec.RuntimeFile = config
 		if _, e := i.prepare(context.Background(), "setup", spec); e != nil {
@@ -58,7 +65,11 @@ func managedSignalFixtureConfigured(t *testing.T, telegram bool, configure func(
 		if e := f.Stop(context.Background()); e != nil {
 			t.Fatal(e)
 		}
-	}, telegram, configure)
+	}, telegram, configure, bootstrap, func(ctx context.Context, path string, c worker.Config, before protocol.Identity) {
+		if producerRecovery != nil {
+			producerRecovery(ctx, path, c, before)
+		}
+	})
 	i.telegramProbe = nop
 	i.telegramTransport = &managedTelegramTransport{}
 	spec.RecoveryCommitHash = s.CommitHash

@@ -11,9 +11,85 @@ now adopts the staged configuration into an existing managed gateway verificatio
 service. Use that explicit transition instead of replacing configuration files
 manually. `signal-service-setup` now installs a separate native user service for
 the verifier. `supervise-signal` upgrades a previously adopted foreground endpoint
-to that service without changing gateway configuration. All remain verification-only.
+to that service without changing gateway configuration. Specifications without a
+`runtime` field remain verification-only. Explicit native production enrollment
+and subsequent gateway admission are described in [SIGNAL_PRODUCTION.md](SIGNAL_PRODUCTION.md).
+
+For the legacy backup relay without an interactive inbox, first use
+[legacy account adoption](LEGACY_SIGNAL_ADOPTION.md). Its completed handoff produces
+the same installed inbox/account proofs used below.
 
 ## Preparation
+
+Before publishing the quarantined gateway, import its stopped Signal inbox with
+the exact operation from `recovery-prepare`. These commands do not contact Signal:
+
+```sh
+deploy notification-worker recovery-signal-history --local --config /absolute/private/runtime.json --state-dir /absolute/gateway --operation n-REPLACE --relay-state /absolute/inbox --receivers-stopped
+```
+
+For an installed recovered inbox, also pass `--installation-hash` with its exact
+`installation_hash`. For a separately prepared inbox restore, use `--restored`
+instead. Complete all available provider and specialist command reconciliation,
+then run `recovery-requests-seal --reconciliation-complete` with the same gateway
+configuration, state and operation. Finally run `recovery-signal-cursor` with the
+same arguments as `recovery-signal-history`. This retains the source handoff and
+installs the quarantined gateway cursor before review/checkpoint/publication.
+Wrong operation pins are rejected before opening the relay. Dry runs validate
+arguments and configuration without opening gateway, inbox or account state.
+
+## Subsequent managed recovery
+
+Later epochs retain the original account, service, inbox, gateway and profile
+proofs. Use a new inbox destination, endpoint directory and service installation
+for each epoch. Keep the previous directories and their removal records.
+
+1. Disable commands and deactivate enrolled producers and gateway delivery.
+   Stop the gateway and take a `managed-snapshot` with the current manifest pin.
+   Run `recovery-prepare` with that snapshot's ID and database digest. Preparation
+   checks the installed gateway/helper and Signal service capabilities before
+   recording the next recovery intent.
+2. Complete `signal-service-uninstall --local --root OLD_SERVICE_ROOT`. This
+   drains the account/child leases and retains the service's removal evidence.
+   A stopped but still installed service is insufficient for the next handoff.
+3. Run `recovery-signal-history` against the previous installed inbox, including
+   its `--installation-hash`. Complete producer, command and LED reconciliation,
+   seal requests, and run `recovery-signal-cursor`. Review, checkpoint, verify and
+   publish the gateway recovery using its new operation and resulting hashes.
+4. Fill [signal-recovery-managed.json](signal-recovery-managed.json) with the
+   previous endpoint/service reference, the unchanged canonical configuration
+   bytes used for this recovery, the new gateway publication hash and a new empty
+   `0700` inbox destination. Run:
+
+   ```sh
+   deploy notification-worker recovery-signal-managed-handoff --local --spec /absolute/private/next-signal.json
+   ```
+
+   The result contains the new account status and installed inbox proof. Exact
+   retries verify the retained result. This command does not start a receiver.
+5. Prepare a new verification endpoint using that result, its inbox destination
+   and the same original gateway configuration. Install a new Signal service
+   with `signal-service-setup`, retaining the qualified CLI/account inputs and
+   using the new endpoint. This new endpoint has its own service binding; the
+   account recovery chain retains the removed predecessor.
+6. Run `adopt-recovery` on the gateway with the new publication hash, the new
+   endpoint's staged gateway JSON, and `signal_verification` naming both the new
+   endpoint and new service hashes. This operation adopts the endpoint and rebases
+   previously enrolled outgoing Signal profiles together. Conversation enrollment
+   is preserved; affected routes receive new revisions, so old queued work cannot
+   silently acquire a new transport. Do not perform a separate `adopt-signal` for
+   this transition.
+7. Record fresh qualification for the new installation, activate delivery, then
+   explicitly activate the intended producer generations and command mode.
+   Recovery and endpoint installation alone grant none of those admissions.
+
+Use `resume --local --root GATEWAY_ROOT` for an interrupted gateway adoption and
+`signal-service-resume` for an interrupted service installation. Do not recreate
+missing ancestor files from current configuration. Missing proofs, old endpoint
+references and rolled-back account heads are refused. These procedures have
+offline fixture coverage; live provider and host qualification remain separate.
+
+## Endpoint enrollment
 
 Stop the gateway and finish its published recovery and the account/inbox handoff
 first. Retain the original source inbox, all account recovery records, the gateway
@@ -235,19 +311,70 @@ Verifier uninstall writes a durable removal fence, stops and drains the owned
 process, disables and removes only its exact unit, then reloads and verifies
 absence. `signal-service-resume` finishes an interrupted removal. The executable,
 manifest history, endpoint binding and recovery records remain; removal grants
-neither foreground fallback nor account/intake permission. Do not remove the
-verifier first: an installed gateway requires the verifier's completed service
-publication for lifecycle operations. After both are uninstalled, the retired
+neither foreground fallback nor account/intake permission. For permanent removal, uninstall the gateway first. For executable replacement,
+stop the gateway and follow the explicit replacement procedure below; ordinary
+update/resume cannot adopt a changed verifier binding. After both are uninstalled, the retired
 gateway can still validate retained removal evidence and repeat its completed
 uninstall; that evidence never authorizes a running gateway.
 
-This first service version is immutable: binary upgrades, re-enrollment after
-removal and later recovery-epoch replacement need explicit future transitions.
-It supervises a native verifier even if the original account relay used Podman.
+Each service installation is immutable. Binary replacement and re-enrollment
+use a fresh root through the procedure below; later recovery-epoch replacement
+remains unsupported. The service supervises a native verifier even if the original
+account relay used Podman.
 It does not create a new receiving container. `signal-service-status` remains the
 older account-relay status command; use `signal-service-inspect` for this separate
 verification installation. Setup dry-run validates inputs only and creates no
 files, leases, sockets or manager activity.
+
+## Verifier executable replacement and re-enrollment
+
+Stop the gateway first. Remove the current verifier using
+`signal-service-uninstall`, and finish any interrupted removal with
+`signal-service-resume`. Keep the old installation, account/inboxes and endpoint
+publication. Create a fresh private service root and stage the desired executable
+outside both old and new roots. Use a new operation ID and the same endpoint and
+unit directory in the service spec. Add `previous` with these exact fields:
+
+```json
+{
+  "root": "/absolute/verification-endpoint",
+  "manifest_hash": "ENDPOINT_MANIFEST_SHA256",
+  "service_root": "/absolute/previous-service-installation",
+  "service_hash": "PREVIOUS_SERVICE_MANIFEST_SHA256"
+}
+```
+
+The `previous` object is a field in the normal service spec, alongside `endpoint`,
+`binary_file`, `binary_sha256`, the fresh `root` and operation. Then run:
+
+```sh
+deploy --dry-run notification-worker signal-service-replace --local --spec /absolute/private/replacement.json
+deploy notification-worker signal-service-replace --local --spec /absolute/private/replacement.json
+```
+
+Replacement requires completed predecessor removal, an absent owned unit, capable
+candidate executable and exclusive predecessor/endpoint/account/inbox leases.
+Independent immutable intents precede the endpoint binding change. Completion
+records stay in the old installation, endpoint and new installation. Interrupted
+replacement resumes from the **new** root with `signal-service-resume`; it does
+not need the original input executable after staging. Missing committed evidence,
+a second replacement branching from the same predecessor, or a restored older
+endpoint binding blocks admission. Replacement never enables provider intake.
+
+For an installed gateway, copy the replacement's `service_root` and
+`service_hash` into `signal_verification` in its supervision spec; retain the
+exact canonical runtime bytes and endpoint pins. Use a replacement-capable gateway
+binary and run `supervise-signal --local --spec /absolute/private/supervision.json`.
+This is an explicit journaled rebind and is resumable. Ordinary update/resume
+continues to refuse the old service binding. The transition preserves migrated
+outgoing profiles, worker state and Telegram renewal evidence. Qualification must
+be collected for the resulting installation; replacement is not qualification.
+
+A compatible binary rollback uses the same replacement procedure with that
+binary in another fresh root, followed by gateway supervision. It does not revive
+an older removed service root. Executables lacking the replacement capability
+are refused. All predecessor evidence stays required, with at most 32 service
+replacement predecessors; archival/history compaction remains future work.
 
 ## Outgoing profile migration
 

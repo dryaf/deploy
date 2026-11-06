@@ -92,7 +92,7 @@ func TestBackupSetupInterruptedChild(t *testing.T) {
 		_, err = process.LimitedOutput(exec.Command("systemctl", "--user", "disable", unit), 10*time.Second, 4096)
 		testutil.Must(t, err)
 	}
-	testutil.Must(t, stopWorkerUnits())
+	testutil.Must(t, stopWorkerUnitsFor(journal.Shared != nil))
 	release, err := lockWorkerInstallation(state, a)
 	testutil.Must(t, err)
 	defer release()

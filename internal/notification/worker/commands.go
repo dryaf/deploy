@@ -46,7 +46,7 @@ func readCommand(tx *sql.Tx, id string) (v interaction.View, err error) {
 	return
 }
 func (s *Store) commandAuthorized(c interaction.Command, scope interaction.Scope) bool {
-	config := s.config.Interaction
+	config := s.commandConfig()
 	if config == nil || c.PolicyRevision != protocol.Hash(config) {
 		return false
 	}
@@ -68,7 +68,13 @@ func (s *Store) AdmitCommand(ctx context.Context, in interaction.Inbound) (v int
 	if s.verificationOnly {
 		return v, fmt.Errorf("command intake unavailable in verification mode")
 	}
-	c := s.config.Interaction
+	if !s.commandIntakeEnabled() {
+		return v, fmt.Errorf("command intake is not admitted")
+	}
+	if err = s.checkManagedCommandAuthority(ctx); err != nil {
+		return v, err
+	}
+	c := s.commandConfig()
 	if c == nil {
 		return v, fmt.Errorf("interactive intake disabled")
 	}
@@ -115,6 +121,9 @@ func (s *Store) AdmitCommand(ctx context.Context, in interaction.Inbound) (v int
 				return fmt.Errorf("inbound identity already used for a gateway query")
 			}
 			v, err = readCommand(tx, id)
+			if err == nil && !s.commandEffectEnabled(v.Command.Descriptor.Effect) {
+				return interaction.Reject("command effect is not admitted")
+			}
 			if err == nil && !s.commandAuthorized(v.Command, v.Command.Scope) {
 				return interaction.Reject("permission changed")
 			}
@@ -146,6 +155,9 @@ func (s *Store) AdmitCommand(ctx context.Context, in interaction.Inbound) (v int
 		d, ok := w.Commands[parsed.Verb]
 		if !ok {
 			return interaction.Reject("command unavailable")
+		}
+		if !s.commandEffectEnabled(d.Effect) {
+			return interaction.Reject("command effect is not admitted")
 		}
 		scope, ok := c.Authorize(in.Actor, destination.ID, w.Producer.ID, d.Permission)
 		if !ok {
@@ -231,6 +243,9 @@ func (s *Store) confirmCommand(tx *sql.Tx, in interaction.Inbound, d interaction
 	v, err := readCommand(tx, id)
 	if err != nil {
 		return err
+	}
+	if !s.commandEffectEnabled(v.Command.Descriptor.Effect) {
+		return interaction.Reject("command effect is not admitted")
 	}
 	if err = s.capacity(tx, v.Command.Producer.ID, 8192, false); err != nil {
 		return err
@@ -366,8 +381,11 @@ func (s *Store) ImportCommand(ctx context.Context, p protocol.Producer, id, hash
 }
 
 func (s *Store) GrantCommand(ctx context.Context, p protocol.Producer, id string) (grant interaction.Grant, err error) {
-	if s.verificationOnly {
-		return grant, fmt.Errorf("command execution unavailable in verification mode")
+	if !s.commandIntakeEnabled() {
+		return grant, fmt.Errorf("command execution is not admitted")
+	}
+	if err = s.checkManagedCommandAuthority(ctx); err != nil {
+		return grant, err
 	}
 	err = s.transaction(ctx, func(tx *sql.Tx) error {
 		if err := requireCurrentCommand(tx, id); err != nil {
@@ -382,6 +400,9 @@ func (s *Store) GrantCommand(ctx context.Context, p protocol.Producer, id string
 		}
 		if v.Command.Producer != p {
 			return fmt.Errorf("producer mismatch")
+		}
+		if !s.commandEffectEnabled(v.Command.Descriptor.Effect) {
+			return fmt.Errorf("command effect is not admitted")
 		}
 		if err = expireCommand(tx, &v, s.now()); err != nil {
 			return err

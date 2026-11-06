@@ -214,6 +214,8 @@ func (s *Store) eligibility(tx *sql.Tx, m protocol.Message, budget time.Duration
 }
 
 type Health struct {
+	CommandAdmissionHash   string                        `json:"command_admission_hash,omitempty"`
+	CommandMode            string                        `json:"command_mode,omitempty"`
 	DeliveryActivationHash string                        `json:"delivery_activation_hash,omitempty"`
 	SignalProfilesHash     string                        `json:"signal_profiles_hash,omitempty"`
 	SignalVerificationHash string                        `json:"signal_verification_hash,omitempty"`
@@ -265,8 +267,11 @@ func (s *Store) clockSafe() bool {
 	return !s.clockUncertain
 }
 
-func (s *Store) Health(ctx context.Context) (h Health, err error) {
+func (s *Store) Health(ctx context.Context) (Health, error) { return s.health(ctx, false) }
+
+func (s *Store) health(ctx context.Context, resolveInheritedWorker bool) (h Health, err error) {
 	h = Health{DeliveryActivationHash: s.deliveryActivationHash, SignalProfilesHash: s.signalProfilesHash, SignalVerificationHash: s.signalVerificationHash, Identity: s.identity, Condition: "ok", Subjects: map[string][]protocol.Subject{}, VerificationOnly: s.verificationOnly, InstallationRevision: s.installationRevision, RecoveryCommitHash: s.recoveryCommitHash, TelegramRenewalID: s.telegramRenewalID}
+	h.CommandMode, h.CommandAdmissionHash = s.managedCommandMode, s.managedCommandHash
 	active := map[string]bool{}
 	retired := map[string]*ProducerRetirement{}
 	for _, p := range s.config.Producers {
@@ -289,6 +294,9 @@ func (s *Store) Health(ctx context.Context) (h Health, err error) {
 			h.InheritedLEDFaults = map[string]int{}
 			for _, f := range inherited {
 				h.InheritedLEDFaults[f.Binding]++
+				if resolveInheritedWorker && f.Binding == workerLEDBinding {
+					continue
+				}
 				condition := "unknown"
 				if f.Condition == "critical" {
 					condition = "critical"

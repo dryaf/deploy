@@ -9,6 +9,7 @@ import (
 
 	"github.com/dryaf/deploy/internal/notification/interaction"
 	"github.com/dryaf/deploy/internal/notification/protocol"
+	"github.com/dryaf/deploy/internal/safefs"
 )
 
 type TelegramRecoverySummary struct {
@@ -35,7 +36,20 @@ type telegramRecoverySession struct {
 func ReconcileTelegramHistory(ctx context.Context, statePath, historyPath, account string, c Config) (TelegramRecoverySummary, error) {
 	return reconcileTelegramHistory(ctx, statePath, historyPath, account, c, nil)
 }
+
+// ReconcilePinnedTelegramHistory imports only the operator-selected recovery and
+// independently verified snapshot. Pins are checked under the worker lease before
+// any intake history is imported.
+func ReconcilePinnedTelegramHistory(ctx context.Context, statePath, historyPath, account string, c Config, operation, snapshotID, databaseHash string) (TelegramRecoverySummary, error) {
+	if !safefs.ValidID(operation, "n") || !safefs.ValidID(snapshotID, "n") || !safefs.DigestPattern.MatchString(databaseHash) {
+		return TelegramRecoverySummary{}, fmt.Errorf("Telegram history requires exact recovery and snapshot pins")
+	}
+	return reconcileTelegramHistoryPinned(ctx, statePath, historyPath, account, c, operation, snapshotID, databaseHash, nil)
+}
 func reconcileTelegramHistory(ctx context.Context, statePath, historyPath, account string, c Config, fault func(string) error) (summary TelegramRecoverySummary, err error) {
+	return reconcileTelegramHistoryPinned(ctx, statePath, historyPath, account, c, "", "", "", fault)
+}
+func reconcileTelegramHistoryPinned(ctx context.Context, statePath, historyPath, account string, c Config, operation, snapshotID, databaseHash string, fault func(string) error) (summary TelegramRecoverySummary, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	r, err := openRecoveryReconciler(ctx, statePath, c, nil)
@@ -43,6 +57,9 @@ func reconcileTelegramHistory(ctx context.Context, statePath, historyPath, accou
 		return summary, err
 	}
 	defer r.Close()
+	if operation != "" && operation != r.journal.Operation {
+		return summary, fmt.Errorf("Telegram history recovery operation changed")
+	}
 	known := false
 	if c.Interaction != nil {
 		for _, d := range c.Interaction.Destinations {
@@ -57,6 +74,9 @@ func reconcileTelegramHistory(ctx context.Context, statePath, historyPath, accou
 	m, records, err := readTelegramRecovery(ctx, historyPath, account, c)
 	if err != nil {
 		return summary, err
+	}
+	if snapshotID != "" && (m.Snapshot.ID != snapshotID || m.Snapshot.DatabaseHash != databaseHash) {
+		return summary, fmt.Errorf("Telegram history snapshot pins changed")
 	}
 	if m.Snapshot.Identity != r.journal.Before {
 		return summary, fmt.Errorf("Telegram history belongs to another gateway epoch")

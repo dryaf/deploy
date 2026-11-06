@@ -69,6 +69,9 @@ func commandInstallationPlan(tx *sql.Tx, checkpoint interaction.CommandRecoveryC
 		if err = tx.QueryRow("SELECT state,revision,imported,conflict,non_admission FROM commands WHERE id=?", v.Command.ID).Scan(&current.State, &current.Revision, &current.Imported, &current.Conflict, &current.NonAdmission); err != nil {
 			return
 		}
+		if current != before && current != after {
+			return plan, "", fmt.Errorf("recovered command %s projection differs: current=%+v before=%+v after=%+v", v.Command.ID, current, before, after)
+		}
 		beforeHashes = append(beforeHashes, protocol.Hash(before))
 		afterHashes = append(afterHashes, protocol.Hash(after))
 		currentHashes = append(currentHashes, protocol.Hash(current))

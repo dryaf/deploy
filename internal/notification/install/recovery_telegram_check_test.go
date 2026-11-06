@@ -42,6 +42,9 @@ func telegramCheckCLIArguments(t *testing.T) ([]string, worker.TelegramRecoveryC
 	return telegramCheckCLIArgumentsBeforeRecovery(t, nil)
 }
 func telegramCheckCLIArgumentsBeforeRecovery(t *testing.T, before func(*string, string)) ([]string, worker.TelegramRecoveryCursor) {
+	return telegramCheckCLIArgumentsConfigured(t, before, nil)
+}
+func telegramCheckCLIArgumentsConfigured(t *testing.T, before func(*string, string), configure func(*Runtime)) ([]string, worker.TelegramRecoveryCursor) {
 	t.Helper()
 	check := func(err error) {
 		t.Helper()
@@ -51,6 +54,9 @@ func telegramCheckCLIArgumentsBeforeRecovery(t *testing.T, before func(*string, 
 	}
 	ctx := context.Background()
 	c, config := telegramCheckCLIConfiguration(t)
+	if configure != nil {
+		configure(&c)
+	}
 	token := filepath.Join(t.TempDir(), "token")
 	check(os.WriteFile(token, []byte("123:fixture"), 0600))
 	c.Telegram.TokenFile = token

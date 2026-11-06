@@ -14,22 +14,26 @@ import (
 // A publication session owns the worker lease but never a transaction across
 // provider I/O. The original cursor and live database remain read-only.
 type publishedTelegramSession struct {
-	root, stage   *safefs.Directory
-	lease         *safefs.Lock
-	borrowedLease bool
-	db            *sql.DB
-	liveFile      *os.File
-	config        Config
-	publication   RecoveryPublicationCommit
-	proof         RecoveryCheckpointProof
-	cursor        TelegramRecoveryCursor
+	root, stage      *safefs.Directory
+	lease            *safefs.Lock
+	borrowedLease    bool
+	pendingAdmission bool
+	db               *sql.DB
+	liveFile         *os.File
+	config           Config
+	publication      RecoveryPublicationCommit
+	proof            RecoveryCheckpointProof
+	cursor           TelegramRecoveryCursor
 }
 
 func openPublishedTelegramSession(ctx context.Context, path string, c Config, commit, account string) (s *publishedTelegramSession, err error) {
 	return openPublishedTelegramSessionWithLease(ctx, path, c, commit, account, nil)
 }
 
-func openPublishedTelegramSessionWithLease(ctx context.Context, path string, c Config, commit, account string, lease *safefs.Lock) (s *publishedTelegramSession, err error) {
+func openPublishedTelegramSessionWithLease(ctx context.Context, path string, c Config, commit, account string, lease *safefs.Lock) (*publishedTelegramSession, error) {
+	return openPublishedTelegramSessionAdmission(ctx, path, c, commit, account, lease, false)
+}
+func openPublishedTelegramSessionAdmission(ctx context.Context, path string, c Config, commit, account string, lease *safefs.Lock, pending bool) (s *publishedTelegramSession, err error) {
 	if err = c.Validate(); err != nil {
 		return
 	}
@@ -44,7 +48,7 @@ func openPublishedTelegramSessionWithLease(ctx context.Context, path string, c C
 	if !enrolled {
 		return nil, fmt.Errorf("Telegram handoff account unavailable")
 	}
-	s = &publishedTelegramSession{config: c}
+	s = &publishedTelegramSession{config: c, pendingAdmission: pending}
 	defer func() {
 		if err != nil {
 			s.close()
@@ -201,12 +205,41 @@ func (s *publishedTelegramSession) check(ctx context.Context) error {
 	if err = verifyRecoveryRuntimeSQL(ctx, s.db, s.proof); err != nil {
 		return err
 	}
-	cursor, err := readPublishedTelegramCursor(ctx, s.db, s.cursor.Drain.Account)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return err
 	}
-	if cursor != s.cursor {
-		return fmt.Errorf("live Telegram cursor differs from published evidence")
+	defer tx.Rollback()
+	cursor, err := readTelegramRecoveryCursor(tx, s.cursor.Drain.Account)
+	if err != nil {
+		return err
+	}
+	if cursor == nil || *cursor != s.cursor {
+		return fmt.Errorf("live Telegram recovery cursor differs from published evidence")
+	}
+	var offset int64
+	if err = tx.QueryRowContext(ctx, "SELECT offset FROM telegram_cursors WHERE account=?", s.cursor.Drain.Account).Scan(&offset); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if offset < 0 {
+		return fmt.Errorf("invalid Telegram runtime offset")
+	}
+	handoff, err := readManagedTelegramHandoff(ctx, s.root, s.db, s.cursor.Drain.Account)
+	if err != nil {
+		if s.pendingAdmission && offset == s.cursor.Offset {
+			return nil
+		}
+		return err
+	}
+	if handoff == nil {
+		if offset != s.cursor.Offset {
+			return fmt.Errorf("Telegram cursor advanced without admitted handoff")
+		}
+	} else if handoff.CommitHash != s.publication.CommitHash || handoff.Renewal.Cursor.Drain.Identity != s.proof.After || handoff.Renewal.Cursor.RequestsHash != s.cursor.RequestsHash || handoff.Renewal.Cursor.NotBefore.Before(s.cursor.NotBefore) {
+		return fmt.Errorf("Telegram runtime cutoff differs from recovered authority")
 	}
 	return nil
 }

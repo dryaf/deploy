@@ -18,11 +18,11 @@ import (
 )
 
 func runSignalServiceCLI(args []string, out io.Writer) error {
-	if args[0] == "__signal-verification-service-probe" {
+	if args[0] == "__signal-next-recovery-probe" || args[0] == "__signal-verification-service-probe" || args[0] == "__signal-verification-replacement-probe" || args[0] == "__signal-production-service-probe" {
 		if len(args) != 1 {
 			return fmt.Errorf("Signal service probe takes no arguments")
 		}
-		return json.NewEncoder(out).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), SignalService: 1})
+		return json.NewEncoder(out).Encode(managedCapabilities{SignalNextRecovery: 1, Version: managedVersion, Schema: worker.StorageSchemaVersion(), SignalService: 1, SignalReplacement: 1, SignalProduction: 1})
 	}
 	f := flag.NewFlagSet("notification-worker "+args[0], flag.ContinueOnError)
 	local := f.Bool("local", false, "Manage a separate local Signal verification service")
@@ -36,7 +36,7 @@ func runSignalServiceCLI(args []string, out io.Writer) error {
 		return fmt.Errorf("Signal service operations require --local")
 	}
 	allowed := map[string]bool{"local": true}
-	if args[0] == "signal-service-setup" {
+	if args[0] == "signal-service-setup" || args[0] == "signal-service-replace" {
 		allowed["spec"] = true
 	} else {
 		allowed["root"] = true
@@ -54,13 +54,16 @@ func runSignalServiceCLI(args []string, out io.Writer) error {
 		return fmt.Errorf("invalid Signal service option")
 	}
 	var s SignalServiceSpec
-	if args[0] == "signal-service-setup" {
+	if args[0] == "signal-service-setup" || args[0] == "signal-service-replace" {
 		b, err := nativeSignalRead(*specPath, safefs.MaxRecordBytes, true)
 		if err != nil {
 			return err
 		}
 		if err = safefs.DecodeJSON(b, &s, safefs.MaxRecordBytes); err != nil {
 			return err
+		}
+		if (args[0] == "signal-service-replace") != (s.Previous != nil) {
+			return fmt.Errorf("only signal-service-replace requires previous service pins")
 		}
 		if err = s.validate(); err != nil {
 			return err
@@ -79,8 +82,17 @@ func runSignalServiceCLI(args []string, out io.Writer) error {
 		return fmt.Errorf("Signal service operation pin required")
 	}
 	if ui.DryRun {
-		if args[0] == "signal-service-setup" {
-			if _, err := inspectSignalVerificationPublication(s.Endpoint); err != nil {
+		if args[0] == "signal-service-setup" || args[0] == "signal-service-replace" {
+			if s.Previous != nil {
+				if _, err := signalServicePredecessor(s); err != nil {
+					return err
+				}
+			}
+			endpoint, err := inspectSignalVerificationPublication(s.Endpoint)
+			if err != nil {
+				return err
+			}
+			if err = checkSignalProductionInputs(SignalServiceManifest{Spec: s, Endpoint: endpoint}); err != nil {
 				return err
 			}
 			b, err := nativeSignalRead(s.BinaryFile, maxManagedBinary, false)
@@ -110,7 +122,7 @@ func runSignalServiceCLI(args []string, out io.Writer) error {
 	var m SignalServiceManifest
 	var err error
 	switch args[0] {
-	case "signal-service-setup":
+	case "signal-service-setup", "signal-service-replace":
 		m, err = i.setup(ctx, s)
 	case "signal-service-resume":
 		m, err = i.resume(ctx, *root)

@@ -13,6 +13,7 @@ import (
 	"github.com/dryaf/deploy/internal/notification/provider"
 	"github.com/dryaf/deploy/internal/notification/relay"
 	"github.com/dryaf/deploy/internal/notification/worker"
+	"github.com/dryaf/deploy/internal/safefs"
 	"github.com/dryaf/deploy/internal/ui"
 )
 
@@ -32,7 +33,13 @@ func signalRuntimeCLIArgumentsSetup(t *testing.T, beforeRecovery func(string, st
 func signalRuntimeCLIArgumentsProviders(t *testing.T, beforeRecovery func(string, string), telegram bool) []string {
 	return signalRuntimeCLIArgumentsConfigured(t, beforeRecovery, telegram, nil)
 }
-func signalRuntimeCLIArgumentsConfigured(t *testing.T, beforeRecovery func(string, string), telegram bool, configure func(*Runtime)) []string {
+
+type signalProducerRecoveryFixture func(context.Context, string, worker.Config, protocol.Identity)
+
+func signalRuntimeCLIArgumentsConfigured(t *testing.T, beforeRecovery func(string, string), telegram bool, configure func(*Runtime), producerRecovery ...signalProducerRecoveryFixture) []string {
+	return signalRuntimeCLIArgumentsConfiguredBootstrap(t, beforeRecovery, telegram, configure, false, producerRecovery...)
+}
+func signalRuntimeCLIArgumentsConfiguredBootstrap(t *testing.T, beforeRecovery func(string, string), telegram bool, configure func(*Runtime), bootstrap bool, producerRecovery ...signalProducerRecoveryFixture) []string {
 	t.Helper()
 	ctx := context.Background()
 	c, config := signalRuntimeCLIConfiguration(t)
@@ -50,7 +57,23 @@ func signalRuntimeCLIArgumentsConfigured(t *testing.T, beforeRecovery func(strin
 			t.Fatal(err)
 		}
 	}
-	inbox, err := relay.OpenInbox(source, c.Signal.Account, true)
+	var inbox interface {
+		Cursor() interaction.SpoolCursor
+		Close() error
+	}
+	var err error
+	if bootstrap {
+		op, e := safefs.NewID("n")
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = relay.BootstrapLegacyInbox(ctx, source, c.Signal.Account, op); e != nil {
+			t.Fatal(e)
+		}
+		inbox, err = relay.OpenRecoveryInbox(source, c.Signal.Account)
+	} else {
+		inbox, err = relay.OpenInbox(source, c.Signal.Account, true)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,19 +113,8 @@ func signalRuntimeCLIArgumentsConfigured(t *testing.T, beforeRecovery func(strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := relay.OpenRecoveryInbox(source, c.Signal.Account)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer src.Close()
-	session, err := worker.OpenSignalRecoverySession(ctx, state, c.Worker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = interaction.ReconcileSignal(ctx, src, session); err != nil {
-		t.Fatal(err)
-	}
-	if err = session.Close(); err != nil {
+	intakeArgs := []string{"recovery-signal-history", "--local", "--config", config, "--state-dir", state, "--operation", q.Operation, "--relay-state", source, "--receivers-stopped"}
+	if err = runRecoverySignalIntakeCLI(intakeArgs, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	if telegram {
@@ -123,17 +135,8 @@ func signalRuntimeCLIArgumentsConfigured(t *testing.T, beforeRecovery func(strin
 	if err = requests.Close(); err != nil {
 		t.Fatal(err)
 	}
-	cursors, err := worker.OpenSignalCursorSession(ctx, state, c.Worker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = interaction.PrepareSignalRecoveryHandoff(ctx, src, cursors); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = interaction.InstallSignalRecoveryCursor(ctx, src, cursors); err != nil {
-		t.Fatal(err)
-	}
-	if err = cursors.Close(); err != nil {
+	intakeArgs[0] = "recovery-signal-cursor"
+	if err = runRecoverySignalIntakeCLI(intakeArgs, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	if telegram {
@@ -150,13 +153,13 @@ func signalRuntimeCLIArgumentsConfigured(t *testing.T, beforeRecovery func(strin
 			t.Fatal(ce)
 		}
 	}
-	if err = src.Close(); err != nil {
-		t.Fatal(err)
-	}
 	for _, p := range c.Worker.Producers {
 		if _, err = worker.FenceRecoveryOwnership(ctx, state, c.Worker, p.Producer); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for _, finish := range producerRecovery {
+		finish(ctx, state, c.Worker, q.Before)
 	}
 	review, err := worker.ReviewRecovery(ctx, state, c.Worker, q.Operation)
 	if err != nil {

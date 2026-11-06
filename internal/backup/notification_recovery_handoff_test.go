@@ -24,11 +24,16 @@ import (
 type backupHandoffFixture struct {
 	*backupEvaluationFixture
 	options        backupReconciliationOptions
+	snapshotPath   string
 	first, pending interaction.Command
 	grant          interaction.Grant
 }
 
 func backupHandoffTestFixture(t *testing.T, interactive bool, configure ...func(*worker.Config)) backupHandoffFixture {
+	return backupHandoffTestFixtureWith(t, interactive, nil, configure...)
+}
+
+func backupHandoffTestFixtureWith(t *testing.T, interactive bool, before func(*backupEvaluationFixture), configure ...func(*worker.Config)) backupHandoffFixture {
 	t.Helper()
 	ctx := context.Background()
 	if !interactive {
@@ -38,6 +43,9 @@ func backupHandoffTestFixture(t *testing.T, interactive bool, configure ...func(
 	f.clock = reportHostClock()
 	f.refreshProbe(t)
 	testutil.Must(t, f.state.put("notification_owner", backupNotificationOwner{Schema: 1, Mode: "shared", Binding: f.binding, Socket: f.client.Socket}))
+	if before != nil {
+		before(f)
+	}
 	f.observe(t, f.subject, "retained backup fault", f.clock.Now)
 	_, exports := f.evaluate(t)
 	f.transfer(t, f.client)
@@ -71,6 +79,10 @@ func backupHandoffTestFixture(t *testing.T, interactive bool, configure ...func(
 		testutil.Must(t, err)
 	}
 	artifact := filepath.Join(t.TempDir(), "snapshot")
+	if interactive {
+		testutil.Must(t, f.gateway.PullTelegram(ctx, backupRecoveryPoller(t, f.gatewayConfig)))
+	}
+	fixture.snapshotPath = artifact
 	manifest, err := f.gateway.Snapshot(ctx, artifact)
 	testutil.Must(t, err)
 	if len(exports) != 1 {

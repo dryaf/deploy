@@ -36,6 +36,9 @@ func (r *LEDReconciler) ids() (string, string) {
 }
 
 func (r *LEDReconciler) stepOne(ctx context.Context) (err error) {
+	if err = r.Store.requireInstallationNotRetired(); err != nil {
+		return err
+	}
 	observation := LEDObservation{Condition: "unknown"}
 	if r.Budget <= 0 || r.Budget >= 5*time.Second {
 		r.Store.recordLEDOutput(r.bindingID(), observation)

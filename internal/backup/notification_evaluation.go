@@ -304,6 +304,20 @@ func evaluateBackupNotificationState(tx *sql.Tx, c WorkerInstallation, clock bac
 			global.ValidUntil = sub.ValidUntil
 		}
 	}
+
+	// Explicit retirement of every configured source also retires the aggregate
+	// coverage subject. Empty discovery or retiring only known instances cannot
+	// make this assertion: a still-enrolled source may discover new instances.
+	allSourcesRetired := len(c.Sources) > 0 && active == 0 && open == 0
+	for _, source := range c.Sources {
+		if source.SourceID == "" || control.RetiredSources[source.SourceID] == "" {
+			allSourcesRetired = false
+		}
+	}
+	if allSourcesRetired {
+		global.Condition = "retired"
+		global.Reason = "Every configured backup source was explicitly retired by operator; no recovery is claimed."
+	}
 	subjects = append([]notify.Subject{global}, subjects...)
 	for _, sub := range subjects {
 		facts = append(facts, []string{sub.Key, sub.Condition, sub.Reason})

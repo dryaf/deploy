@@ -33,12 +33,17 @@ type ConversationAdapter struct {
 	TelegramAccount   string
 	TelegramTokenFile string
 	Transport         http.RoundTripper
+	SignalTransport   http.RoundTripper
 	Signal            *SignalAccount
 }
 
 func (a ConversationAdapter) SendReply(ctx context.Context, d interaction.Destination, text string) ReplyResult {
 	if d.Provider == "signal" && a.Signal != nil {
-		return (SignalInboxClient{Profile: *a.Signal, Transport: a.Transport}).SendReply(ctx, d, text)
+		transport := a.SignalTransport
+		if transport == nil {
+			transport = a.Transport
+		}
+		return (SignalInboxClient{Profile: *a.Signal, Transport: transport}).SendReply(ctx, d, text)
 	}
 	fail := func() ReplyResult { return ReplyResult{Result: Result{Permanent: true}} }
 	if d.Provider != "telegram" || d.Account != a.TelegramAccount || !ValidConversationText(text) {

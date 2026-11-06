@@ -81,12 +81,12 @@ func parseGatewayQuery(text string) (kind, worker, id, cursor string, handled bo
 }
 
 func (s *Store) queryDestination(in interaction.Inbound) (d interaction.Destination, ok bool) {
-	if s.config.Interaction == nil {
+	if s.commandConfig() == nil {
 		return
 	}
-	for _, candidate := range s.config.Interaction.Destinations {
+	for _, candidate := range s.commandConfig().Destinations {
 		if candidate.ID == in.Conversation && candidate.Provider == in.Provider && candidate.Account == in.Account && candidate.Fingerprint() == in.DestinationFingerprint {
-			for _, p := range s.config.Interaction.Permissions {
+			for _, p := range s.commandConfig().Permissions {
 				if p.Actor == in.Actor && p.Conversation == in.Conversation {
 					return candidate, true
 				}
@@ -98,7 +98,7 @@ func (s *Store) queryDestination(in interaction.Inbound) (d interaction.Destinat
 
 func (s *Store) queryAllowed(q gatewayQuery) bool {
 	_, ok := s.queryDestination(q.Input)
-	return ok && s.clockSafe() && q.Policy == protocol.Hash(s.config.Interaction) && q.Expires.After(s.now())
+	return ok && s.clockSafe() && q.Policy == protocol.Hash(s.commandConfig()) && q.Expires.After(s.now())
 }
 
 func readGatewayQuery(tx *sql.Tx, id string) (q gatewayQuery, err error) {
@@ -111,7 +111,7 @@ func readGatewayQuery(tx *sql.Tx, id string) (q gatewayQuery, err error) {
 }
 
 func (s *Store) queryItems(tx *sql.Tx, q gatewayQuery) (items []string, err error) {
-	c := s.config.Interaction
+	c := s.commandConfig()
 	available := func(w interaction.Worker, d interaction.Descriptor) bool {
 		scope, ok := c.Authorize(q.Input.Actor, q.Input.Conversation, w.Producer.ID, d.Permission)
 		return ok && (d.Scoped || scope.WholeWorker)
@@ -222,6 +222,12 @@ func (s *Store) AdmitGatewayQuery(ctx context.Context, in interaction.Inbound) (
 	if s.verificationOnly {
 		return false, fmt.Errorf("chat queries unavailable in verification mode")
 	}
+	if !s.commandIntakeEnabled() {
+		return false, fmt.Errorf("chat queries are not admitted")
+	}
+	if err = s.checkManagedCommandAuthority(ctx); err != nil {
+		return false, err
+	}
 	kind, worker, id, cursor, handled, err := parseGatewayQuery(in.Text)
 	if !handled {
 		return false, err
@@ -277,7 +283,7 @@ func (s *Store) AdmitGatewayQuery(ctx context.Context, in interaction.Inbound) (
 		if pending >= 128 || own >= 16 {
 			return fmt.Errorf("gateway reply capacity exhausted")
 		}
-		q := gatewayQuery{ID: "Q-" + in.RequestKey(), Input: in, Policy: protocol.Hash(s.config.Interaction), Expires: s.now().Add(10 * time.Minute), Kind: kind, Worker: worker, Command: id}
+		q := gatewayQuery{ID: "Q-" + in.RequestKey(), Input: in, Policy: protocol.Hash(s.commandConfig()), Expires: s.now().Add(10 * time.Minute), Kind: kind, Worker: worker, Command: id}
 		position := 0
 		root := q.ID
 		var items []string

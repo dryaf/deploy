@@ -45,6 +45,22 @@ func ReadRuntime(path string) (c Runtime, err error) {
 	return decodeRuntime(data)
 }
 
+// ReadPinnedRuntime resolves exactly the private bytes selected by a caller's
+// digest. It avoids re-reading an independently hashed file during handoff.
+func ReadPinnedRuntime(path, hash string) (Runtime, error) {
+	if !safefs.DigestPattern.MatchString(hash) {
+		return Runtime{}, fmt.Errorf("exact runtime configuration digest required")
+	}
+	raw, err := nativeSignalRead(path, safefs.MaxRecordBytes, true)
+	if err != nil {
+		return Runtime{}, err
+	}
+	if managedDigest(raw) != hash {
+		return Runtime{}, fmt.Errorf("runtime configuration changed")
+	}
+	return decodeRuntime(raw)
+}
+
 func decodeRuntime(data []byte) (c Runtime, err error) {
 	if err = safefs.DecodeJSON(data, &c, safefs.MaxRecordBytes); err != nil {
 		return c, err
@@ -71,13 +87,6 @@ func decodeRuntime(data []byte) (c Runtime, err error) {
 		if !found {
 			return c, fmt.Errorf("interactive Telegram has no enrolled conversations")
 		}
-		for _, w := range c.Worker.Interaction.Workers {
-			for _, d := range w.Commands {
-				if d.Effect != "read" {
-					return c, fmt.Errorf("staged Telegram intake permits read commands only; mutation activation requires qualification")
-				}
-			}
-		}
 	}
 	if c.Signal != nil {
 		if c.Worker.Interaction == nil || c.Signal.Validate() != nil {
@@ -94,13 +103,6 @@ func decodeRuntime(data []byte) (c Runtime, err error) {
 		}
 		if !found {
 			return c, fmt.Errorf("interactive Signal has no conversations")
-		}
-		for _, w := range c.Worker.Interaction.Workers {
-			for _, d := range w.Commands {
-				if d.Effect != "read" {
-					return c, fmt.Errorf("staged Signal intake permits read commands only; mutation activation requires qualification")
-				}
-			}
 		}
 	}
 	seen := map[string]bool{}
@@ -186,21 +188,43 @@ func RunCLI(args []string) error {
 		return runManagedCLI(args)
 	}
 	if len(args) == 0 {
-		return fmt.Errorf("usage: notification-worker <init|serve|status|setup|update|migrate-schema|migrate-led|adopt-recovery|adopt-signal|supervise-signal|migrate-signal-profiles|signal-service-setup|signal-service-resume|signal-service-inspect|signal-service-uninstall|upgrade-helper|renew-telegram|rollback|resume|uninstall|installation-status|qualification-template|qualify|qualification-status|activation-review|activate-delivery|deactivate-delivery|queue-inspect|producer-retire|receipts-inspect|receipts-compact|message-review|message-decide|message-decision-status|snapshot|snapshot-verify|recovery-prepare|recovery-status|recovery-checkpoint|recovery-checkpoint-verify|recovery-publication-prepare|recovery-publication-verify|recovery-publish|recovery-signal-install|recovery-signal-handoff|recovery-signal-podman-handoff|signal-verification-prepare|signal-verification-serve|recovery-telegram-check|led-migrate|recovery-led-review|recovery-led-preserve|recovery-led-adopt|recovery-led-handoff|recovery-led-import-cleanup|recovery-fence-producer|recovery-review|recovery-decide|notify-test|signal-inbox-init|signal-link-status|signal-service-status|signal-recovery-status|signal-link-resolve|__signal-relay> --local [options]; Signal/recovery/command activation is not available")
+		return fmt.Errorf("usage: notification-worker <init|serve|status|setup|update|migrate-schema|migrate-led|adopt-recovery|adopt-signal|supervise-signal|migrate-signal-profiles|signal-service-setup|signal-service-replace|signal-service-resume|signal-service-inspect|signal-service-uninstall|upgrade-helper|renew-telegram|rollback|resume|uninstall|installation-status|qualification-template|qualify|qualification-status|activation-review|led-recovery-review|led-recovery-clear|activate-delivery|deactivate-delivery|enable-commands|disable-commands|narrow-commands|migrate-commands|queue-inspect|replacement-target|installation-retire|replacement-init|producer-retire|receipts-inspect|receipts-compact|message-review|message-decide|message-decision-status|managed-snapshot|snapshot|snapshot-verify|recovery-prepare|recovery-status|recovery-checkpoint|recovery-checkpoint-verify|recovery-publication-prepare|recovery-publication-verify|recovery-publish|recovery-signal-install|recovery-signal-handoff|recovery-signal-managed-handoff|recovery-signal-podman-handoff|signal-verification-prepare|signal-verification-serve|recovery-signal-history|recovery-signal-cursor|recovery-telegram-history|recovery-telegram-drain|recovery-requests-seal|recovery-telegram-cursor|recovery-telegram-check|led-migrate|recovery-led-review|recovery-led-preserve|recovery-led-adopt|recovery-led-handoff|recovery-led-import-cleanup|recovery-fence-producer|recovery-review|recovery-decide|notify-test|signal-inbox-init|signal-link-status|signal-service-status|signal-recovery-status|signal-link-resolve|__signal-relay> --local [options]")
 	}
 	switch args[0] {
+	case "replacement-target":
+		return runReplacementTargetCLI(args, os.Stdout)
+	case "installation-retire", "replacement-init":
+		return runInstallationRetirementCLI(args, os.Stdout)
+	case "__signal-command-supervisor":
+		if len(args) != 1 || ui.DryRun {
+			return fmt.Errorf("internal Signal supervisor requires inherited descriptors")
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		lease, cli := os.NewFile(3, "account-lease"), os.NewFile(4, "pinned-signal-cli")
+		defer lease.Close()
+		defer cli.Close()
+		return relay.SuperviseCommand(ctx, os.Stdin, lease, cli)
 	case "activate-delivery", "deactivate-delivery":
 		return runDeliveryCLI(args, os.Stdout)
+	case "led-recovery-review", "led-recovery-clear":
+		return runRuntimeLEDRecoveryCLI(args, os.Stdout)
 	case "activation-review":
 		return runActivationReviewCLI(args[1:], os.Stdout)
-	case "signal-service-setup", "signal-service-resume", "signal-service-uninstall", "signal-service-inspect", "__signal-service-serve", "__signal-verification-service-probe":
+	case "signal-service-setup", "signal-service-replace", "signal-service-resume", "signal-service-uninstall", "signal-service-inspect", "__signal-service-serve", "__signal-next-recovery-probe", "__signal-verification-service-probe", "__signal-verification-replacement-probe", "__signal-production-service-probe":
 		return runSignalServiceCLI(args, os.Stdout)
 	case "signal-verification-prepare":
 		return runSignalVerificationPrepareCLI(args[1:], os.Stdout)
 	case "signal-verification-serve":
 		return runSignalVerificationServeCLI(args[1:], os.Stdout)
+	case "recovery-signal-history", "recovery-signal-cursor":
+		return runRecoverySignalIntakeCLI(args, os.Stdout)
+	case "recovery-telegram-history", "recovery-telegram-drain", "recovery-requests-seal", "recovery-telegram-cursor":
+		return runRecoveryIntakeCLI(args, os.Stdout)
 	case "recovery-telegram-check":
 		return runRecoveryTelegramCheckCLI(args[1:], os.Stdout)
+	case "recovery-signal-managed-handoff":
+		return runRecoverySignalManagedCLI(args[1:], os.Stdout)
 	case "recovery-signal-install":
 		return runRecoverySignalInstallCLI(args[1:], os.Stdout)
 	case "recovery-signal-handoff":
@@ -255,7 +279,13 @@ func RunCLI(args []string) error {
 		return runMessageAdministrationCLI(args, os.Stdout)
 	case "queue-inspect", "receipts-inspect":
 		return runInspectionCLI(args, os.Stdout)
-	case "__managed-delivery-probe", "__managed-signal-profiles-probe", "migrate-signal-profiles", "__managed-signal-supervision-probe", "supervise-signal", "adopt-signal", "__managed-signal-verification-probe", "setup", "update", "migrate-schema", "migrate-led", "adopt-recovery", "upgrade-helper", "__managed-helper-upgrade-probe", "renew-telegram", "__managed-telegram-renewal-probe", "rollback", "resume", "uninstall", "installation-status", "__managed-probe", "__managed-migration-probe", "__managed-led-migration-probe", "__managed-recovery-probe", "__managed-serve":
+	case "managed-snapshot":
+		return runManagedSnapshotCLI(args[1:], os.Stdout)
+	case "enable-commands", "disable-commands", "narrow-commands", "migrate-commands":
+		return runManagedCommandsCLI(args, os.Stdout)
+	case "__managed-commands-probe", "__managed-command-policy-probe", "__managed-command-enrollment-probe":
+		return runManagedCLI(args)
+	case "__managed-next-recovery-probe", "__managed-led-delivery-probe", "__managed-command-recovery-probe", "__managed-telegram-handoff-probe", "__managed-signal-production-probe", "__managed-signal-replacement-probe", "__managed-delivery-recovery-probe", "__managed-delivery-probe", "__managed-signal-conversations-probe", "__managed-signal-profiles-probe", "migrate-signal-profiles", "__managed-signal-supervision-probe", "supervise-signal", "adopt-signal", "__managed-signal-verification-probe", "setup", "update", "migrate-schema", "migrate-led", "adopt-recovery", "upgrade-helper", "__managed-helper-upgrade-probe", "renew-telegram", "__managed-telegram-renewal-probe", "rollback", "resume", "uninstall", "installation-status", "__managed-probe", "__managed-migration-probe", "__managed-led-migration-probe", "__managed-recovery-probe", "__managed-serve":
 		return runManagedCLI(args)
 	}
 	if args[0] == "recovery-led-review" || args[0] == "recovery-led-preserve" || args[0] == "recovery-led-adopt" {
@@ -294,7 +324,7 @@ func RunCLI(args []string) error {
 	}
 	flags, ok := allowed[args[0]]
 	if !ok {
-		return fmt.Errorf("operation unavailable: production installation, activation and migration are not implemented")
+		return fmt.Errorf("unknown local operation")
 	}
 	var invalid bool
 	f.Visit(func(v *flag.Flag) {

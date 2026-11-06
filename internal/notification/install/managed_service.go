@@ -127,6 +127,13 @@ func (u userManagedServices) Verify(ctx context.Context, m ManagedManifest) erro
 				return fmt.Errorf("managed worker health does not identify the expected verification revision")
 			}
 			if m.Mode == "delivery" {
+				mode, hash := "", ""
+				if m.Commands != nil {
+					mode, hash = m.Commands.Mode, m.Commands.Hash
+				}
+				if h.CommandMode != mode || h.CommandAdmissionHash != hash {
+					return fmt.Errorf("managed worker command admission differs")
+				}
 				loop, ok := h.Loops["delivery-admission"]
 				if !ok || loop.Condition != "ok" || !loop.ValidUntil.After(time.Now()) {
 					return fmt.Errorf("delivery runtime has no current admission observation")

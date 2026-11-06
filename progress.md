@@ -1,10 +1,852 @@
 # Implementation handoff — 2026-11-06
 
-Work paused on 2026-11-06 at the user's explicit request to go to bed. Preserve
-the working tree; no implementation commit has been created. Resume only when
-the user asks. The pause checkpoint below supersedes earlier next-step lists.
+## Active target: 100% software implementation — 2026-11-06
 
-## Pause checkpoint — 2026-11-06
+The user requested continuation from 77/84 to 84/84 software criteria. Keep the
+original denominator and partial criteria until their complete software
+workflows and executable checks exist. Use regular tests during implementation.
+After reaching 100% and a passing `make test`, run the race suite as explicitly
+authorized by the user. External live/provider/hardware qualification remains
+separate; no credentials are available and no live sends are authorized here.
+
+### Current checkpoint: 84/84 (100%) software coverage
+
+All original software criteria are implemented. Final `make test` passed, including regular tests and vet. The authorized
+`make test-all` race gate is now starting on the same source.
+Live provider, hardware, VM and cross-UID host qualification remain manual and are
+not included in this software score. The current broad race result remains pending.
+The earlier source fingerprint below predates this continuation and will be refreshed.
+
+### Final source and build identity
+
+Base commit: `83e091fc04bb4669d6b7510cade0402329d485b1`; the working tree retains
+all implementation changes without committing or staging. Non-Markdown source
+inventory: 945 files, SHA256
+`3fb72468723b4e66ece66e4f54a5aec02b97cd726a18a6b22ed0433852a27d19`,
+recorded in `/tmp/deploy-100-source-manifest.json`. This supersedes earlier source
+fingerprints below. Documentation edits do not change this source inventory.
+
+Environment: Go 1.27.2, Linux 7.0.0-43-generic x86_64. Linux ARM64 cross-build passed;
+`/tmp/deploy-100-linux-arm64` SHA256
+`dfa1674e7700e5d09d502ab62d8681ae1f3089da932cf7f2b5b033f0d01c83bb`.
+This is compile evidence, not native ARM64 execution or hardware qualification.
+Final regular suite log: `/tmp/deploy-100-final-regular.log` (PASS, exit 0, including vet).
+Backup 142.557s, notification installer 814.208s, notification worker 299.202s.
+Other packages passed or reused valid cached results.
+Final regular/race gate log: `/tmp/deploy-100-final-test-all.log` (in progress).
+
+### Terminal operator lifecycle (N-A16)
+
+Added `replacement-target`, `installation-retire` and `replacement-init` plus
+`examples/notification-worker/RETIREMENT_REPLACEMENT.md`. UID, socket, general
+configuration and history changes can explicitly retire the old installation and
+initialize fresh enrollment after all obligations settle. This entails downtime,
+new worker/producer identities and a fresh native interactive account. Existing
+account/producer continuity uses the narrower migration and repeated-recovery
+protocols. Old queues, grants, receipts and audit history remain in the old state.
+
+Retirement checks exact completed uninstall, permanent producer fences, settled
+inputs/replies, recovered ownership, original UID and LED layout. It clears only
+owned reserved baseline/healthy IDs, never fault/foreign IDs, and confirms absence.
+Independent SQL/file evidence and a terminal managed fence survive interruption.
+Replacement initialization pins the certificate, UID, paths, raw runtime and fresh
+identity; setup checks the reviewed target. Three terminal operation slots permit
+shutdown at the normal 32-operation history bound. Backup aggregate retirement
+requires explicit retirement of every configured source and no active coverage or
+open incidents. Updated runbooks remove stale descriptions of now-supported paths.
+
+Evidence: `/tmp/deploy-100-retirement-complete.log` passes worker 0.131s,
+installer 3.648s and backup 0.414s, including native CLI, recovered Signal,
+private-input/dry-run, target/UID/identity conflicts, missing proof, full-history
+shutdown, six installer/replacement SIGKILL and three worker/LED SIGKILL boundaries.
+
+### Repeated notification migration (N-A12)
+
+Legacy Signal migration pins the adopted account ancestor, actual admitted service,
+CLI selector hashes and provider order. It supports canonical cutover, audited
+legacy rollback and remigration without reactivating the old account receiver.
+Migration cycles freeze old metadata and exact export payloads before revocation;
+the atomic pending marker fences reports across interruption. Historical acceptance
+is checked against retained recovery checkpoint receipts under its original identity.
+Three migration/recovery epochs preserve original source decisions and immutable
+payloads. Missing independent cycle/source proof refuses admission.
+
+Regular evidence:
+
+- `/tmp/deploy-100-notification-migration-regressions.log`: backup 96.385s,
+  worker 0.100s, installer 2.906s; pass.
+- `/tmp/deploy-100-migration-cycle-crash.log`: six actual SIGKILL boundaries,
+  repeated cycles, held-source and dry-run guards; pass (1.336s).
+- `/tmp/deploy-100-cycles-recovery.log`: three interleaved migration/recovery
+  epochs and existing repeated recovery scenarios; pass (46.193s).
+- `/tmp/deploy-100-cycle-native.log`: real native helper capability checks;
+  pass (1.589s).
+- `/tmp/deploy-100-signal-migration-cycles.log`: two complete Signal migration,
+  rollback and remigration cycles; pass (2.572s).
+
+### Shared backup lifecycle (B-A29)
+
+Completed setup captures the exact shared owner and managed report credential
+exclusions before an update. Configuration/helper rollback, source key rotation
+and qualified activation preserve that authority and activate only the current
+report triggers. Key rotation updates the owned-file digest after verified source
+acknowledgement. Interrupted legacy setup cannot acquire shared authority.
+
+Version 2 cutover continuation permits updated config/helper/managed-manifest pins
+only for revocation; original producer, route, generation and evidence stay fixed.
+The subsequent legacy rollback and G+1 remigration retain the original proof.
+
+Regular evidence: `/tmp/deploy-100-backup-shared-full.log` full backup package pass
+(102.177s); `/tmp/deploy-100-cutover-continuation.log` shared setup/key rotation,
+activation, SIGKILL recovery, continuation interruption/tamper and rollback/remigration
+checks pass (0.438s). `/tmp/deploy-100-managed-report-profile.log` read-only profile,
+lease and identity checks pass (0.036s). Full repository tests remain due after
+implementation; no race suite has been started.
+
+Latest regular evidence:
+
+- `/tmp/deploy-100-signal-regressions.log`: broad managed Signal/service/recovery
+  regression selection, pass (346.000s).
+- `/tmp/deploy-100-compacted-request-fence.log`: compacted historical inputs remain
+  silently fenced; fresh inputs remain blocked until publication, pass (1.610s).
+- `/tmp/deploy-100-backup-repeated.log`: three backup report recovery epochs,
+  interrupted ancestor capture and missing original proof refusal, pass (21.779s).
+- `/tmp/deploy-100-backup-repeated-interactive.log`: same three epochs with retained
+  executed/pending commands, original receipt identities and exactly one domain
+  effect, pass (26.749s).
+- `/tmp/deploy-100-backup-next-crash.log`: SIGKILL at ancestor-file publication,
+  SQL transaction and committed capture, pass (1.938s).
+- `/tmp/deploy-100-interaction-next-regressions.log`: complete interaction package,
+  including four command-ledger epochs and next-epoch SIGKILL tests, pass (0.311s).
+- `/tmp/deploy-100-backup-next-native.log`: freshly built helper advertises first
+  and repeated recovery support and rejects incorrect binary pins, pass (1.445s).
+- `/tmp/deploy-100-recovery-regressions.log`: combined backup recovery and gateway
+  command/recovery regressions, pass (backup 77.588s; worker 14.115s).
+
+The new backup archive keeps independently written, bounded history pages and
+activation files before its atomic next-epoch fence/export. Historical report
+payloads keep their original generations. Command-ledger captures retain old
+receipts under their original identity; the gateway checks those historical
+records against its independently retained original database. Old command and
+result authority remains fenced. Activation files are scoped to the recovery
+operation and later startup verifies the complete ancestor chain.
+
+### Managed command enrollment and restore (I-A07, I-A09)
+
+Implemented `migrate-commands --configuration-file` after explicit command disable.
+Version-3 retained command policy contains the complete effective interaction
+configuration without replacing canonical owner/recovery configuration. It supports
+alias renames, worker/conversation removal, conversation generation rotation and
+permission narrowing. Retired aliases, revisions and generations cannot be reused;
+new audiences/accounts or restored removed authority are refused. Pending provider
+inputs receive atomic retained rejection mappings alongside the policy head.
+Installed pollers use effective destinations. Existing envelopes/results retain
+original destinations; prior-policy replies and grants are suppressed.
+
+The integrated restore-before-conversion case found and fixed inconsistent imported
+flags when original request history and specialist command history arrived in
+opposite orders. Both now install the same historical head. The test snapshots
+pending provider input, converts and executes once, renames the alias, then restores,
+reconciles, publishes and reactivates. It retains original identities and one domain
+effect while accepting fresh requests under the renamed alias.
+
+Regular evidence:
+
+- `/tmp/deploy-100-command-restore-alias.log`: managed integrated restore/alias
+  scenario (7.951s) and worker request/command recovery regressions (1.814s), pass.
+- `/tmp/deploy-100-command-enrollment-worker.log`: command history/policy/recovery,
+  atomic enrollment fences and four enrollment SIGKILL boundaries, pass (9.628s).
+- `/tmp/deploy-100-command-enrollment-install.log`: managed removal/generation
+  migration, interrupted publication, restart, CLI/private-input/dry-run and old
+  helper refusal, pass (0.180s).
+- `/tmp/deploy-100-command-enrollment-native.log`: freshly built native binary and
+  retained helper enrollment capability with managed delivery lifecycle, pass
+  (11.639s).
+- `/tmp/deploy-100-command-enrollment-regressions.log`: combined managed command,
+  enrollment and recovery regression selection; worker pass (11.851s), including
+  dual-provider identity isolation, real reply adapters with synthetic transports,
+  same-account credential rotation and enrollment removal; installer pass (66.700s).
+
+Runbook: `examples/notification-worker/COMMAND_MIGRATION.md`. General account/native
+recipient, UID/socket and history migrations remain under N-A16. Race checking has
+not started.
+
+### Legacy Signal adoption implementation (N-A11)
+
+Implemented `backup-worker signal-adoption-review`, `signal-adopt` and
+`signal-adoption-handoff`. The existing legacy account directory and lease remain
+canonical. Exact installed configuration/image/unit/service binding and a no-network,
+no-account-mount image probe precede the common account fence. A live CLI child
+retaining the account lease prevents inbox bootstrap. The new source inbox records
+empty retained history with `HistoryComplete=false`, has resumable identity/SQL
+creation, and refuses foreign data or lost committed evidence. Its proof is bound
+into the installed runtime and is rechecked through subsequent inbox ancestry.
+The handoff uses a second account epoch and actual gateway publication, then feeds
+the existing managed Signal endpoint and production-service workflow.
+
+Regular evidence:
+
+- `/tmp/deploy-100-legacy-signal-cli-workflow.log`: complete review/adopt/published
+  handoff CLI workflow with canonical installed backup files, pass (0.761s).
+- `/tmp/deploy-100-legacy-signal-bootstrap.log`: bootstrap/installation lineage,
+  interrupted initialization, existing-data refusal and repeated inbox tests, pass.
+- `/tmp/deploy-100-legacy-signal-combined.log`: published gateway/endpoint handoff
+  and bootstrap SIGKILL boundaries, pass (backup 1.162s; relay 0.056s).
+- `/tmp/deploy-100-legacy-signal-adoption-full.log`: full legacy account adoption
+  selection, including an inherited account lease in a real child, pass (1.242s).
+- `/tmp/deploy-100-legacy-signal-cli.log`: dry-run/local/private-input guards and
+  isolated image capability probe, pass (0.012s).
+- `/tmp/deploy-100-legacy-signal-native.log`: native helper includes adoption
+  capability, pass (1.511s).
+- `/tmp/deploy-100-legacy-signal-regressions.log`: full relay and signalaccount
+  packages, pass (7.180s and 1.307s).
+
+Runbook: `examples/notification-worker/LEGACY_SIGNAL_ADOPTION.md`, with private
+specification templates. Backup notification ownership migration and repeated
+legacy/shared cycles remain under N-A12. No live provider or manager was contacted.
+
+### Repeated-recovery implementation detail
+
+Recovered snapshots now use a version-2 manifest and independently copied
+publication/adoption/checkpoint evidence. They retain their SQL quarantine marker
+and cannot start as ordinary worker state. Missing or changed ancestor evidence
+is rejected. A new staged next-epoch transition retains prior reconciliation rows
+and metadata, rotates the epoch, and retires only exact root publication slots
+whose independently verified copies are already durable. The original managed
+owner is retained through a version-2 delivery recovery binding. Ancestor links
+are included in checkpoint proof hashes; verification walks the chain with bounded
+depth and byte/file budgets rather than recursively repeating identical work.
+
+Completed regular tests during this continuation:
+
+- `/tmp/deploy-100-snapshot-ancestor.log`: recovered/ordinary snapshot tests, pass.
+- `/tmp/deploy-100-next-recovery.log`: three sequential worker recovery epochs,
+  publication/adoption/snapshot and retained original owner, pass (59.628s before
+  reducing duplicate ancestor verification).
+- `/tmp/deploy-100-next-recovery-boundaries.log`: all 15 durable interruption
+  boundaries, idempotent resume, refusal of old runtime and lost ancestor proof,
+  pass (18.918s).
+- `/tmp/deploy-100-next-recovery-combined.log`: next recovery, snapshots and
+  existing managed recovered-delivery regressions, pass (47.064s).
+
+Managed integration now passes three-epoch delivery and command scenarios. It
+uses per-parent preparation intents, explicit binary/helper capability checks,
+epoch-scoped Telegram renewal/handoff records and retained command revocations.
+Current original runtime audit files are archived separately from an older snapshot
+and bound into the new checkpoint proof. Historical request fences carry forward
+from both sources, including inputs whose provider inbox is no longer retained.
+
+Additional regular evidence:
+
+- `/tmp/deploy-100-managed-next-recovery.log`: managed repeated lifecycle and
+  first-recovery regressions, pass (44.671s).
+- `/tmp/deploy-100-managed-repeated-commands.log`: three command-intake epochs,
+  retained permission revocation, post-snapshot disable and fresh handoffs, pass
+  (98.886s).
+- `/tmp/deploy-100-next-recovery-audit.log`: worker recovery/snapshot, Telegram and
+  request-seal regressions plus actual SIGKILL at six next-epoch boundaries, pass
+  (91.558s).
+- `/tmp/deploy-100-next-recovery-led.log`: inherited LED fault preservation and a
+  clear committed after the restored snapshot, pass (21.272s). The mock daemon
+  sees one Clear across both epochs/restarts; foreign state stays intact.
+
+The regular `make test` checkpoint **passed**, including vet, in
+`/tmp/deploy-100-regular-checkpoint.log` (installer 653.433s, worker 277.265s,
+backup 52.345s). It started before the latest LED and Signal ancestor additions;
+those still require a subsequent full check against the final implementation.
+
+Signal continuation now includes version-2 account recovery records retaining
+independent ancestor proofs, per-parent durable transition intents, old-runtime
+refusal and exact crash resume. Installed inboxes retain separate incoming and
+outgoing installation records, verify ancestor images, preserve event positions
+and refuse the old receiver after its outgoing handoff. New pinned offline CLI
+commands are `recovery-signal-history` and `recovery-signal-cursor`; the existing
+Signal installation fixture now exercises these commands. The new
+`recovery-signal-managed-handoff` requires a completed service removal, exact prior
+endpoint/account/configuration and an installed later-recovery capability probe.
+It never starts a service. Atomic managed gateway/profile adoption now retains earlier endpoint and profile
+proofs and rebinds only the proven Signal transport. A three-epoch managed fixture
+passes fresh qualification, delivery and command admission with later disable
+history. Its native-process variant and interruption extensions passed; broad Signal
+regressions are still running and must not yet be counted as passed. These changes
+still do not complete the backup portion of N-A10.
+
+Additional regular results:
+
+- `/tmp/deploy-100-signal-next-crash.log`: signalaccount (1.184s) and relay
+  (7.077s) suites pass, including SIGKILL during later-epoch transitions.
+- `/tmp/deploy-100-relay-repeat.log`: installed Signal inboxes across three
+  epochs, fresh event intake/ACKs, retained positions and missing-grandparent
+  image refusal, pass (0.273s).
+- `/tmp/deploy-100-signal-next-cli.log`: removed managed-service adapter,
+  exact predecessor checks, no-write dry run and first-recovery inbox installation
+  through the pinned intake CLI, pass (3.405s).
+
+`/tmp/deploy-100-signal-repeated-managed.log` passes the three-epoch managed
+Signal lifecycle (62.236s); `/tmp/deploy-100-signal-repeated-commands.log` extends it
+with command admission/disable and passes (87.661s). Native capability dispatch
+was checked with `/tmp/deploy-100-signal-next-native`; the later atomic-profile
+changes still require a fresh build/full suite.
+
+Additional passes: `/tmp/deploy-100-signal-native-repeated.log` (225.246s) runs
+three epochs with native gateway/Signal processes, local sockets, pinned capability
+checks and a synthetic CLI; service managers are simulated. It does not contact
+Signal. `/tmp/deploy-100-signal-repeated-adoption-resume.log` (101.017s) adds
+interruption after recovery adoption/publication and loss of the original profile
+proof. The isolated release script now selects the native repeated-recovery test.
+
+Historical checkpoint, superseded by the current count above: N-A10 was still
+partial while broad Signal, repeated backup activation and compacted request-fence
+checks were running. Those checks subsequently passed. No race tests have been
+run during this continuation.
+
+Work resumed on 2026-11-06 after the user asked to continue implementation toward
+90%. The user explicitly confirmed software implementation coverage as the target,
+with manual qualification and unsupported workflows listed separately. Preserve
+the working tree; no implementation commit has been created.
+
+## Software target reached: 77/84 (91.7%)
+
+The user-confirmed aggregate software implementation target is reached. The
+original 84 criteria are unchanged; seven partial criteria contribute zero.
+[SOFTWARE_COVERAGE.md](SOFTWARE_COVERAGE.md) records the criterion audit, supported
+workflows and seven remaining software gaps. This is not 90% in every plan or
+full production acceptance. Live/provider, VM, host-manager, target-load and
+hardware qualification remain unqualified. No real provider credentials were used.
+
+The final requested `make test` **passed**, including every package's regular
+tests and `go vet ./...`. Log: `/tmp/deploy-90-make-test.log`. Installer: 474.974s;
+worker: 218.899s; backup: 53.628s; deployment: 169.498s. This includes the final
+permission-policy SIGKILL fixture. Prior focused race/native results are retained
+below; the stopped broad race run is not a pass. `make test-all` was dry-run checked
+but not executed, honoring the user's deferred race-testing preference.
+
+## Development test policy — user decision, 2026-11-06
+
+The user asked to stop the expensive broad race run and defer race qualification
+until after implementation. Stopped that run explicitly (exit 143), with log
+`/tmp/deploy-90-current-full-race.log`; it is **not a passing full race result**.
+No replacement race run was started.
+
+`make test` now runs regular `go test -timeout=25m ./...` plus `go vet ./...`.
+The timeout accommodates the existing retained-history fixtures, and Go caching
+remains enabled. New `make test-all` runs `test` and then the explicit broad race
+suite. `release-check` depends on `test-all`, preserving the release qualification
+gate. Normal implementation iterations use `make test`; review races separately
+after implementation. README and the current status/coverage docs record this.
+
+The final regular suite already passed (installer 610.845s, worker 277.016s,
+backup 65.087s, deployment 202.103s), `/tmp/deploy-90-policy-full-ordinary.log`.
+The requested updated `make test` passed, `/tmp/deploy-90-make-test.log`;
+`make -n test`, `make -n test-all` and `make -n release-check` confirm the split
+without executing the deferred race or integration targets.
+
+## Final-tree identification and verification
+
+Base commit: `83e091fc04bb4669d6b7510cade0402329d485b1`; changes remain uncommitted.
+Current source-tree SHA256:
+`d5162e1cf08a4872f984946d81022c3f101b2a14697f530b3dc0408d8b47a26c`.
+The canonical JSON manifest at `/tmp/deploy-90-source-manifest.json` covers 874
+tracked/untracked non-ignored source/artifact files, sorted by path, with file mode
+and SHA256. Markdown is excluded to avoid self-reference; symlinks hash their
+link text. The digest hashes compact JSON before the trailing newline.
+
+Environment: Go 1.27.2, Linux 7.0.0-43-generic x86_64. Offline LED fixture:
+`fbe71f9f6edd108beceb01d568a0b17b5a6eb85c`. ARM64 output:
+`/tmp/deploy-90-policy-linux-arm64` (static AArch64 ELF; not executed on ARM64).
+No real messenger credentials, host service rollout or physical LED changes were used.
+The existing host user-systemd `218/CAPABILITIES` failure and unavailable
+registry/VM qualification remain unresolved external gates.
+
+## Final audit addition: managed permission narrowing
+
+The final coverage audit found I-A06/I-A12 still relied on test-only policy changes.
+Added `narrow-commands --local --root ROOT --manifest-hash HASH --permissions-file
+ABSOLUTE_JSON` after explicit command disable. The complete retained permission
+array can only remove rights/subjects; `[]` revokes everyone. Canonical configuration
+and recovery hashes remain intact. Independent SQL/file command history, a version-2
+head and runtime/helper capability checks prevent older authority from silently
+restoring access. Recovery derives the retained policy from the independently
+proven original command head. Disable/re-enable/deactivation preserve it.
+
+Runtime intake, confirmation, grants, gateway queries, pages and reply dispatch
+use the immutable effective policy. Old frozen requests/replies are invalidated;
+already running jobs retain locally inspectable outcomes. The operator runbook is
+updated in `examples/notification-worker/COMMAND_ACTIVATION.md`.
+
+Initial new tests passed (worker 0.060s, installer 10.394s),
+`/tmp/deploy-90-policy-focused.log`. The first compile attempt caught a mechanical
+replacement on a different Telegram session type; corrected before the pass.
+Expanded managed/authorization/recovery tests passed (worker 12.644s, installer
+59.051s), `/tmp/deploy-90-policy-regressions.log`. Actual SIGKILL at all four policy
+commit boundaries passed under race (1.763s),
+`/tmp/deploy-90-policy-sigkill-final-race.log`. Its first fixture run misclassified
+the expected wrapped process exit; the assertion now uses `errors.As`. The
+process-death fixture was added after the full ordinary/focused race runs started
+and is covered by this separate pass and final worker vet.
+Full vet, Linux ARM64 cross-build and native policy-capability probe passed; the
+native probe returned command_policy=1, version=1, schema=10. The build is a local
+CLI capability check, not host-manager or live-provider qualification.
+Focused command/authorization/recovery race checks passed (worker 266.353s,
+installer 323.898s), `/tmp/deploy-90-policy-final-race.log`. The final full ordinary
+rerun passed; the broad repository race was subsequently stopped at the user's
+request, as recorded above.
+
+Exact final policy commands:
+
+```sh
+go test ./internal/notification/worker ./internal/notification/install -run '^Test(ManagedCommand|Command|Gateway|HelpPagination|Context|NativeReply|TelegramIntake|SignalIntake)' -count=1 -timeout=10m
+go test -race ./internal/notification/worker ./internal/notification/install -run '^Test(ManagedCommand|Command|Gateway|HelpPagination|Context|NativeReply|TelegramIntake|SignalIntake)' -count=1 -timeout=20m
+go test -race ./internal/notification/worker -run '^TestManagedCommandPolicySIGKILL$' -count=1 -timeout=5m
+go test ./... -count=1 -timeout=25m
+go vet ./...
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/deploy-90-policy-linux-arm64 ./cmd/deploy
+go build -o /tmp/deploy-90-policy-linux-amd64 ./cmd/deploy
+/tmp/deploy-90-policy-linux-amd64 notification-worker __managed-command-policy-probe
+```
+The source fingerprint above includes this addition and the final process-death
+fixture. The completed aggregate implementation count is 77/84 (91.7%).
+
+## Latest work: operator recovery preparation and integrated command proofs
+
+Added pinned `recovery-telegram-history`, explicit `recovery-telegram-drain`,
+`recovery-requests-seal` and `recovery-telegram-cursor` CLI steps. The previous
+recovery runbook depended on internal APIs for these operations. Wrong operation
+and snapshot pins refuse before intake mutation/provider access. Drain requires
+explicit receiver-stop acknowledgement; sealing follows available specialist
+command reconciliation. Dry-run does not open state or contact providers.
+The runbook is `examples/notification-worker/TELEGRAM_RECOVERY_INTAKE.md`.
+Ordinary CLI/pin and managed restore checks passed (installer 15.298s, worker
+0.065s), `/tmp/deploy-90-recovery-intake-cli-final.log`. The first compile failed
+on an unused import after refactoring the test helper; corrected before this pass.
+
+The complete managed committed-effect recovery test passed (7.927s),
+`/tmp/deploy-90-managed-effect-reconciled.log`: snapshot before domain commit,
+retained committed result plus pending command, recovery publication/adoption,
+fresh activation/all-command admission, reopen twice, no second effect or new
+receipt. It exposed a test-helper ordering error: request sealing must follow
+command mapping imports. Existing runtime fences correctly rejected the old order.
+Command lifecycle/recovery/three-context rotation race checks passed (221.465s),
+`/tmp/deploy-90-managed-command-final-race.log`. The final four-context case
+(private, group, two threads) passed under race (2.467s),
+`/tmp/deploy-90-four-conversations-race.log`. Its old qualification blocks changed
+credentials; deactivation and fresh qualification preserve exact pending replies.
+I-A09 remains partial because managed enrollment/configuration migration is open.
+A final test-only strengthening queries both exact original command bodies and
+their distinct recovered outcomes through the managed API after each reopen;
+its race run passed (62.526s), `/tmp/deploy-90-managed-effect-exact-race.log`.
+This assertion was added after the full ordinary run; production code is unchanged.
+
+The release integration script now selects new production paths, runtime aggregate
+LED cleanup and backup recovery activation/remigration. New integration race run
+`/tmp/deploy-90-current-native-race.log` passed worker 103.540s and backup 2.105s,
+but installer failed two native Signal scenarios at the whole-fixture 90-second
+context. Their bounded full-scenario budget is now five minutes; production RPC
+limits are unchanged. Both rerun cases passed (407.932s),
+`/tmp/deploy-90-native-signal-final-race.log`.
+Do not call the first integration invocation a pass.
+
+Full ordinary rerun passed (installer 524.707s, worker 270.073s, backup 70.967s,
+deployment 193.871s), `/tmp/deploy-90-final-ordinary.log`. The broad repository
+race run was stopped at the user's request, `/tmp/deploy-90-current-full-race.log`; it predates the new
+intake CLI, whose complementary race checks passed (worker 109.634s, installer
+84.896s), `/tmp/deploy-90-intake-final-race.log`. Latest `go vet ./...` and ARM64
+cross-build also passed, `/tmp/deploy-90-final-vet.log` and
+`/tmp/deploy-90-final-arm64.log`. `SOFTWARE_COVERAGE.md` records an explicit
+implementation-only audit, separately from the original full acceptance target;
+its final software score is 77/84 (91.7%) after the requested regular `make test` passed. Manual checks are not
+counted as passed, and the seven partial software criteria stay incomplete.
+
+## Earlier checkpoint: native Signal production and destination enrollment
+
+The native Signal gateway now passes actual offline report dispatch, provider
+acceptance, command intake/reply, cursor advancement/restart, disable/drain,
+producer revocation and delivery deactivation. `/tmp/deploy-90-signal-complete-native.log`
+passed twice (90.873s), with a synthetic native CLI and simulated service manager.
+Production lifecycle/foundation race checks passed (341.846s),
+`/tmp/deploy-90-signal-production-focused-race.log`; actual SIGKILL enrollment,
+replacement and removal race checks passed (242.195s),
+`/tmp/deploy-90-signal-production-crash-race.log`. The earlier broad Signal race
+command timed out at 12 minutes; it is not a pass. A separate native run exposed
+a fixture cleanup double-wait after process exit; that fixture was fixed.
+A read-only process audit found no orphan native fixture services.
+
+Full repository ordinary tests passed at the Signal checkpoint:
+`/tmp/deploy-90-signal-ordinary.log` (installer 520.224s, worker 213.798s,
+deployment 176.391s, backup 57.706s). This predates the latest peer-health and
+explicit destination enrollment changes; final-tree checks remain required.
+A same-user socket serving plausible health is now rejected unless the peer
+process has the enrolled executable/arguments. Negative peer checks passed
+(1.441s), `/tmp/deploy-90-signal-peer-negative.log`.
+
+Legacy fixed Signal profiles can now be explicitly mapped to an existing enrolled
+conversation on the same recovered account. Exact previous destination pins,
+retained mapping, new route revisions and immutable canonical recovery bytes
+prevent silent redirection of queued messages. Lifecycle/interruption/refusal
+checks passed (3.512s), `/tmp/deploy-90-signal-conversations.log`; native follow-ups passed for both existing and explicitly enrolled conversations
+(60.903s), `/tmp/deploy-90-signal-enrolled-native-final.log`. Final combined
+Signal enrollment/managed LED race checks passed (66.721s),
+`/tmp/deploy-90-led-signal-enrollment-race.log`. The first native follow-up caught an incorrect probe
+path; the probe now selects its capability from the immutable profile manifest.
+Legacy backup relays without an interactive account/inbox are still unfinished.
+
+## Implemented: managed LED output admission
+
+Qualified managed delivery now runs the existing LED reconciler behind admission
+checks on every daemon request. The combined admission/RPC deadline stays inside
+the reconciler's two-second latency reserve. Daemon failure degrades LED output
+without authorizing healthy renewal; installation admission loss stops the runtime.
+A new capability probe prevents older helpers from silently omitting LED output.
+Existing inherited-fault and foreign-state fences are unchanged. Aggregate inherited
+fault cleanup remains a separate unfinished requirement.
+
+Local lifecycle/revocation/cancellation checks passed (0.155s),
+`/tmp/deploy-90-managed-led-admission-complete.log`. Native executable activation,
+fresh status to healthy lease, producer revocation and verification deactivation
+passed against the pinned offline pi-status-led daemon with mock hardware (6.151s),
+`/tmp/deploy-90-managed-led-native.log`. Foreign application state stayed unchanged.
+No physical LED qualification was performed. Combined LED/Signal enrollment race
+checks passed as recorded above. Earlier fixture failures were missing explicit
+binding migration and incomplete mock arbitration; they were corrected.
+
+## Implemented: first backup remigration after legacy rollback
+
+`notification-remigrate` now supports the initialized Telegram G → legacy → G+1
+cycle after both predecessor generations are durably revoked. Original cutover,
+rollback, source rows and approvals remain immutable. Accepted native work stays
+historical, unsent work gets fresh export IDs/increasing sequences, and uncertain
+work stays held. A new remigration-scoped `notification-resolve` approval may
+explicitly release held work; old approvals cannot release the new ambiguity.
+Health and catch-up readiness include native work absent from the original cutover.
+Owner schema 2 makes older helpers refuse remigrated source holds.
+
+Focused ownership/legacy-resolution/remigration race and actual SIGKILL checks
+passed (20.118s), `/tmp/deploy-90-remigration-resolution-race.log`. Native runtime
+and helper predecessor checks, fresh successor activation/revoke, credential loss
+and subsequent first-recovery activation passed (11.371s),
+`/tmp/deploy-90-remigration-native.log`. A later prior-approval preservation case
+passed (0.173s), `/tmp/deploy-90-remigration-prior-approval-final.log`.
+The backup regression suite and activation review checks passed (49.883s and
+6.753s), `/tmp/deploy-90-remigration-backup-review.log`. These are automated local
+fixtures; they do not qualify real services/providers. Additional remigration
+batch/import and CLI checks, then final-tree gates, are still pending.
+
+Remaining implementation includes later complete
+managed recovery epochs, legacy backup Signal relay adoption, general shared-mode
+backup lifecycle, and explicit UID/socket/configuration/history transitions.
+No measured 90% or production-readiness claim is made at this checkpoint.
+
+## Current work: explicit aggregate LED recovery
+
+Implemented `led-recovery-review` and `led-recovery-clear` for a running, qualified
+managed recovered gateway. The runtime can resolve one exact inherited worker
+fault only after fresh aggregate producer and loop evidence is healthy. Named
+producer inherited faults remain separate blockers. Registry identity/style and
+current managed admission are checked around the bounded daemon request. Clearing
+never creates a healthy lease or claims physical output. Independent chained
+file/SQL intent/result records preserve uncertainty and prevent automatic resend;
+missing anchors or retained later history block cleanup/health.
+
+Lifecycle, restart, source/loop/registry drift and missing-anchor tests passed
+(15.137s), `/tmp/deploy-90-led-aggregate-lifecycle.log`. A real local gateway socket
+and pinned mock-hardware daemon test, plus actual SIGKILL at five cleanup
+boundaries, passed (5.688s), `/tmp/deploy-90-led-aggregate-native.log`. Interrupted
+requests did not replay a clear; foreign state stayed unchanged. Focused race checks passed (worker 260.460s, installer 1.019s),
+`/tmp/deploy-90-led-aggregate-race.log`. The later file-tail audit, lost-head/SQL and
+queue-ambiguity cases passed (worker 17.829s, installer 7.002s),
+`/tmp/deploy-90-led-aggregate-tail-review.log`. Full repository gates remain pending. The runbook is `examples/notification-worker/LED_RECOVERY_RUNTIME.md`.
+
+## Current verification checkpoint
+
+The complete ordinary suite ran against the remigration/aggregate implementation.
+All packages except backup passed, including installer 455.679s and worker 214.989s,
+`/tmp/deploy-90-current-ordinary.log`. Backup exposed
+`TestSharedReportHeldRowsDoNotStarveFreshReports`: the new resolution lookup decoded
+an unreleased held legacy row unnecessarily. Fixed it to test for a grant first;
+source evidence is still validated before using any grant. The focused regression
+passed (1.374s), `/tmp/deploy-90-remigration-starvation-regression.log`. A full backup
+rerun passed (57.482s), `/tmp/deploy-90-backup-ordinary-final.log`; do not call the first
+full-suite invocation a pass.
+
+Activation review now uses canonical Signal input when checking the retained
+profile transition, avoiding an accidental second enrollment transform. Positive
+existing-conversation and explicit legacy-enrollment review tests passed (3.839s),
+`/tmp/deploy-90-activation-signal-review.log`. README and runbooks now link the
+implemented first-recovery, Signal, command, remigration and aggregate LED flows
+instead of claiming they are all unavailable.
+
+`go vet ./...` passed, `/tmp/deploy-90-current-vet.log`. Linux ARM64 static
+cross-build passed, `/tmp/deploy-90-current-arm64.log`; output
+`/tmp/deploy-90-linux-arm64` is AArch64 ELF. This is not native ARM64 execution.
+The complete race suite is now running with the repository's 90-minute timeout,
+`/tmp/deploy-90-current-full-race.log`. No final-tree 90% score is awarded yet.
+
+## Current work: recovered delivery and managed commands
+
+First recovery of outbound Telegram now supports both an already enrolled owner
+and first enrollment after recovery. Original ownership is independently proved
+from retained file and source database; first enrollment requires both to prove
+that no prior owner existed. Immutable lineage intent, SQL and completion records
+bind the recovered identity. Adoption starts verification only; fresh qualification
+and explicit producer reconciliation/activation remain separate.
+
+Added `managed-snapshot` for an already stopped installation, and managed
+`recovery-prepare` with exact installation/snapshot/database pins. Preparation
+journals before stopping the service, preserves the quarantine epoch on retry,
+and blocks conflicting updates/reactivation. Original databases are inspected
+immutable. Updates/deactivation retain the lineage; rollback cannot cross it.
+
+Initialized Telegram installations with interaction configuration now support
+separate `enable-commands --mode read|all` and `disable-commands` operations.
+Delivery activation alone does not enable intake or execution. Read mode refuses
+mutations; all mode retains the existing confirmation, authorization and idempotency
+contracts. Disable stops new intake/grants and drains existing replies while
+outbound report delivery remains available. Deactivation returns to verification
+and reactivation defaults to commands off. Unexpired execution grants are allowed
+to drain before disable/deactivation completes; accepted jobs/results are retained.
+
+Command admission has independent SQL and file history, including every immutable
+transition and completion. Restoring an older manifest/head cannot undo a later
+disable while that history remains. Runtime checks current admission before intake,
+grants and replies. Telegram transport binds both credential-file contents and the
+actual request token to qualified inputs. An interrupted command operation can be
+cancelled through delivery deactivation without credentials; producer revocation
+remains available while that operation is pending.
+
+Evidence (synthetic credentials/transports; no live provider calls):
+
+- Recovered ownership focused race tests passed: worker 127.386s, installer
+  90.598s, `/tmp/deploy-90-recovered-final-race.log`, including actual SIGKILL at
+  three enrollment boundaries, pre-enrollment snapshots and anchor-loss refusal.
+- Repository ordinary suite passed before command admission was added:
+  `/tmp/deploy-90-resumed-ordinary.log`.
+- Command admission/history/runtime focused race tests passed: worker 2.443s,
+  installer 16.066s, `/tmp/deploy-90-managed-commands-race.log`; this predates
+  the final interrupted-operation cancellation changes.
+- Cancellation tests passed after those changes: installer 22.510s,
+  `/tmp/deploy-90-command-cancellation.log`.
+- Native executable recovered delivery integration passed after command changes:
+  installer 10.774s, `/tmp/deploy-90-command-native.log`. It uses a simulated
+  service manager and exercises real executable/socket identity checks.
+- Full ordinary suite passed after command cancellation changes:
+  `/tmp/deploy-90-command-ordinary.log` (installer 321.791s, worker 199.706s).
+  This predates the subsequent Signal replacement work. The historical interrupted
+  broad race run below remains incomplete.
+
+See [COMMAND_ACTIVATION.md](examples/notification-worker/COMMAND_ACTIVATION.md)
+for command enable/disable, pending-operation cancellation and profile limits.
+Managed Signal production,
+later recovery epochs, aggregate LED reconciliation and the remaining producer
+handoffs remain open. No measured 90% claim is made. Live messenger checks remain
+user-deferred manual qualification; they do not block further implementation.
+
+## Current work: Signal verifier replacement
+
+Added `signal-service-replace` with an explicit `previous` service reference.
+The predecessor must be completely removed and independently retained. A fresh
+root/executable takes the same verification endpoint through immutable intent and
+completion records in old/new installation and endpoint directories. Account and
+both inbox leases span the binding change. No provider intake or account linking
+is enabled. Old roots remain removed; compatible binary rollback is another
+explicit enrollment, never restoring an older pointer. Branching and lost evidence
+are refused, and traversal is bounded to 32 predecessors.
+
+`supervise-signal` now supports an exact explicit gateway rebind to the replacement,
+with new runtime/helper capability probes. Ordinary update/resume cannot silently
+accept a changed service. Migrated outgoing profiles and Telegram renewal proofs
+survive the rebind; old adoption/supervision intents remain required. The gateway
+and service fixture passes two successive replacements, interruption and unchanged
+worker-state assertions. Native executable service/gateway replacement passed in
+`/tmp/deploy-90-signal-replacement-native.log` (20.834s; simulated manager, offline
+account/inbox fixtures). Final ordinary negative controls passed (41.553s), and focused Signal replacement,
+gateway and SIGKILL race checks passed (522.763s) in
+`/tmp/deploy-90-signal-replacement-qualified-race.log`. Earlier broader race runs
+hit their 6-minute and 3-minute limits and are not passes. These results predate
+the following Telegram handoff integration.
+See [SIGNAL_VERIFICATION.md](examples/notification-worker/SIGNAL_VERIFICATION.md).
+
+## Implemented: recovered Telegram command handoff
+
+Added a worker-level durable handoff that consumes a fresh renewal into independent
+intent/SQL/completion anchors, preserves the original reconciliation cursor, and
+uses the newer cutoff for both intake and restored request conversion. The live
+offset may advance only behind this proof. Verification audits and restart retain
+the original publication and renewal. New drains cannot replace a consumed cutoff
+in the same epoch. A cancelled pre-SQL attempt is retained as an immutable abort
+and can be followed by a new renewal; cancellation completes an already committed
+SQL decision without changing its cutoff. Lost committed anchors remain failures.
+
+Worker ordinary tests passed (6.118s), initial focused race passed (104.233s), and
+cancellation tests passed (8.149s). The race result predates the cancellation API
+and final completion-loss guard; rerun against the final implementation.
+Logs: `/tmp/deploy-90-telegram-handoff.log`,
+`/tmp/deploy-90-telegram-handoff-race.log`,
+`/tmp/deploy-90-telegram-handoff-cancellation.log`.
+
+Installer integration is newly wired and still under test. Recovered interactive
+Telegram may activate outbound delivery with commands off; explicit command enable
+consumes the handoff before command history admission. Runtime callbacks recheck
+its pins. Interrupted enable can settle/abort the handoff during deactivation.
+New runtime/helper capability probes prevent older binaries admitting this path.
+Installer lifecycle and cancellation tests passed in
+`/tmp/deploy-90-recovered-telegram-commands.log` (30.505s). Final worker handoff
+ordinary tests passed in `/tmp/deploy-90-telegram-handoff-final.log` (7.875s).
+Full ordinary suite passed in `/tmp/deploy-90-recovered-commands-ordinary.log`
+(installer 399.038s, worker 202.679s), and focused handoff race tests passed in
+`/tmp/deploy-90-recovered-commands-race.log` (worker 165.165s, installer 252.797s).
+Native recovered interactive outbound delivery passed (15.064s), with commands off
+and simulated manager/renewal transport. Real SIGKILL handoff tests passed (3.831s).
+These results predate the command-history adoption and backup reactivation below.
+
+## Implemented: first recovery with existing command admission history
+
+First recovery now imports the latest independently retained source command head,
+even when the restored snapshot predates a later disable. Original SQL, immutable
+transition history and the independent file head must agree. The new epoch receives
+a drain-only history transition; explicit fresh command admission remains separate.
+Intent, SQL, head and completion survive interruption; lost completed authority
+blocks replay. Capability preflight occurs before recovery preparation is journaled
+or the service is stopped, and subsequent recovered delivery checks retain that gate.
+
+Focused worker and installer tests passed (9.934s / 10.588s), including actual
+SIGKILL at four history boundaries, installer resume, capability refusal and
+missing-anchor refusal. Logs: `/tmp/deploy-90-command-history-all.log`.
+Focused race checks passed (worker 371.911s, installer 199.271s),
+`/tmp/deploy-90-command-history-race.log`; this run predates the final JSON field
+tags and capability check on subsequent delivery operations. Ordinary checks after
+those changes passed (worker 10.446s, installer 10.798s),
+`/tmp/deploy-90-producer-recovery-base.log`. Broader final gates remain pending.
+
+## Implemented: recovered backup report activation
+
+`backup-worker notification-recovery-activate --local --spec ABS [--revoke]`
+connects the existing offline handoff to managed production reporting. It verifies
+the source commit against the immutable gateway checkpoint and retained ownership
+history, then activates only that allocated generation. Independent file/SQL
+activation records retain the old recovery evidence; revocation remains permanent.
+Report evaluation may advance after admission without erasing the recovery prefix.
+The noninteractive offline handoff now distinguishes initialized backup command-domain
+tables from an actual interactive ledger, preserving archive checks in both cases.
+
+Initial lifecycle, five interrupted-admission boundaries and lost-evidence tests
+passed (7.792s), `/tmp/deploy-90-backup-recovery-activation.log`. Follow-up evidence
+for transfer/receipts, original cutover provenance, native helper and actual SIGKILL
+is recorded below. Final repository-wide gates remain pending.
+No live provider calls or production services were used. The 90% target is not yet
+measured or reached; continue the consolidated implementation inventory.
+
+## Follow-up evidence and next Signal work
+
+Recovered backup reporting now passes actual new-epoch transfer/acknowledgement,
+new incident export, permanent revocation and original cutover-file retention.
+Five actual SIGKILL boundaries passed with exact retries (13.666s),
+`/tmp/deploy-90-backup-recovery-crash.log`. Additional cutover/CLI checks passed
+(0.646s), `/tmp/deploy-90-backup-recovery-cutover.log`. The native backup helper
+capability/dry-run check passed (0.696s),
+`/tmp/deploy-90-backup-recovery-native-final.log`. Its first run correctly refused
+a Go build-cache hardlink; the fixture now installs an independent private copy.
+Native recovered Telegram outbound delivery passed again (13.508s).
+
+The complete ordinary run in `/tmp/deploy-90-recovery-report-ordinary.log` failed
+four recovered Telegram installer fixtures because the new command-history
+capability probe was not stubbed. The fixture was corrected; focused lifecycle and
+cancellation checks passed (40.930s), and the installer package then passed
+(373.715s), `/tmp/deploy-90-recovery-install-ordinary-final.log`. The focused command
+capability race run also passed (332.026s),
+`/tmp/deploy-90-recovery-command-capability-race.log`. Other packages passed in the
+original ordinary run. These results predate subsequent Signal service work.
+Backup recovery/handoff race checks passed (331.715s), including actual SIGKILL,
+`/tmp/deploy-90-backup-recovery-race.log`. The backup reactivation runbook is
+[BACKUP_RECOVERY_ACTIVATION.md](examples/notification-worker/BACKUP_RECOVERY_ACTIVATION.md).
+
+Signal production handoff remains unfinished. New internal foundations:
+`signalaccount.OpenRecoveryRuntime` holds the independently fenced account behind
+a required managed admission callback, with an inheritable descriptor and checked
+shutdown. `relay.OpenManagedSignalInbox` transfers the already audited destination
+lease into a writable receiver without an unlock gap, retaining the original source
+lease, immutable source/image and endpoint receipt. Each transaction rechecks admission
+and provenance. Ordinary inbox/account startup remains fenced. Baseline offsets,
+listing, ACK, deduplication and restart continue without erasing recovery evidence.
+
+Existing relay/account suites passed before new focused tests (5.741s / 1.100s),
+`/tmp/deploy-90-signal-runtime-base.log`. Focused lease/baseline/revocation/missing
+proof tests passed (relay 0.343s, account 0.008s),
+`/tmp/deploy-90-signal-runtime-foundation.log`. No installed service exposes these
+APIs yet. Next work is independent durable Signal service admission, pinned native
+CLI/account execution with inherited lease and joined child lifetime, gateway
+production supervision/qualification, outgoing conversation profiles and managed
+command admission. Do not describe the foundation as a complete Signal workflow.
+
+## Current work: managed native Signal production service
+
+Production service enrollment now has an explicit immutable `runtime` spec with
+native CLI hash/version and account-selector file hash. The retained service
+manifest, independent endpoint binding and existing replacement/removal history
+bind admission. It stages private native executables and selector bytes, preserves
+account and source-inbox fences, and starts the writable inbox through transferred
+leases. Commands use only enrolled conversations; the legacy fixed `/send` route
+is unavailable in this mode. Service removal is permanent for that enrollment;
+replacement requires a new root with the retained predecessor proof.
+
+A separate native command supervisor inherits the account lease and pinned CLI
+file descriptor. It becomes a subreaper only in its isolated process, terminates
+and reaps surviving descendants (including a new-session child), and joins before
+returning or releasing authority. Cancellation does not merely wait for the CLI
+parent. No shell, PATH-selected CLI, container or JVM wrapper is accepted in this
+new native profile. Actual target/native CLI compatibility is manual qualification.
+
+Evidence, all offline with synthetic commands and simulated service manager:
+
+- Existing complete relay/account suites passed (6.006s / 1.090s),
+  `/tmp/deploy-90-signal-relay-ordinary.log`, before production service wiring.
+- Managed loop/socket race checks passed (relay 4.880s, installer 21.053s),
+  `/tmp/deploy-90-signal-runtime-loop-race.log`; its account regex matched no tests.
+- Native supervisor descendant/cancellation/pin checks passed (1.775s),
+  `/tmp/deploy-90-signal-command-supervisor.log`.
+- Service compatibility checks passed (installer 59.664s),
+  `/tmp/deploy-90-signal-production-base.log`.
+- New lifecycle/interruption/evidence-loss checks passed (12.665s),
+  `/tmp/deploy-90-signal-production-lifecycle.log`.
+- Installed native production service, real socket/health, conversation reply,
+  restart and permanent removal passed (5.374s),
+  `/tmp/deploy-90-signal-production-native.log`.
+
+A broader focused production/SIGKILL/route/lease race run is pending in
+`/tmp/deploy-90-signal-production-race.log` (session 18763). Effective route
+revisions are being separated from the retained canonical worker configuration;
+only enqueue/dispatch/admin routing uses them, leaving recovery/owner hashes intact.
+Gateway production qualification/admission and command intake are still unfinished.
+Do not count the whole managed Signal workflow or the 90% target as achieved.
+
+## Signal gateway admission follow-up (validation in progress)
+
+The gateway now accepts an explicitly supervised production service hash, requires
+native CLI qualification, and separately activates outbound delivery and read/all
+commands. Effective route lookup no longer changes the canonical worker config.
+Per-request Signal transport checks the Unix peer's native executable/arguments,
+while service and gateway admission remain independently audited. Signal command
+intake checks the retained cursor/request handoff; disable removes intake/conversion
+loops and retains reply drain. Producer generations remain independently inactive.
+
+Gateway delivery lifecycle passed (5.493s),
+`/tmp/deploy-90-signal-gateway-delivery-final.log`. Command enable/drain/deactivation
+passed (6.130s), `/tmp/deploy-90-signal-gateway-commands.log`. Mixed focused command
+checks passed (installer 37.061s, worker 1.059s),
+`/tmp/deploy-90-signal-command-wiring.log`; its provider regex matched no tests.
+
+The first combined native service/gateway test received and replied to a synthetic
+Signal command and restarted the gateway, then failed during disable because the
+Signal service had exited. Review found request cancellation incorrectly cancelled
+the relay service during an admission audit. The handler now leaves service lifetime
+intact when only the client request is cancelled. The combined native workflow is
+rerunning in `/tmp/deploy-90-signal-managed-native-final.log` (session 4463).
+Do not count this combined gate as passed until it finishes. The earlier production
+race run remains pending and predates subsequent gateway/transport changes.
+
+Runbook: [SIGNAL_PRODUCTION.md](examples/notification-worker/SIGNAL_PRODUCTION.md).
+No live service manager, provider, account linking or hardware action was performed.
+
+## Historical pause checkpoint — 2026-11-06 (superseded by resumption above)
 
 The requested 90% target has **not** been reached or measured as achieved.
 `IMPLEMENTATION_STATUS.md` and `ACCEPTANCE_MATRIX.md` retain the consolidated

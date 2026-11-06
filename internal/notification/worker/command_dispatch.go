@@ -21,8 +21,11 @@ type replyAttempt struct {
 }
 
 func (s *Store) grantReply(ctx context.Context, r CommandReply) (a replyAttempt, ok bool, err error) {
-	if s.verificationOnly {
+	if !s.commandRepliesEnabled() {
 		return a, false, nil
+	}
+	if err = s.checkManagedCommandAuthority(ctx); err != nil {
+		return a, false, err
 	}
 	err = s.transaction(ctx, func(tx *sql.Tx) error {
 		var state, body string

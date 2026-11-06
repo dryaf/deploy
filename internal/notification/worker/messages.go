@@ -46,7 +46,7 @@ func (s *Store) Enqueue(ctx context.Context, m protocol.Message) (j Job, err err
 	if err != nil {
 		return j, err
 	}
-	route, ok := s.config.Routes[m.Route]
+	route, ok := s.effectiveRoutes()[m.Route]
 	if m.Context != nil && !e.InteractiveContext {
 		return j, fmt.Errorf("interactive context not enrolled")
 	}

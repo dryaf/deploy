@@ -188,6 +188,9 @@ func (r *recoveryReconciler) importRecoveryCommand(tx *sql.Tx, ch protocol.Recov
 	if err := v.Validate(m); err != nil {
 		return err
 	}
+	if err := r.verifyHistoricalCommand(tx, v); err != nil {
+		return err
+	}
 	c := v.Command
 	var hash string
 	err := tx.QueryRow("SELECT hash FROM reconciliation_command_records WHERE producer=? AND ordinal=?", ch.Producer.ID, n).Scan(&hash)

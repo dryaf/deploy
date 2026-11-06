@@ -355,3 +355,24 @@ func TestActivationReviewRefusesAuthorityLoss(t *testing.T) {
 		})
 	}
 }
+
+func TestActivationReviewAdmittedSignalProfiles(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(map[bool]string{false: "conversation", true: "explicit-legacy-enrollment"}[legacy], func(t *testing.T) {
+			var manager *fakeSignalServiceManager
+			spec, _, services, _, _, _ := managedSignalDeliveryFixtureEnrolled(t, func(_ *ManagedSpec, s *SignalServiceSpec, _ *managedInstaller, _ *fakeManagedServices, _ SignalVerificationManifest) signalServiceInstaller {
+				manager = &fakeSignalServiceManager{units: s.UnitDirectory}
+				return signalServiceInstaller{manager: manager, probe: func(context.Context, *safefs.Directory, SignalServiceManifest) error { return nil }}
+			}, legacy)
+			if err := services.Stop(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			review, err := reviewActivation(context.Background(), spec.Root, services, manager, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			activationCheck(t, review, "signal", "activation", "satisfied")
+			activationCheck(t, review, "provider/signal", "binding", "satisfied")
+		})
+	}
+}

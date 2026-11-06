@@ -88,6 +88,13 @@ func renewPublishedTelegramHandoff(ctx context.Context, path string, c Config, c
 		return out, err
 	}
 	defer s.close()
+	consumed, err := readManagedTelegramHandoff(ctx, s.root, s.db, account)
+	if err != nil {
+		return out, err
+	}
+	if consumed != nil {
+		return out, fmt.Errorf("Telegram handoff is already consumed by managed intake; a new recovery transition is required")
+	}
 	j, err := s.openRenewal(ctx, &request, fault)
 	if err != nil {
 		return out, err

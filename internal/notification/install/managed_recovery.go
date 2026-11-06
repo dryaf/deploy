@@ -12,6 +12,11 @@ func (i managedInstaller) probeRecovery(ctx context.Context, d *safefs.Directory
 	if m.RecoveryCommitHash == "" {
 		return nil
 	}
+	if m.DeliveryRecovery != nil && m.DeliveryRecovery.Version == 2 {
+		if err := i.probeNextRecovery(ctx, d, m); err != nil {
+			return err
+		}
+	}
 	probe := i.recoveryProbe
 	if probe == nil {
 		probe = func(ctx context.Context, d *safefs.Directory, name, hash string) error {
@@ -30,9 +35,29 @@ func openManagedStore(m ManagedManifest, c Runtime) (*worker.Store, error) {
 		return nil, err
 	}
 	if m.DeliveryOwnerHash != "" {
-		if err = s.RequireManagedDeliveryOwner(deliveryOwner(m, c), m.DeliveryOwnerHash); err != nil {
+		if err = requireDeliveryOwner(s, m, c); err != nil {
 			s.Close()
 			return nil, err
+		}
+	}
+	if err = s.RequireManagedCommandHistory(m.CommandHistoryHash); err != nil {
+		s.Close()
+		return nil, err
+	}
+	if m.Commands != nil {
+		d, e := privateManagedDir(m.Root, true)
+		if e != nil {
+			s.Close()
+			return nil, e
+		}
+		_, e = readManagedCommandAdmission(d, m, c)
+		d.Close()
+		if e == nil {
+			e = s.ConfigureManagedCommands(m.Commands.Mode, m.Commands.Hash)
+		}
+		if e != nil {
+			s.Close()
+			return nil, e
 		}
 	}
 	if m.SignalProfiles == nil {
@@ -57,6 +82,32 @@ func openManagedStore(m ManagedManifest, c Runtime) (*worker.Store, error) {
 
 func openCanonicalManagedStore(m ManagedManifest, c Runtime) (*worker.Store, error) {
 	if m.Mode == "delivery" {
+		if m.DeliveryRecovery != nil {
+			s, err := worker.OpenManagedRecoveredDelivery(m.Paths.State, c.Worker, m.Revision, *m.DeliveryRecovery, m.DeliveryOwnerHash, m.DeliveryActivation.Hash)
+			if err != nil {
+				return nil, err
+			}
+			if m.TelegramRenewalID != "" {
+				d, e := privateManagedDir(m.Root, true)
+				if e != nil {
+					s.Close()
+					return nil, e
+				}
+				receipt, e := readManagedTelegramReceipt(d, m)
+				d.Close()
+				if e == nil && c.Telegram == nil {
+					e = fmt.Errorf("managed Telegram account missing")
+				}
+				if e == nil {
+					e = s.BindManagedTelegramRenewal(context.Background(), c.Telegram.Account, m.TelegramRenewalID, receipt.Renewal.RenewalHash)
+				}
+				if e != nil {
+					s.Close()
+					return nil, e
+				}
+			}
+			return s, nil
+		}
 		return worker.OpenManagedDelivery(m.Paths.State, c.Worker, m.Identity, m.Revision, deliveryOwner(m, c), m.DeliveryOwnerHash, m.DeliveryActivation.Hash)
 	}
 	if m.TelegramRenewalID != "" {
@@ -102,5 +153,43 @@ func (i managedInstaller) adoptRecovery(ctx context.Context, d *safefs.Directory
 	if adopted != review {
 		return fmt.Errorf("recovery changed during adoption")
 	}
+	if m.DeliveryRecovery != nil {
+		if err = i.probeDelivery(ctx, d, m); err != nil {
+			return err
+		}
+		s, e := worker.OpenManagedRecoveryVerification(m.Paths.State, c.Worker, m.Identity, m.Revision, m.RecoveryCommitHash)
+		if e != nil {
+			return e
+		}
+		err = s.EnrollManagedDeliveryRecovery(*m.DeliveryRecovery)
+		if err == nil {
+			err = i.adoptCommandRecovery(ctx, d, j, s)
+		}
+		closeErr := s.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if err = i.boundary("delivery-recovery-enrolled"); err != nil {
+			return err
+		}
+	}
 	return i.boundary("recovery-adopted")
+}
+
+func (i managedInstaller) probeNextRecovery(ctx context.Context, d *safefs.Directory, m ManagedManifest) error {
+	probe := i.nextRecoveryProbe
+	if probe == nil {
+		probe = func(ctx context.Context, d *safefs.Directory, name, hash string) error {
+			return probeManagedCapability(ctx, d, name, hash, "__managed-next-recovery-probe")
+		}
+	}
+	for _, file := range []struct{ name, hash string }{{"releases/" + m.Revision + "/deploy", m.BinaryHash}, {managedHelperName(m), m.HelperHash}} {
+		if err := probe(ctx, d, file.name, file.hash); err != nil {
+			return err
+		}
+	}
+	return nil
 }

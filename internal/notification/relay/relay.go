@@ -9,14 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/dryaf/deploy/internal/notification/interaction"
@@ -47,68 +44,95 @@ func Destination(account, recipient string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// ManagedExecution is supplied by the managed service after durable admission.
+// Command must execute its pinned CLI and inherit the supplied account descriptor.
+// It must return only after its complete process group has exited.
+type ManagedExecution struct {
+	Account *signalaccount.RecoveryRuntime
+	Inbox   *Inbox
+	Check   func(context.Context) error
+	Command func(context.Context, *os.File, io.Writer, ...string) error
+	Health  func(context.Context) (any, error)
+}
+
+func RunManaged(ctx context.Context, c Config, m ManagedExecution) error {
+	if m.Account == nil || m.Inbox == nil || m.Check == nil || m.Command == nil || c.Interactive == nil || m.Inbox.installation == nil || m.Inbox.runtimeAdmission == nil || c.Interactive.InboxDir != m.Inbox.dir.File().Name() || c.Interactive.Account != m.Inbox.account {
+		return fmt.Errorf("managed Signal runtime requires admitted account, inbox and pinned command")
+	}
+	if _, err := m.Account.FileFor(c.StateDir); err != nil {
+		return err
+	}
+	if err := m.Check(ctx); err != nil {
+		return err
+	}
+	return runRelay(ctx, c, &m)
+}
+
 func Run(ctx context.Context, c Config) error {
+	return runRelay(ctx, c, nil)
+}
+
+func runRelay(ctx context.Context, c Config, managed *ManagedExecution) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	account, err := provider.ReadSecret(c.AccountFile)
 	if err != nil {
 		return err
 	}
-	recipient, err := provider.ReadSecret(c.RecipientFile)
-	if err != nil {
-		return err
-	}
-	lease, err := signalaccount.AcquireRuntime(c.StateDir)
-	if err != nil {
-		return err
-	}
-	defer lease.Close()
-	var inbox *Inbox
-	if c.Interactive != nil {
-		if err = c.Interactive.Validate(); err != nil {
-			return err
-		}
-		inbox, err = OpenInbox(c.Interactive.InboxDir, c.Interactive.Account, false)
+	var recipient string
+	if managed == nil {
+		recipient, err = provider.ReadSecret(c.RecipientFile)
 		if err != nil {
 			return err
 		}
-		defer inbox.Close()
 	}
-	socketDir, err := safefs.Open(filepath.Dir(c.Socket))
-	if err != nil {
-		return err
-	}
-	defer socketDir.Close()
-	info, err := socketDir.File().Stat()
-	if err != nil {
-		return err
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != uint32(os.Getuid()) || info.Mode().Perm() != 0700 {
-		return fmt.Errorf("relay socket directory must be private")
-	}
-	if info, err = os.Lstat(c.Socket); err == nil {
-		if info.Mode()&os.ModeSocket == 0 {
-			return fmt.Errorf("foreign relay socket path")
-		}
-		conn, e := net.DialTimeout("unix", c.Socket, 200*time.Millisecond)
-		if e == nil {
-			conn.Close()
-			return fmt.Errorf("relay socket is live")
-		}
-		if err = os.Remove(c.Socket); err != nil {
+	var lease *signalaccount.Lease
+	var inbox *Inbox
+	if managed == nil {
+		lease, err = signalaccount.AcquireRuntime(c.StateDir)
+		if err != nil {
 			return err
 		}
-	} else if !os.IsNotExist(err) {
-		return err
+		defer lease.Close()
+		if c.Interactive != nil {
+			if err = c.Interactive.Validate(); err != nil {
+				return err
+			}
+			inbox, err = OpenInbox(c.Interactive.InboxDir, c.Interactive.Account, false)
+			if err != nil {
+				return err
+			}
+			defer inbox.Close()
+		}
+	} else {
+		if err = c.Interactive.Validate(); err != nil {
+			return err
+		}
+		inbox = managed.Inbox
 	}
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: c.Socket, Net: "unix"})
+	check := func(ctx context.Context) error {
+		if managed == nil {
+			return ctx.Err()
+		}
+		if err := managed.Check(ctx); err != nil {
+			return err
+		}
+		if _, err := managed.Account.FileFor(c.StateDir); err != nil {
+			return err
+		}
+		return inbox.CheckActive(ctx)
+	}
+	listener, socketCheck, cleanup, err := openRelaySocket(c.Socket)
 	if err != nil {
 		return err
 	}
-	defer l.Close()
-	if err = os.Chmod(c.Socket, 0600); err != nil {
-		return err
+	defer cleanup()
+	authorityCheck := check
+	check = func(ctx context.Context) error {
+		if err := authorityCheck(ctx); err != nil {
+			return err
+		}
+		return socketCheck()
 	}
 	slots := make(chan struct{}, 1)
 	var children sync.WaitGroup
@@ -123,6 +147,16 @@ func Run(ctx context.Context, c Config) error {
 		children.Add(1)
 		childMu.Unlock()
 		defer children.Done()
+		if err := check(ctx); err != nil {
+			return err
+		}
+		if managed != nil {
+			file, err := managed.Account.FileFor(c.StateDir)
+			if err != nil {
+				return err
+			}
+			return managed.Command(ctx, file, output, append([]string{"--config", c.StateDir}, args...)...)
+		}
 		cmd := exec.Command("signal-cli", append([]string{"--config", c.StateDir}, args...)...)
 		cmd.ExtraFiles = []*os.File{lease.File()}
 		cmd.Env = []string{"PATH=/opt/signal-cli/bin:/opt/java/openjdk/bin:/usr/local/bin:/usr/bin:/bin", "HOME=" + c.StateDir, "LANG=C.UTF-8", "JAVA_TOOL_OPTIONS=-Xmx256m"}
@@ -150,10 +184,29 @@ func Run(ctx context.Context, c Config) error {
 		}
 	}
 	mux := http.NewServeMux()
+	if managed != nil && managed.Health != nil {
+		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "method rejected", http.StatusMethodNotAllowed)
+				return
+			}
+			value, err := managed.Health(r.Context())
+			if err != nil {
+				http.Error(w, "Signal health unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(value)
+		})
+	}
 	if inbox != nil {
 		installInteractiveHandlers(mux, inbox, *c.Interactive, slots, runOutput)
 	}
 	mux.HandleFunc("/send", func(w http.ResponseWriter, r *http.Request) {
+		if managed != nil {
+			http.Error(w, "managed Signal requires an enrolled conversation", http.StatusForbidden)
+			return
+		}
 		if r.Method != "POST" {
 			http.Error(w, "method rejected", 405)
 			return
@@ -193,7 +246,20 @@ func Run(ctx context.Context, c Config) error {
 			Accepted bool `json:"accepted"`
 		}{true})
 	})
-	server := http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 3 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 2 * time.Second, MaxHeaderBytes: 4096}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := check(r.Context()); err != nil {
+			// A client may disconnect during a valid audit (for example while
+			// the gateway restarts). That cancels only its request, not account
+			// ownership or the independent receive maintenance service.
+			if r.Context().Err() == nil {
+				cancel()
+			}
+			http.Error(w, "relay admission unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	server := http.Server{Handler: handler, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 3 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 2 * time.Second, MaxHeaderBytes: 4096}
 	maintenanceDone := make(chan struct{})
 	intakeFailure := make(chan error, 1)
 	go func() {
@@ -209,6 +275,11 @@ func Run(ctx context.Context, c Config) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if err := check(ctx); err != nil {
+					intakeFailure <- fmt.Errorf("Signal runtime admission withdrawn")
+					cancel()
+					return
+				}
 				if inbox != nil && inbox.CanReceive(ctx) != nil {
 					continue
 				}
@@ -234,7 +305,7 @@ func Run(ctx context.Context, c Config) error {
 	}()
 	stop := context.AfterFunc(ctx, func() { _ = server.Close() })
 	defer stop()
-	err = server.Serve(l)
+	err = server.Serve(listener)
 	// The caller must cancel the service context on shutdown. All active children
 	// finish before the account lease's last local reference is closed.
 	childMu.Lock()

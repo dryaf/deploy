@@ -18,10 +18,13 @@ type ledgerRecovery struct {
 	Bytes     int
 }
 type ledgerIdentityPin struct {
-	Producer          protocol.Producer `json:"producer"`
-	Identity          protocol.Identity `json:"identity"`
-	RecoveryOperation string            `json:"recovery_operation,omitempty"`
-	RecoveryCommit    string            `json:"recovery_commit,omitempty"`
+	Producer          protocol.Producer  `json:"producer"`
+	Identity          protocol.Identity  `json:"identity"`
+	RecoveryOperation string             `json:"recovery_operation,omitempty"`
+	RecoveryCommit    string             `json:"recovery_commit,omitempty"`
+	Ancestor          string             `json:"ancestor,omitempty"`
+	NextOperation     string             `json:"next_operation,omitempty"`
+	NextIdentity      *protocol.Identity `json:"next_identity,omitempty"`
 }
 type CommandRecoveryPage struct {
 	Records []CommandRecoveryRecord
@@ -43,7 +46,7 @@ func (l *Ledger) requireCommandLedgerActive(tx *sql.Tx) error {
 	if pin.Producer != l.producer || pin.Identity != l.identity {
 		return fmt.Errorf("command ledger identity changed")
 	}
-	if pin.RecoveryCommit != "" {
+	if pin.Ancestor != "" || pin.NextOperation != "" || pin.RecoveryCommit != "" {
 		return fmt.Errorf("command ledger recovery is fenced")
 	}
 	if pin.RecoveryOperation != "" {
@@ -78,6 +81,13 @@ func (l *Ledger) captureRecovery(ctx context.Context, ch protocol.RecoveryChalle
 	defer tx.Rollback()
 	if err = l.checkRecoveryPin(tx); err != nil {
 		return
+	}
+	pinBefore, e := readLedgerPin(tx)
+	if e != nil {
+		return manifest, e
+	}
+	if pinBefore.NextOperation != "" && (pinBefore.NextOperation != ch.Operation || pinBefore.NextIdentity == nil || *pinBefore.NextIdentity != ch.Identity) {
+		return manifest, fmt.Errorf("next command recovery pins changed")
 	}
 	if intent, _, e := readLedgerCommandCommit(tx); e != nil {
 		return manifest, e
@@ -184,6 +194,9 @@ CREATE TABLE interactive_recovery_records(ordinal INTEGER PRIMARY KEY,id TEXT NO
 			return
 		}
 		err = nil
+		if err = attachCommandAncestry(tx, pinBefore, &v); err != nil {
+			return manifest, err
+		}
 		if err = v.Validate(saved.Manifest); err != nil {
 			return
 		}
@@ -219,7 +232,7 @@ CREATE TABLE interactive_recovery_records(ordinal INTEGER PRIMARY KEY,id TEXT NO
 	}
 	// Older helpers compare the exact original pin JSON and therefore cannot
 	// reopen a fenced ledger. The active identity itself is not changed.
-	pin, _ := json.Marshal(ledgerIdentityPin{Producer: l.producer, Identity: l.identity, RecoveryOperation: ch.Operation})
+	pin, _ := json.Marshal(ledgerIdentityPin{Producer: l.producer, Identity: l.identity, RecoveryOperation: ch.Operation, Ancestor: pinBefore.Ancestor})
 	if _, err = tx.Exec("UPDATE interactive_identity SET body=? WHERE singleton=1", string(pin)); err != nil {
 		return
 	}
@@ -245,6 +258,9 @@ func (l *Ledger) checkRecoveryPin(tx *sql.Tx) error {
 	}
 	var pin ledgerIdentityPin
 	if err := protocol.Decode([]byte(raw), &pin, 4096); err != nil {
+		return err
+	}
+	if _, err := readCommandAncestors(tx, pin); err != nil {
 		return err
 	}
 	intent, proof, err := readLedgerCommandCommit(tx)

@@ -52,5 +52,9 @@ func lockBackupRecovery(ctx context.Context, s *backupState) (check func() error
 		}
 		return nil
 	}
+	if err = requireBackupRecoveryHistory(s); err != nil {
+		release()
+		return nil, nil, err
+	}
 	return
 }

@@ -5,8 +5,9 @@ verification installation. It does not run the checks, contact providers or the
 LED daemon, install services, or enable production delivery or chat commands.
 `qualified` and `activation_allowed` remain false even when all evidence is present.
 The separate [managed delivery transition](DELIVERY_ACTIVATION.md) can consume
-this evidence for initialized outbound-only Telegram state. Recovered/Signal,
-producer cutover and command/LED activation remain unfinished. Existing fixture
+this evidence for supported initialized/recovered Telegram, native Signal and LED
+output. Producer cutover and command admission remain separate explicit operations;
+see the linked delivery, command and Signal production runbooks. Existing fixture
 tests are not live qualification evidence.
 
 Generate a private report before testing the installation:
@@ -64,8 +65,10 @@ The generated checks cover:
   cutoff, read routing and drain/recovery. Configured mutation commands additionally
   require confirmation, idempotency and authorization-expiry observations.
 
-For Signal, fill `environment.signal_image_digest` with the tested `sha256:…`
-image digest. For LEDs, fill `environment.led_version` and
+For container Signal, fill `environment.signal_image_digest` with the tested
+`sha256:…` image digest. For native production Signal, instead fill
+`environment.signal_cli_sha256` with the exact enrolled native CLI hash; do not
+supply both fields. For LEDs, fill `environment.led_version` and
 `environment.led_config_sha256` from the tested daemon. These are **operator
 attestations**; this offline command does not discover or verify running external
 components. Socket paths and LED binding/UID configuration are pinned by the local

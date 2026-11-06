@@ -68,9 +68,9 @@ func reviewActivation(ctx context.Context, root string, services managedServices
 	}
 	add("installation", "artifacts", "satisfied", "completed_verification_revision_pinned")
 	if deliveryPolicy(m, c) == nil {
-		add("installation", "activation", "satisfied", "explicit_telegram_delivery_transition_available")
+		add("installation", "activation", "satisfied", "explicit_delivery_transition_available")
 	} else {
-		add("installation", "activation", "blocked", "configured_activation_scope_not_implemented")
+		add("installation", "activation", "blocked", "configured_activation_prerequisites_incomplete")
 	}
 	qualificationManifest := m
 	if m.Mode == "delivery" {
@@ -78,7 +78,7 @@ func reviewActivation(ctx context.Context, root string, services managedServices
 		if err != nil {
 			return ActivationReview{}, err
 		}
-		add("delivery", "mode", "satisfied", "retained_telegram_delivery_activation")
+		add("delivery", "mode", "satisfied", "retained_delivery_activation")
 	}
 
 	// Read the entire retained history, even if credentials are unavailable.
@@ -146,6 +146,7 @@ func reviewActivation(ctx context.Context, root string, services managedServices
 	} else {
 		add("runtime", "state", "blocked", "worker_review_requires_gateway_drain")
 	}
+	canonicalRuntime := c
 	c, err = managedEffectiveRuntime(d, m, c)
 	if err != nil {
 		return ActivationReview{}, err
@@ -209,7 +210,11 @@ func reviewActivation(ctx context.Context, root string, services managedServices
 				}
 			}
 		}
-		add("signal", "activation", "blocked", "signal_verifier_to_runtime_transition_required")
+		if _, e := signalDeliveryService(m, canonicalRuntime); e != nil {
+			add("signal", "activation", "blocked", "signal_verifier_to_runtime_transition_required")
+		} else {
+			add("signal", "activation", "satisfied", "native_signal_production_transition_verified")
+		}
 	}
 	if c.Worker.Interaction != nil {
 		for _, destination := range c.Worker.Interaction.Destinations {
@@ -224,15 +229,15 @@ func reviewActivation(ctx context.Context, root string, services managedServices
 			for name, command := range w.Commands {
 				state, reason := "satisfied", "read_descriptor_only_qualification_still_required"
 				if command.Effect != "read" {
-					state, reason = "blocked", "production_mutation_admission_not_implemented"
+					state, reason = "blocked", "explicit_all_command_admission_required"
 				}
 				add("command/"+w.Producer.ID+"/"+name, "effect", state, reason)
 			}
 		}
-		add("commands", "activation", "blocked", "managed_command_activation_not_implemented")
+		add("commands", "activation", "blocked", "explicit_command_admission_required")
 	}
 	if c.LEDSocket != "" {
-		add("led", "activation", "blocked", "qualified_led_ownership_activation_required")
+		add("led", "activation", "satisfied", "explicit_qualified_led_delivery_transition_available")
 	}
 	qualification()
 	if drained {

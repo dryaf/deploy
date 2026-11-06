@@ -1,6 +1,7 @@
 package install
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"github.com/dryaf/deploy/internal/process"
@@ -19,13 +20,28 @@ import (
 )
 
 func publishManagedRecovery(t *testing.T, spec ManagedSpec) worker.RecoveryPublicationResult {
+	return publishManagedRecoveryFrom(t, spec, "", nil)
+}
+func publishManagedRecoveryFrom(t *testing.T, spec ManagedSpec, restored string, restoreManifest *worker.SnapshotManifest) worker.RecoveryPublicationResult {
+	return publishManagedRecoveryFromUsing(t, spec, restored, restoreManifest, nil)
+}
+func publishManagedRecoveryFromUsing(t *testing.T, spec ManagedSpec, restored string, restoreManifest *worker.SnapshotManifest, reconcile func(context.Context, string, worker.Config)) worker.RecoveryPublicationResult {
 	t.Helper()
 	ctx := context.Background()
 	c, err := ReadRuntime(spec.RuntimeFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := worker.Open(spec.State, c.Worker, false)
+	var s *worker.Store
+	if owner, e := worker.InspectManagedDeliveryOwner(spec.State); e == nil {
+		revision, e := safefs.NewID("n")
+		if e != nil {
+			t.Fatal(e)
+		}
+		s, err = worker.OpenManagedRuntime(spec.State, c.Worker, owner.Identity, revision)
+	} else {
+		s, err = worker.Open(spec.State, c.Worker, false)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,15 +53,50 @@ func publishManagedRecovery(t *testing.T, spec ManagedSpec) worker.RecoveryPubli
 	if err = s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	q, err := worker.QuarantineRecovery(ctx, spec.State, snapshot, c.Worker, m.ID, m.DatabaseHash)
+	history := snapshot
+	historyManifest := m
+	if restoreManifest != nil {
+		snapshot, m = restored, *restoreManifest
+	}
+	var q worker.RecoveryQuarantineView
+	if owner, e := worker.InspectManagedDeliveryOwner(spec.State); e == nil {
+		revision, e := safefs.NewID("n")
+		if e != nil {
+			t.Fatal(e)
+		}
+		q, err = worker.QuarantineManagedDeliveryRecovery(ctx, spec.State, snapshot, c.Worker, m.ID, m.DatabaseHash, revision, owner)
+	} else {
+		q, err = worker.QuarantineRecovery(ctx, spec.State, snapshot, c.Worker, m.ID, m.DatabaseHash)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
+	intake := func(operation string, extra ...string) {
+		t.Helper()
+		args := append([]string{operation, "--local", "--config", spec.RuntimeFile, "--state-dir", spec.State, "--operation", q.Operation}, extra...)
+		var output bytes.Buffer
+		if err := runRecoveryIntakeCLIWith(args, &output, telegramCheckTransport{}); err != nil {
+			t.Fatal(operation, err)
+		}
+	}
+	if c.Telegram != nil {
+		intake("recovery-telegram-history", "--from", history, "--snapshot-id", historyManifest.ID, "--database-hash", historyManifest.DatabaseHash)
+		intake("recovery-telegram-drain", "--receivers-stopped")
+	}
+
 	for _, p := range c.Worker.Producers {
 		if _, err = worker.FenceRecoveryOwnership(ctx, spec.State, c.Worker, p.Producer); err != nil {
 			t.Fatal(err)
 		}
 	}
+	if reconcile != nil {
+		reconcile(ctx, spec.State, c.Worker)
+	}
+	if c.Telegram != nil {
+		intake("recovery-requests-seal", "--reconciliation-complete")
+		intake("recovery-telegram-cursor")
+	}
+
 	review, err := worker.ReviewRecovery(ctx, spec.State, c.Worker, q.Operation)
 	if err != nil {
 		t.Fatal(err)

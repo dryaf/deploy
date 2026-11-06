@@ -29,7 +29,7 @@ func TestManagedSignalProfileRoutesPreserveRecoveryAndQueue(t *testing.T) {
 	next.Routes["operations"] = route
 	before := retainedTreeHash(t, path)
 	must(t, s.BindSignalProfileRoutes(next, protocol.Hash("immutable-profile-proof")))
-	if retainedTreeHash(t, path) != before || s.config.Routes["operations"].Revision != route.Revision || !s.VerificationOnly() {
+	if retainedTreeHash(t, path) != before || s.effectiveRoutes()["operations"].Revision != route.Revision || protocol.Hash(s.config) != protocol.Hash(c) || !s.VerificationOnly() {
 		t.Fatal("binding rewrote queue/recovery or did not install effective routes")
 	}
 	health, err := s.Health(ctx)

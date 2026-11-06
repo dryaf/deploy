@@ -141,7 +141,7 @@ func (s *publishedTelegramSession) openRenewal(ctx context.Context, request *Tel
 			j = nil
 		}
 	}()
-	_, err = readRenewalJSON(s.root, renewalIndex(s.cursor.Drain.Account), &j.state, 16384)
+	_, err = readRenewalJSON(s.root, s.renewalIndex(), &j.state, 16384)
 	if os.IsNotExist(err) && request != nil {
 		if request.PreviousHash != protocol.Hash(s.cursor) {
 			return j, fmt.Errorf("Telegram renewal predecessor mismatch")
@@ -163,7 +163,7 @@ func (s *publishedTelegramSession) openRenewal(ctx context.Context, request *Tel
 		if err = s.check(ctx); err != nil {
 			return
 		}
-		if err = s.root.WriteJSON(renewalIndex(s.cursor.Drain.Account), j.state, false); err != nil {
+		if err = s.root.WriteJSON(s.renewalIndex(), j.state, false); err != nil {
 			return
 		}
 		if err = recoveryBoundary(fault, "telegram_renewal_intent"); err != nil {
@@ -208,14 +208,14 @@ func (s *publishedTelegramSession) openRenewal(ctx context.Context, request *Tel
 	if resume {
 		// A durable page may be one step ahead of the root acknowledgement pin.
 		var pin telegramRenewalState
-		if _, err = readRenewalJSON(s.root, renewalIndex(s.cursor.Drain.Account), &pin, 16384); err != nil {
+		if _, err = readRenewalJSON(s.root, s.renewalIndex(), &pin, 16384); err != nil {
 			return
 		}
 		if pin != j.state {
 			if err = s.check(ctx); err != nil {
 				return
 			}
-			if err = s.root.WriteJSON(renewalIndex(s.cursor.Drain.Account), j.state, true); err != nil {
+			if err = s.root.WriteJSON(s.renewalIndex(), j.state, true); err != nil {
 				return
 			}
 		}
@@ -239,7 +239,7 @@ func (s *publishedTelegramSession) openRenewal(ctx context.Context, request *Tel
 	j.summary = nil
 	j.complete = nil
 	j.totals = j.initialTotals()
-	if err = s.root.WriteJSON(renewalIndex(s.cursor.Drain.Account), j.state, true); err != nil {
+	if err = s.root.WriteJSON(s.renewalIndex(), j.state, true); err != nil {
 		return
 	}
 	if err = recoveryBoundary(fault, "telegram_renewal_intent"); err != nil {

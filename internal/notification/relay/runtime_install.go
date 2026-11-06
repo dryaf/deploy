@@ -24,6 +24,8 @@ const runtimeInstallImage = "signal-runtime-image.db"
 // to start a Signal receiver or to activate gateway intake.
 type SignalRuntimeInstallation struct {
 	Version           int                              `json:"version"`
+	Ancestor          string                           `json:"ancestor,omitempty"`
+	LegacyBootstrap   string                           `json:"legacy_bootstrap,omitempty"`
 	Source            string                           `json:"source"`
 	Destination       string                           `json:"destination"`
 	DestinationDevice uint64                           `json:"destination_device"`
@@ -37,19 +39,24 @@ type SignalRuntimeInstallation struct {
 
 type signalRuntimeIntent struct {
 	Version                             int
+	Ancestor                            string `json:"ancestor,omitempty"`
+	LegacyBootstrap                     string `json:"legacy_bootstrap,omitempty"`
 	Source, Destination                 string
 	DestinationDevice, DestinationInode uint64
 	Cursor                              interaction.SignalRecoveryCursor
 }
 
 func (v SignalRuntimeInstallation) intent() signalRuntimeIntent {
-	return signalRuntimeIntent{v.Version, v.Source, v.Destination, v.DestinationDevice, v.DestinationInode, v.Cursor}
+	return signalRuntimeIntent{v.Version, v.Ancestor, v.LegacyBootstrap, v.Source, v.Destination, v.DestinationDevice, v.DestinationInode, v.Cursor}
 }
 func (v SignalRuntimeInstallation) validate() error {
 	if err := v.Cursor.Validate(); err != nil {
 		return err
 	}
-	if v.Version != 1 || v.IntakeEnabled || !runtimeInstallationPaths(v.Source, v.Destination) || v.DestinationInode == 0 || v.DatabaseBytes <= 0 || v.DatabaseBytes > 34<<20 || !safefs.DigestPattern.MatchString(v.DatabaseHash) {
+	if v.LegacyBootstrap != "" && (v.Version != 1 || !safefs.DigestPattern.MatchString(v.LegacyBootstrap)) {
+		return fmt.Errorf("invalid legacy Signal bootstrap reference")
+	}
+	if (v.Version != 1 && v.Version != 2) || (v.Version == 1 && v.Ancestor != "") || (v.Version == 2 && (!safefs.DigestPattern.MatchString(v.Ancestor) || v.Cursor.Handoff.Summary.Manifest.BaselineHash == "")) || v.IntakeEnabled || !runtimeInstallationPaths(v.Source, v.Destination) || v.DestinationInode == 0 || v.DatabaseBytes <= 0 || v.DatabaseBytes > 34<<20 || !safefs.DigestPattern.MatchString(v.DatabaseHash) {
 		return fmt.Errorf("invalid Signal runtime installation")
 	}
 	hash := v.InstallationHash
@@ -100,20 +107,45 @@ func installSignalRuntime(ctx context.Context, source, destination string, p int
 		return out, err
 	}
 	st := info.Sys().(*syscall.Stat_t)
-	want := signalRuntimeIntent{1, source, destination, uint64(st.Dev), st.Ino, p}
+	want := signalRuntimeIntent{Version: 1, Source: source, Destination: destination, DestinationDevice: uint64(st.Dev), DestinationInode: st.Ino, Cursor: p}
+	var bootstrap LegacyInboxBootstrap
+	if e := src.ReadJSON(legacyBootstrapIntent, &bootstrap); e == nil {
+		if e = verifyLegacyBootstrap(ctx, src, bootstrap); e != nil {
+			return out, e
+		}
+		want.LegacyBootstrap = protocol.Hash(bootstrap)
+	} else if !os.IsNotExist(e) {
+		return out, e
+	}
+	var incoming SignalRuntimeInstallation
+	if e := src.ReadJSON(runtimeInstallComplete, &incoming); e == nil && incoming.Destination == source {
+		if e = incoming.validate(); e != nil {
+			return out, e
+		}
+		if protocol.Hash(incoming.Cursor) != p.Handoff.Summary.Manifest.BaselineHash {
+			return out, fmt.Errorf("Signal next installation lost its incoming baseline")
+		}
+		want.Version, want.Ancestor = 2, incoming.InstallationHash
+	} else if e != nil && !os.IsNotExist(e) {
+		return out, e
+	}
+	sourceName := func(name string) string { return runtimeSourceName(want.Version, want.Ancestor, name) }
+	if err = verifyIncomingRuntime(ctx, src, want); err != nil {
+		return out, err
+	}
 	var saved signalRuntimeIntent
-	e := src.ReadJSON(runtimeInstallIntent, &saved)
+	e := src.ReadJSON(sourceName(runtimeInstallIntent), &saved)
 	if os.IsNotExist(e) {
 		if e = emptyRuntimeDestination(dst); e != nil {
 			return out, e
 		}
-		if e = absentRuntimeFile(src, runtimeInstallComplete); e != nil {
+		if e = absentRuntimeFile(src, sourceName(runtimeInstallComplete)); e != nil {
 			return out, e
 		}
 		if e = verifyRuntimeSource(ctx, src, p); e != nil {
 			return out, e
 		}
-		if err = src.WriteJSON(runtimeInstallIntent, want, false); err != nil {
+		if err = src.WriteJSON(sourceName(runtimeInstallIntent), want, false); err != nil {
 			return
 		}
 	} else if e != nil {
@@ -154,11 +186,14 @@ func installSignalRuntime(ctx context.Context, source, destination string, p int
 			return e
 		}
 		var current signalRuntimeIntent
-		if e := src.ReadJSON(runtimeInstallIntent, &current); e != nil {
+		if e := src.ReadJSON(sourceName(runtimeInstallIntent), &current); e != nil {
 			return e
 		}
 		if protocol.Hash(current) != protocol.Hash(want) {
 			return fmt.Errorf("Signal source installation intent changed")
+		}
+		if e := verifyIncomingRuntime(ctx, src, want); e != nil {
+			return e
 		}
 		return verifyRuntimeSource(ctx, src, p)
 	}
@@ -187,7 +222,7 @@ func installSignalRuntime(ctx context.Context, source, destination string, p int
 		if err = absentRuntimeFile(dst, runtimeInstallComplete); err != nil {
 			return
 		}
-		if err = absentRuntimeFile(src, runtimeInstallComplete); err != nil {
+		if err = absentRuntimeFile(src, sourceName(runtimeInstallComplete)); err != nil {
 			return
 		}
 		for _, name := range []string{"inbox.db", "identity.json", signalRuntimeFile} {
@@ -219,7 +254,7 @@ func installSignalRuntime(ctx context.Context, source, destination string, p int
 		if err = inboxRestoreBoundary(fault, "runtime_image_promoted"); err != nil {
 			return
 		}
-		out = SignalRuntimeInstallation{Version: 1, Source: source, Destination: destination, DestinationDevice: want.DestinationDevice, DestinationInode: want.DestinationInode, Cursor: p}
+		out = SignalRuntimeInstallation{Version: want.Version, Ancestor: want.Ancestor, LegacyBootstrap: want.LegacyBootstrap, Source: source, Destination: destination, DestinationDevice: want.DestinationDevice, DestinationInode: want.DestinationInode, Cursor: p}
 		out.DatabaseHash, out.DatabaseBytes, err = runtimeImageDigest(dst)
 		if err != nil {
 			return
@@ -256,7 +291,7 @@ func installSignalRuntime(ctx context.Context, source, destination string, p int
 	if e != nil {
 		return out, e
 	}
-	sourceComplete, e := runtimeInstallationRecord(src, runtimeInstallComplete, out)
+	sourceComplete, e := runtimeInstallationRecord(src, sourceName(runtimeInstallComplete), out)
 	if e != nil {
 		return out, e
 	}
@@ -316,7 +351,7 @@ func installSignalRuntime(ctx context.Context, source, destination string, p int
 		} else if !ok {
 			return out, fmt.Errorf("Signal destination completion disappeared")
 		}
-		if err = src.WriteJSON(runtimeInstallComplete, out, false); err != nil {
+		if err = src.WriteJSON(sourceName(runtimeInstallComplete), out, false); err != nil {
 			return
 		}
 	}

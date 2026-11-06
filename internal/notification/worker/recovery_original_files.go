@@ -128,7 +128,7 @@ func (r *recoveryReconciler) checkpointOriginal(ctx context.Context) (m recovery
 	if err = db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&m.Schema); err != nil {
 		return
 	}
-	if err = verifySnapshotDB(ctx, db, SnapshotManifest{Identity: r.journal.Before, Schema: m.Schema}, r.config); err != nil {
+	if err = verifyRetainedSnapshotSQL(ctx, r.stage, db, r.journal.originalSnapshot(m.Schema), r.config); err != nil {
 		return
 	}
 	if err = r.checkAuthority(); err != nil {

@@ -30,12 +30,15 @@ func (p *managedTelegramTransport) RoundTrip(r *http.Request) (*http.Response, e
 }
 
 func managedTelegramFixture(t *testing.T, configure func(*ManagedSpec, *managedInstaller, *fakeManagedServices)) (ManagedSpec, managedInstaller, *fakeManagedServices, *managedTelegramTransport) {
+	return managedTelegramFixtureConfigured(t, configure, nil)
+}
+func managedTelegramFixtureConfigured(t *testing.T, configure func(*ManagedSpec, *managedInstaller, *fakeManagedServices), runtime func(*Runtime)) (ManagedSpec, managedInstaller, *fakeManagedServices, *managedTelegramTransport) {
 	t.Helper()
 	var spec ManagedSpec
 	var i managedInstaller
 	var f *fakeManagedServices
 	p := &managedTelegramTransport{}
-	args, _ := telegramCheckCLIArgumentsBeforeRecovery(t, func(state *string, config string) {
+	args, _ := telegramCheckCLIArgumentsConfigured(t, func(state *string, config string) {
 		base := t.TempDir()
 		if err := os.Chmod(base, 0700); err != nil {
 			t.Fatal(err)
@@ -64,7 +67,7 @@ func managedTelegramFixture(t *testing.T, configure func(*ManagedSpec, *managedI
 		if err = i.services.Stop(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-	})
+	}, runtime)
 	spec.RecoveryCommitHash = args[6]
 	if _, err := i.prepare(context.Background(), "adopt-recovery", spec); err != nil {
 		t.Fatal(err)

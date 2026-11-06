@@ -32,14 +32,15 @@ type workerLifecycleRequest struct {
 }
 
 type workerLifecycleJournal struct {
-	Schema       int                       `json:"schema"`
-	Operation    string                    `json:"operation"`
-	Stage        string                    `json:"stage"`
-	Installation WorkerInstallation        `json:"installation"`
-	Source       deploysource.WorkerSource `json:"source"`
-	Previous     string                    `json:"previous"`
-	PublicKey    string                    `json:"public_key"`
-	EnabledUnits []string                  `json:"enabled_units"`
+	NotificationOwner *backupNotificationOwner  `json:"notification_owner,omitempty"`
+	Schema            int                       `json:"schema"`
+	Operation         string                    `json:"operation"`
+	Stage             string                    `json:"stage"`
+	Installation      WorkerInstallation        `json:"installation"`
+	Source            deploysource.WorkerSource `json:"source"`
+	Previous          string                    `json:"previous"`
+	PublicKey         string                    `json:"public_key"`
+	EnabledUnits      []string                  `json:"enabled_units"`
 }
 
 func lifecycleRemote(server config.ServerConfig, request workerLifecycleRequest) (workerLifecycleJournal, error) {
@@ -141,6 +142,10 @@ func runWorkerLifecycle() error {
 }
 
 func workerLifecycle(home string, request workerLifecycleRequest) error {
+	return workerLifecycleUsing(home, request, deploysource.QualifyRestrictedSource)
+}
+
+func workerLifecycleUsing(home string, request workerLifecycleRequest, qualify func(deploysource.WorkerSource, config.WorkerTimeouts) error) error {
 	operation, stage, ok := strings.Cut(request.Operation, "-")
 	if operation == "rotate" {
 		operation = "rotate-key"
@@ -177,7 +182,22 @@ func workerLifecycle(home string, request workerLifecycleRequest) error {
 		if e != nil {
 			return e
 		}
-		journal = workerLifecycleJournal{Schema: 1, Operation: operation, Stage: "preparing", Installation: c, EnabledUnits: enabledWorkerUnits()}
+		ownerState, e := openBackupState(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false)
+		if e != nil {
+			return e
+		}
+		owner, e := currentSharedBackupOwner(ownerState)
+		ownerState.Close()
+		if e != nil {
+			return e
+		}
+		if owner != nil && (owner.Binding.Producer.ID != c.WorkerID || owner.Binding.Archive != c.ArchiveID) {
+			return fmt.Errorf("lifecycle configuration differs from shared notification owner")
+		}
+		journal = workerLifecycleJournal{Schema: 1, Operation: operation, Stage: "preparing", Installation: c, EnabledUnits: enabledWorkerUnitsFor(owner != nil), NotificationOwner: owner}
+		if owner != nil {
+			journal.Schema = 2
+		}
 		if operation == "rotate-key" {
 			for _, src := range c.Sources {
 				if src.Alias == request.Source {
@@ -206,7 +226,7 @@ func workerLifecycle(home string, request workerLifecycleRequest) error {
 			return err
 		}
 	}
-	if journal.Schema != 1 || journal.Operation != operation {
+	if ((journal.Schema != 1 || journal.NotificationOwner != nil) && (journal.Schema != 2 || journal.NotificationOwner == nil)) || journal.Operation != operation {
 		return fmt.Errorf("lifecycle journal does not match request")
 	}
 	if journal.Stage == "complete" {
@@ -217,6 +237,13 @@ func workerLifecycle(home string, request workerLifecycleRequest) error {
 		return err
 	}
 	defer state.Close()
+	owner, err := currentSharedBackupOwner(state)
+	if err != nil {
+		return err
+	}
+	if (owner == nil) != (journal.NotificationOwner == nil) || owner != nil && *owner != *journal.NotificationOwner {
+		return fmt.Errorf("notification ownership changed during worker lifecycle")
+	}
 	if err = state.put("mode", "maintenance"); err != nil {
 		return err
 	}
@@ -229,7 +256,7 @@ func workerLifecycle(home string, request workerLifecycleRequest) error {
 		} else if !os.IsNotExist(e) {
 			return e
 		}
-		if err = stopWorkerUnits(); err != nil {
+		if err = stopWorkerUnitsFor(journal.NotificationOwner != nil); err != nil {
 			return err
 		}
 	} else {
@@ -312,7 +339,7 @@ func workerLifecycle(home string, request workerLifecycleRequest) error {
 				return e
 			}
 		}
-		if err = deploysource.QualifyRestrictedSource(journal.Source, journal.Installation.Policy.Timeouts); err != nil {
+		if err = qualify(journal.Source, journal.Installation.Policy.Timeouts); err != nil {
 			return err
 		}
 		if err = unix.Unlinkat(int(keys.File().Fd()), name+".next", 0); err != nil && err != unix.ENOENT {
@@ -325,7 +352,22 @@ func workerLifecycle(home string, request workerLifecycleRequest) error {
 		if err = dir.ReadJSON("setup.json", &setup); err != nil {
 			return err
 		}
+		if setup.SourceEnrollments == nil {
+			return fmt.Errorf("setup source enrollment history is missing")
+		}
 		setup.SourceEnrollments[journal.Source.Alias] = request.Results[0]
+		if setup.OwnedFiles == nil {
+			setup.OwnedFiles = map[string]string{}
+		}
+		relative, e := filepath.Rel(home, journal.Source.KeyFile)
+		if e != nil || strings.HasPrefix(relative, "../") || filepath.IsAbs(relative) {
+			return fmt.Errorf("rotated key is outside the installation")
+		}
+		keyBytes, e := safefs.ReadFile(keys, name, 8192)
+		if e != nil {
+			return e
+		}
+		setup.OwnedFiles[relative] = sharedSetupDigest(keyBytes)
 		if err = dir.WriteJSON("setup.json", setup, true); err != nil {
 			return err
 		}

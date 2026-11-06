@@ -107,7 +107,11 @@ func (s *Store) recoveredLEDAuthority(ctx context.Context, q ledJournalReader) (
 	if protocol.Decode([]byte(raw), &layout, protocol.MaxRequest) != nil || protocol.Hash(layout) != protocol.Hash(wantLayout) {
 		return nil, fmt.Errorf("inherited LED mapping changed")
 	}
-	return &recoveredLEDProof{evidence, remainingInheritedFaults(evidence, imports)}, nil
+	remaining, err := s.remainingRuntimeLEDFaults(ctx, q, evidence.After.Faults, remainingInheritedFaults(evidence, imports))
+	if err != nil {
+		return nil, err
+	}
+	return &recoveredLEDProof{evidence, remaining}, nil
 }
 
 // Old operation/mapping journals must be archived by the explicit epoch

@@ -18,16 +18,19 @@ const legacyResolutionPrefix = "notification_legacy_resolution/"
 // Original migration dispositions never change. Old helpers therefore continue
 // to hold these sources. New exporters require the independent reviewed grant.
 const unresolvedLegacyPredicate = `l.disposition='held' AND NOT EXISTS
- (SELECT 1 FROM meta resolution WHERE resolution.key='notification_legacy_resolution/'||l.hash)`
+ (SELECT 1 FROM meta resolution WHERE resolution.key='notification_legacy_resolution/'||l.hash)
+ AND NOT EXISTS (SELECT 1 FROM meta remigration WHERE remigration.key='notification_remigration_source/'||l.source AND json_extract(remigration.value,'$.disposition') IN ('accepted','unsent'))
+ AND NOT EXISTS (SELECT 1 FROM meta resolution JOIN meta remigration ON remigration.key='notification_remigration' WHERE resolution.key LIKE 'notification_legacy_resolution/%' AND json_extract(resolution.value,'$.review.remigration_hash')<>'' AND json_extract(resolution.value,'$.review.original.id')=l.source AND json_extract(resolution.value,'$.review.owner.binding.generation')=json_extract(remigration.value,'$.after.binding.generation'))`
 
 type backupLegacyReview struct {
-	Version    int                     `json:"version"`
-	ConfigHash string                  `json:"config_hash"`
-	Owner      backupNotificationOwner `json:"owner"`
-	Original   backupCutoverRow        `json:"original"`
-	Current    backupCutoverRow        `json:"current"`
-	Journal    legacyDeliveryReview    `json:"journal"`
-	ReviewedAt time.Time               `json:"reviewed_at"`
+	Version         int                     `json:"version"`
+	RemigrationHash string                  `json:"remigration_hash,omitempty"`
+	ConfigHash      string                  `json:"config_hash"`
+	Owner           backupNotificationOwner `json:"owner"`
+	Original        backupCutoverRow        `json:"original"`
+	Current         backupCutoverRow        `json:"current"`
+	Journal         legacyDeliveryReview    `json:"journal"`
+	ReviewedAt      time.Time               `json:"reviewed_at"`
 }
 
 type backupLegacyResolution struct {
@@ -58,14 +61,12 @@ func readBackupLegacyReview(tx *sql.Tx, c WorkerInstallation, source string, now
 	if err = requireNotificationRecoveryInactive(tx); err != nil {
 		return
 	}
-	var raw, hash, disposition string
-	if err = tx.QueryRow("SELECT body,hash,disposition FROM backup_notification_legacy WHERE source=?", source).Scan(&raw, &hash, &disposition); err != nil {
+	var disposition string
+	r.Original, disposition, r.RemigrationHash, err = effectiveBackupLegacySource(tx, source)
+	if err != nil {
 		return
 	}
-	if err = notify.Decode([]byte(raw), &r.Original, safefs.MaxRecordBytes); err != nil {
-		return
-	}
-	if r.Original.ID != source || notify.Hash(r.Original) != hash || disposition != "held" || r.Original.Accepted.Valid {
+	if disposition != "held" || r.Original.Accepted.Valid {
 		return r, fmt.Errorf("source is not an unchanged held legacy row")
 	}
 	err = tx.QueryRow("SELECT id,kind,created,due,attempts,accepted,covered_by,record FROM outbox WHERE id=?", source).Scan(&r.Current.ID, &r.Current.Kind, &r.Current.Created, &r.Current.Due, &r.Current.Attempts, &r.Current.Accepted, &r.Current.CoveredBy, &r.Current.Record)
@@ -90,6 +91,9 @@ func (s backupLegacyResolution) validate() error {
 		strings.TrimSpace(s.Reason) == "" || len(s.Reason) > 512 {
 		return fmt.Errorf("legacy resolution requires exact review and bounded audit reason")
 	}
+	if s.Review.RemigrationHash != "" && !safefs.DigestPattern.MatchString(s.Review.RemigrationHash) {
+		return fmt.Errorf("invalid remigration review hash")
+	}
 	if s.Action != "unsent" && s.Action != "retry" {
 		return fmt.Errorf("legacy resolution action must be unsent or retry")
 	}
@@ -101,15 +105,81 @@ func (s backupLegacyResolution) validate() error {
 
 // A grant supplements evidence, never rewrites it. In particular an acknowledged
 // retry is not a claim that the previous attempt failed, or that delivery occurred.
-func readBackupLegacyResolution(tx *sql.Tx, source string) (s backupLegacyResolution, present bool, err error) {
-	var raw, hash, disposition string
+// A remigration grants a new authority epoch even if the row bytes did not
+// change. Its resolution key must never alias an earlier approval.
+func legacyResolutionHash(r backupLegacyReview) string {
+	if r.RemigrationHash == "" {
+		return notify.Hash(r.Original)
+	}
+	return notify.Hash(struct {
+		Remigration string           `json:"remigration"`
+		Original    backupCutoverRow `json:"original"`
+	}{r.RemigrationHash, r.Original})
+}
+
+func effectiveBackupLegacySource(tx *sql.Tx, source string) (row backupCutoverRow, disposition, remigration string, err error) {
+	r, err := effectiveBackupRemigration(tx)
+	if err != nil {
+		return
+	}
+	if r != nil {
+		if d, ok := r.Spec.Cutover.Decisions[source]; ok {
+			for _, candidate := range r.Evidence.Rows {
+				if candidate.ID == source {
+					return candidate, d.Disposition, notify.Hash(*r), nil
+				}
+			}
+			return row, "", "", fmt.Errorf("remigration source evidence missing")
+		}
+	}
+	var raw, hash string
 	err = tx.QueryRow("SELECT body,hash,disposition FROM backup_notification_legacy WHERE source=?", source).Scan(&raw, &hash, &disposition)
+	if err != nil {
+		return
+	}
+	if err = notify.Decode([]byte(raw), &row, safefs.MaxRecordBytes); err != nil {
+		return
+	}
+	if row.ID != source || notify.Hash(row) != hash {
+		err = fmt.Errorf("legacy source evidence changed")
+	}
+	return
+}
+
+func readBackupLegacyResolution(tx *sql.Tx, source string) (s backupLegacyResolution, present bool, err error) {
+	remigration, err := effectiveBackupRemigration(tx)
+	if err != nil {
+		return s, false, err
+	}
+	if remigration != nil {
+		if _, ok := remigration.Spec.Cutover.Decisions[source]; ok {
+			row, disposition, epoch, e := effectiveBackupLegacySource(tx, source)
+			if e != nil {
+				return s, false, e
+			}
+			if disposition != "held" {
+				return s, false, nil
+			}
+			return readBackupLegacyResolutionByHash(tx, source, legacyResolutionHash(backupLegacyReview{Original: row, RemigrationHash: epoch}))
+		}
+	}
+	// Held legacy data is not a send envelope. Do not decode it merely to
+	// discover that no reviewed release exists; unrelated fresh work can run.
+	var hash, disposition string
+	err = tx.QueryRow("SELECT hash,disposition FROM backup_notification_legacy WHERE source=?", source).Scan(&hash, &disposition)
 	if err == sql.ErrNoRows {
 		return s, false, nil
 	}
 	if err != nil {
-		return
+		return s, false, err
 	}
+	if disposition != "held" {
+		return s, false, nil
+	}
+	return readBackupLegacyResolutionByHash(tx, source, hash)
+}
+
+func readBackupLegacyResolutionByHash(tx *sql.Tx, source, hash string) (s backupLegacyResolution, present bool, err error) {
 	err = backupNotificationMeta(tx, legacyResolutionPrefix+hash, &s)
 	if err == sql.ErrNoRows {
 		return s, false, nil
@@ -117,15 +187,42 @@ func readBackupLegacyResolution(tx *sql.Tx, source string) (s backupLegacyResolu
 	if err != nil {
 		return s, false, err
 	}
-	if s.validate() != nil || disposition != "held" || notify.Hash(s.Review.Original) != hash || mustCutoverJSON(s.Review.Original) != raw || s.Review.Original.ID != source {
+	if s.validate() != nil || legacyResolutionHash(s.Review) != hash || s.Review.Original.ID != source {
 		return s, false, fmt.Errorf("legacy resolution lost its original evidence")
 	}
 	owner, err := readBackupNotificationOwner(tx)
 	if err != nil {
 		return s, false, err
 	}
-	// Deactivation/revocation can change mode, but cannot grant another binding.
-	if owner.Binding != s.Review.Owner.Binding || owner.Socket != s.Review.Owner.Socket || owner.CutoverHash != s.Review.Owner.CutoverHash {
+	binding := owner.Binding
+	if s.Review.RemigrationHash == "" {
+		var raw, originalHash, disposition string
+		if err = tx.QueryRow("SELECT body,hash,disposition FROM backup_notification_legacy WHERE source=?", source).Scan(&raw, &originalHash, &disposition); err != nil {
+			return s, false, err
+		}
+		if disposition != "held" || originalHash != notify.Hash(s.Review.Original) || raw != mustCutoverJSON(s.Review.Original) {
+			return s, false, fmt.Errorf("legacy resolution lost original source")
+		}
+		binding, err = backupHistoricalBindingTo(tx, nil, binding, s.Review.Owner.Binding)
+		if err != nil {
+			return s, false, err
+		}
+	} else {
+		r, e := backupRemigrationByHash(tx, s.Review.RemigrationHash)
+		if e != nil {
+			return s, false, e
+		}
+		d, ok := r.Spec.Cutover.Decisions[source]
+		if !ok || d.Disposition != "held" || d.Hash != notify.Hash(s.Review.Original) {
+			return s, false, fmt.Errorf("legacy resolution lost remigration evidence")
+		}
+		binding, err = backupHistoricalBindingTo(tx, nil, owner.Binding, s.Review.Owner.Binding)
+		if err != nil {
+			return s, false, err
+		}
+	}
+	// Revocation changes mode, never the binding of an existing approval.
+	if binding != s.Review.Owner.Binding || owner.Socket != s.Review.Owner.Socket || owner.CutoverHash != s.Review.Owner.CutoverHash {
 		return s, false, fmt.Errorf("legacy resolution authority changed")
 	}
 	return s, true, nil
@@ -200,8 +297,8 @@ func resolveBackupLegacy(ctx context.Context, state *backupState, c WorkerInstal
 	if err = requireBackupCutoverOwner(state, spec.Review.Owner); err != nil {
 		return err
 	}
-	key := legacyResolutionPrefix + notify.Hash(spec.Review.Original)
-	name := legacyResolutionFile(notify.Hash(spec.Review.Original))
+	key := legacyResolutionPrefix + legacyResolutionHash(spec.Review)
+	name := legacyResolutionFile(legacyResolutionHash(spec.Review))
 	var retained backupLegacyResolution
 	err = dir.ReadJSON(name, &retained)
 	fresh := os.IsNotExist(err)
@@ -224,7 +321,7 @@ func resolveBackupLegacy(ctx context.Context, state *backupState, c WorkerInstal
 			if fresh || notify.Hash(prior) != notify.Hash(spec) {
 				return fmt.Errorf("legacy resolution SQL/file disagreement")
 			}
-			_, _, err = readBackupLegacyResolution(tx, spec.Review.Original.ID)
+			_, _, err = readBackupLegacyResolutionByHash(tx, spec.Review.Original.ID, legacyResolutionHash(spec.Review))
 			return err // A committed decision never reopens delivered work.
 		}
 		if err != sql.ErrNoRows {
@@ -306,7 +403,7 @@ func requireBackupLegacyResolutionFiles(state *backupState, dir *safefs.Director
 	}
 	defer rows.Close()
 	count := 0
-	var sources []string
+	var sources []backupLegacyReview
 	for rows.Next() {
 		count++
 		var key, raw string
@@ -314,16 +411,16 @@ func requireBackupLegacyResolutionFiles(state *backupState, dir *safefs.Director
 		if err = rows.Scan(&key, &raw); err != nil {
 			return err
 		}
-		if count > 10000 || notify.Decode([]byte(raw), &spec, safefs.MaxRecordBytes) != nil || spec.validate() != nil || key != legacyResolutionPrefix+notify.Hash(spec.Review.Original) {
+		if count > 10000 || notify.Decode([]byte(raw), &spec, safefs.MaxRecordBytes) != nil || spec.validate() != nil || key != legacyResolutionPrefix+legacyResolutionHash(spec.Review) {
 			return fmt.Errorf("invalid or excessive legacy resolution history")
 		}
-		if err = dir.ReadJSON(legacyResolutionFile(notify.Hash(spec.Review.Original)), &retained); err != nil {
+		if err = dir.ReadJSON(legacyResolutionFile(legacyResolutionHash(spec.Review)), &retained); err != nil {
 			return err
 		}
 		if notify.Hash(retained) != notify.Hash(spec) {
 			return fmt.Errorf("legacy resolution file changed")
 		}
-		sources = append(sources, spec.Review.Original.ID)
+		sources = append(sources, spec.Review)
 	}
 	if err = rows.Err(); err != nil {
 		return err
@@ -336,8 +433,8 @@ func requireBackupLegacyResolutionFiles(state *backupState, dir *safefs.Director
 	}
 	return backupTransferTx(context.Background(), state, func(tx *sql.Tx) error {
 		for _, source := range sources {
-			if _, present, err := readBackupLegacyResolution(tx, source); err != nil || !present {
-				return fmt.Errorf("legacy resolution lost source authority: %s", source)
+			if _, present, err := readBackupLegacyResolutionByHash(tx, source.Original.ID, legacyResolutionHash(source)); err != nil || !present {
+				return fmt.Errorf("legacy resolution lost source authority: %s", source.Original.ID)
 			}
 		}
 		return nil

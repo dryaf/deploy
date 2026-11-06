@@ -17,6 +17,8 @@ const backupCutoverFile = "notification-cutover.json"
 
 type backupCutoverSpec struct {
 	Version      int                              `json:"version"`
+	Predecessor  string                           `json:"predecessor,omitempty"`
+	Signal       *backupSignalMigration           `json:"signal,omitempty"`
 	Managed      install.ManagedProducerRequest   `json:"managed"`
 	HelperHash   string                           `json:"helper_hash"`
 	ConfigHash   string                           `json:"config_hash"`
@@ -46,11 +48,37 @@ func backupCutoverPaths(home string, c WorkerInstallation) WorkerUnitPaths {
 	return WorkerUnitPaths{Home: home, Config: filepath.Join(home, ".config/deploy/backup-worker/runtime.json"), State: filepath.Join(home, ".local/state/deploy/backup-worker/state"), Archive: c.Policy.Storage.Path, Keys: filepath.Join(home, ".config/deploy/backup-worker/ssh"), RelayState: filepath.Join(home, ".local/share/deploy/backup-worker/signal"), RelaySocket: filepath.Join(home, ".local/state/deploy/backup-worker/relay")}
 }
 func validateBackupCutoverSpec(spec backupCutoverSpec, c WorkerInstallation) error {
-	if spec.Managed.Validate() != nil || spec.Version != 1 || spec.Managed.Revoke || !safefs.DigestPattern.MatchString(spec.HelperHash) || !safefs.DigestPattern.MatchString(spec.EvidenceHash) || spec.ConfigHash != notify.Hash(c) || spec.Managed.Producer.ID != c.WorkerID {
+	if spec.Managed.Validate() != nil || !validCutoverVersion(spec) || spec.Managed.Revoke || spec.Managed.LegacyGeneration != "" || !safefs.DigestPattern.MatchString(spec.HelperHash) || !safefs.DigestPattern.MatchString(spec.EvidenceHash) || spec.ConfigHash != notify.Hash(c) || spec.Managed.Producer.ID != c.WorkerID {
 		return fmt.Errorf("cutover requires exact helper, installation, evidence and producer pins")
 	}
-	if c.Policy.Notifications.Signal != nil || c.Policy.Notifications.Primary != "telegram" || c.Policy.Notifications.Fallback != "" {
-		return fmt.Errorf("backup cutover currently requires Telegram only; Signal account/relay handoff is not supported")
+	if c.Policy.Notifications.Signal != nil {
+		return validateBackupSignalMigration(spec, c)
+	}
+	if spec.Signal != nil || c.Policy.Notifications.Primary != "telegram" || c.Policy.Notifications.Fallback != "" {
+		return fmt.Errorf("backup cutover requires a pinned provider migration")
+	}
+	return nil
+}
+
+func validCutoverVersion(s backupCutoverSpec) bool {
+	return s.Version == 1 && s.Predecessor == "" && s.Signal == nil || s.Version == 3 && s.Predecessor == "" && s.Signal != nil || (s.Version == 2 || s.Version == 4) && safefs.DigestPattern.MatchString(s.Predecessor)
+}
+
+// A continuation pins today's installed artifacts while retaining the original
+// ownership decision. It cannot create authority or change its audience.
+func matchCutoverContinuation(original backupCutoverIntent, current backupCutoverSpec) error {
+	if (current.Version == 1 || current.Version == 3) && notify.Hash(original.Spec) == notify.Hash(current) {
+		return nil
+	}
+	if current.Version != 2 || current.Predecessor != notify.Hash(original) {
+		return fmt.Errorf("cutover continuation lost original intent")
+	}
+	want := original.Spec
+	want.Version, want.Predecessor = current.Version, current.Predecessor
+	want.ConfigHash, want.HelperHash = current.ConfigHash, current.HelperHash
+	want.Managed.ManifestHash = current.Managed.ManifestHash
+	if notify.Hash(want) != notify.Hash(current) {
+		return fmt.Errorf("cutover continuation changed retained authority or evidence")
 	}
 	return nil
 }
@@ -99,6 +127,9 @@ func runBackupCutover(ctx context.Context, home string, c WorkerInstallation, sp
 		return err
 	}
 	defer state.Close()
+	if err = backupTransferTx(ctx, state, requireNoPendingMigrationCycle); err != nil {
+		return err
+	}
 	notifier, err := backupNotifierLease(state)
 	if err != nil {
 		return err
@@ -143,8 +174,11 @@ func runBackupCutover(ctx context.Context, home string, c WorkerInstallation, sp
 		return err
 	}
 	fresh := os.IsNotExist(err)
-	if !fresh && (notify.Hash(intent.Spec) != notify.Hash(spec) || notify.Hash(intent.Evidence) != spec.EvidenceHash) {
+	if !fresh && (matchCutoverContinuation(intent, spec) != nil || notify.Hash(intent.Evidence) != spec.EvidenceHash) {
 		return fmt.Errorf("cutover retry changed retained intent")
+	}
+	if spec.Version == 4 || spec.Version == 2 && (fresh || !revoke) {
+		return fmt.Errorf("cutover continuation only revokes existing authority")
 	}
 	if fresh && revoke {
 		return fmt.Errorf("no cutover to revoke")
@@ -186,6 +220,9 @@ func runBackupCutover(ctx context.Context, home string, c WorkerInstallation, sp
 	var owner backupNotificationOwner
 	var reportUnits map[string]string
 	err = deps.Managed(ctx, request, func(session install.ManagedProducerSession) error {
+		if err := requireBackupSignalMigration(ctx, home, c, spec, session, revoke); err != nil {
+			return err
+		}
 		m := session.Manifest()
 		if m.UnitDirectory != filepath.Join(home, ".config/systemd/user") {
 			return fmt.Errorf("report and gateway must use the same canonical user manager")

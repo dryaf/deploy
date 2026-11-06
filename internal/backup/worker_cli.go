@@ -21,13 +21,57 @@ import (
 
 func RunCLI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: deploy backup-worker <setup|update|status|run|list|pull|recover|verify|prune|restore-check|qualify|activate|rotate-key|uninstall|delivery-review|notification-cutover|notification-resolve|notification-rollback|recovery-notifications|recovery-handoff|recovery-led-evidence|recovery-led-clear> [options] [worker]")
+		return fmt.Errorf("usage: deploy backup-worker <setup|update|status|run|list|pull|recover|verify|prune|restore-check|qualify|activate|rotate-key|uninstall|delivery-review|notification-cutover|notification-recovery-activate|notification-remigrate|notification-resolve|notification-rollback|recovery-notifications|recovery-handoff|recovery-led-evidence|recovery-led-clear> [options] [worker]")
+	}
+	if args[0] == "signal-adopt" || args[0] == "signal-adoption-review" || args[0] == "signal-adoption-handoff" {
+		return runBackupSignalAdoptionCLI(args, os.Stdout)
+	}
+	if args[0] == "__signal-adoption-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		fmt.Fprintln(os.Stdout, "backup-signal-adoption-v1")
+		return nil
+	}
+	if args[0] == "notification-remigrate" {
+		return runBackupRemigrationCLI(args[1:], os.Stdout)
+	}
+	if args[0] == "__notification-next-recovery-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		fmt.Fprintln(os.Stdout, "backup-notification-next-recovery-v1")
+		return nil
+	}
+	if args[0] == "__notification-remigration-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		fmt.Fprintln(os.Stdout, "backup-notification-remigration-v1")
+		return nil
+	}
+	if args[0] == "__notification-recovery-activation-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		fmt.Println("backup-notification-recovery-activation-v1")
+		return nil
+	}
+	if args[0] == "notification-recovery-activate" {
+		return runBackupRecoveryActivationCLI(args[1:], os.Stdout)
 	}
 	if args[0] == "__notification-cutover-probe" {
 		if len(args) != 1 {
 			return fmt.Errorf("cutover probe accepts no arguments")
 		}
 		fmt.Println("backup-notification-cutover-v1")
+		return nil
+	}
+	if args[0] == "__notification-signal-migration-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("Signal migration probe accepts no arguments")
+		}
+		fmt.Println("backup-notification-signal-migration-v1")
 		return nil
 	}
 	if args[0] == "__notification-legacy-probe" {
@@ -42,6 +86,16 @@ func RunCLI(args []string) error {
 	}
 	if args[0] == "notification-cutover" {
 		return runBackupCutoverCLI(args[1:], os.Stdout)
+	}
+	if args[0] == "notification-cycle" {
+		return runBackupMigrationCycleCLI(args[1:], os.Stdout)
+	}
+	if args[0] == "__notification-cycle-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("migration cycle probe accepts no arguments")
+		}
+		fmt.Println("backup-notification-cycle-v1")
+		return nil
 	}
 	if args[0] == "notification-resolve" {
 		return runBackupLegacyResolutionCLI(args[1:], os.Stdout)

@@ -1,5 +1,42 @@
 # Implementation plan for interactive worker commands
 
+Current continuation (2026-11-06): all 15 original interactive software criteria
+have implementation and executable fixture evidence. `migrate-commands` now
+retains alias renames, worker/conversation removal and conversation generation
+rotation through managed recovery. Restore before conversion followed by an alias
+change preserves original command identity and exactly one domain effect. Regular
+managed lifecycle, cross-provider isolation, native capability and SIGKILL checks
+pass; see [progress.md](progress.md). Actual providers and the final broad race gate
+remain unqualified. The runbook is
+[COMMAND_MIGRATION.md](examples/notification-worker/COMMAND_MIGRATION.md).
+Older dated partial-work statements below are superseded by this checkpoint.
+
+Current implementation checkpoint (2026-11-06): the user selected **software
+implementation coverage** for the 90% target. [SOFTWARE_COVERAGE.md](SOFTWARE_COVERAGE.md)
+records the aggregate audit and its verification status; [progress.md](progress.md)
+records exact tests, source identity and limitations. This does not mark deferred
+manual/provider/hardware checks as passed or imply 90% completion in every plan.
+Development validation uses `make test` (regular tests plus vet). At the user's
+request, broad race testing is deferred until after implementation and remains
+explicitly available through `make test-all` and the release qualification gate.
+
+Supported software now includes initialized Telegram cutover, held-source decisions,
+legacy rollback and G+1 remigration; first managed recovered Telegram/Signal
+activation; native Signal service/verifier replacement and existing-conversation
+enrollment; command read/all admission, disable/drain and durable permission
+narrowing; pinned recovery intake preparation; and qualified LED admission with
+explicit inherited aggregate-fault cleanup. Offline lifecycle, recovery and crash
+fixtures cover these paths. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)
+for the current inventory and [ACCEPTANCE_MATRIX.md](ACCEPTANCE_MATRIX.md) for the
+unchanged full acceptance denominator.
+
+Remaining software work includes general post-cutover backup setup/key rotation,
+legacy backup Signal relay adoption, repeated complete managed recovery epochs,
+and general UID/socket/configuration/alias/enrollment/history migrations. External
+qualification remains separate. The dated updates below are historical checkpoints;
+any older “unfinished” statements are superseded by this checkpoint and the linked
+current status. The normative design and acceptance requirements remain unchanged.
+
 Reconciliation/rollback update (2026-11-06): the consolidated current work list is
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md); it is not a measured 90%
 completion claim. `backup-worker notification-resolve` now records exact,

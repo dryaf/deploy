@@ -183,17 +183,37 @@ func runBackupRecoveryHandoff(ctx context.Context, o backupReconciliationOptions
 		if archive != original.Binding.Archive || epoch != original.Binding.Epoch {
 			return fmt.Errorf("backup command archive binding changed")
 		}
-		ledger, err = interaction.OpenRecoveryLedger(ctx, state.db, p, original.Binding.Identity, summary.Challenge.Identity, o.Operation)
+		if original.Version == 2 {
+			ledger, err = interaction.OpenNextRecoveryLedger(ctx, state.db, p, original.Binding.Identity, summary.Challenge.Identity, o.Operation)
+		} else {
+			ledger, err = interaction.OpenRecoveryLedger(ctx, state.db, p, original.Binding.Identity, summary.Challenge.Identity, o.Operation)
+		}
 		if err != nil {
 			return err
 		}
 	} else {
 		var count int
-		if err = state.db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE name LIKE 'interactive_%' OR name='backup_command_binding'").Scan(&count); err != nil {
+		if err = state.db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE name LIKE 'interactive_%'").Scan(&count); err != nil {
 			return err
 		}
 		if count != 0 {
 			return fmt.Errorf("existing backup commands require command recovery enrollment")
+		}
+		// The ordinary report pipeline initializes the command domain even when no
+		// interactive ledger exists. Preserve and verify that archive binding.
+		var domains int
+		if err = state.db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE name='backup_command_binding'").Scan(&domains); err != nil {
+			return err
+		}
+		if domains != 0 {
+			var archive string
+			var epoch uint64
+			if err = state.db.QueryRowContext(ctx, "SELECT archive_id,epoch FROM backup_command_binding WHERE singleton=1").Scan(&archive, &epoch); err != nil {
+				return err
+			}
+			if archive != original.Binding.Archive || epoch != original.Binding.Epoch {
+				return fmt.Errorf("backup command domain binding changed")
+			}
 		}
 	}
 	session, err := worker.OpenRecoveryHandoffSession(ctx, o.NotificationState, config)

@@ -3,8 +3,9 @@
 This lifecycle installs a local user service in **verification mode**. It accepts
 durable submissions/status and exposes diagnostics. It does not dispatch messages,
 poll Telegram/Signal, grant commands or publish healthy LED leases. Existing fault
-states remain retained. Production activation, remote installation and Signal
-account/relay installation are still unfinished.
+states remain retained. Production activation and Signal service ownership use
+the separate [delivery](DELIVERY_ACTIVATION.md) and [Signal](SIGNAL_PRODUCTION.md)
+lifecycles. These gateway installation commands operate locally.
 
 Prepare an owned, private runtime JSON and edit `installation.json` with real
 absolute paths. `unit_directory` must equal `$XDG_CONFIG_HOME/systemd/user`, or
@@ -117,8 +118,10 @@ sibling of the installation root. It has no service authority; retain unexpected
 contents for inspection. Completed preparation is copied into the normal immutable
 release before publication, so later resume does not depend on that sibling.
 
-History is bounded at 32 operations/releases, including abandoned release staging.
-At that bound, offline archival is required; no history is silently deleted. A crash
+Normal history is bounded at 32 operations/releases, including abandoned release
+staging. Three terminal operation slots permit command disable, delivery deactivate
+and uninstall at that bound. Use [retirement and replacement](RETIREMENT_REPLACEMENT.md)
+to retain the complete archive and start fresh history; no history is silently deleted. A crash
 before setup publishes its root can leave a private `.notification-n-…` sibling
 under the root's parent. It has no installed service authority; retain it for
 inspection. Preparation errors never publish a partially initialized installation.
@@ -216,8 +219,9 @@ remain separate from the isolated process/socket tests.
 `migrate-led` changes `worker.led_bindings` on an installed **verification-mode**
 worker using the current schema. Keep its identity, socket, UID, enrollment,
 providers, credentials, limits, paths and exclusions unchanged. Ordinary `update`
-rejects a changed mapping. Other configuration changes still need their own
-migration protocol; this command does not activate delivery or interactive commands.
+rejects a changed mapping. UID, socket and general configuration changes use
+[retirement and replacement](RETIREMENT_REPLACEMENT.md), or a narrower supported
+migration where continuity is needed. This command does not activate delivery or commands.
 
 Prepare the installation spec with a migration-capable native executable and its
 digest, and a runtime file containing only the intended LED binding changes:
@@ -323,5 +327,6 @@ under its lifetime worker lease; health binds `telegram_renewal_id`. Updates,
 compatible binary rollback and uninstall retain that pin. An expired observation
 can still be audited for verification startup; production admission must perform
 its own fresh clock/cutoff check. The standalone `recovery-telegram-check` requires
-a stopped verification service. Production cutoff installation, Signal service
-handoff and provider activation remain unfinished.
+a stopped verification service. Use the separate [command handoff](COMMAND_ACTIVATION.md#recovered-telegram-intake)
+for production cutoff installation and fresh admission. Signal uses the
+[native production service](SIGNAL_PRODUCTION.md).

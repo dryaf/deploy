@@ -141,10 +141,14 @@ func validateManagedSignalTransition(operation string, before ManagedManifest, a
 	if operation == "adopt-signal" {
 		return validateManagedSignalChange(before, after, raw, ref)
 	}
-	if operation != "supervise-signal" || before.Mode != "verification" || before.SignalVerification == nil || before.SignalVerification.ServiceRoot != "" || ref.ServiceRoot == "" || before.SignalVerification.Root != ref.Root || before.SignalVerification.ManifestHash != ref.ManifestHash || before.RuntimeHash != managedDigest(raw) || before.ConfigHash != protocol.Hash(after) {
+	if operation != "supervise-signal" || before.Mode != "verification" || before.SignalVerification == nil || ref.ServiceRoot == "" || before.SignalVerification.Root != ref.Root || before.SignalVerification.ManifestHash != ref.ManifestHash || before.RuntimeHash != managedDigest(raw) || before.ConfigHash != protocol.Hash(after) {
 		return SignalVerificationManifest{}, fmt.Errorf("Signal supervision must retain the adopted endpoint and exact configuration")
 	}
-	if err := validateManagedSignalService(before, ref); err != nil {
+	if before.SignalVerification.ServiceRoot != "" {
+		if err := validateSignalServiceSuccessor(before, ref); err != nil {
+			return SignalVerificationManifest{}, err
+		}
+	} else if err := validateManagedSignalService(before, ref); err != nil {
 		return SignalVerificationManifest{}, err
 	}
 	return inspectSignalVerificationPublication(ref)
@@ -187,7 +191,13 @@ func validateManagedSignalChange(before ManagedManifest, after Runtime, raw []by
 
 // The adoption's immutable intent and independent endpoint copy remain required
 // by every later update, rollback, uninstall and runtime startup.
-func readManagedSignalBinding(d *safefs.Directory, m ManagedManifest) (p SignalVerificationManifest, err error) {
+func readManagedSignalBinding(d *safefs.Directory, m ManagedManifest) (SignalVerificationManifest, error) {
+	return readManagedSignalBindingPolicy(d, m, nil)
+}
+func readManagedSignalBindingPolicy(d *safefs.Directory, m ManagedManifest, successor *SignalVerificationReference) (SignalVerificationManifest, error) {
+	return readManagedSignalBindingRetained(d, m, successor, m.Mode == "uninstalled")
+}
+func readManagedSignalBindingRetained(d *safefs.Directory, m ManagedManifest, successor *SignalVerificationReference, allowRemovedSuccessor bool) (p SignalVerificationManifest, err error) {
 	if m.SignalVerification == nil {
 		return p, fmt.Errorf("no managed Signal endpoint")
 	}
@@ -201,7 +211,7 @@ func readManagedSignalBinding(d *safefs.Directory, m ManagedManifest) (p SignalV
 		return
 	}
 	a := intent.After
-	if (intent.Operation != "adopt-signal" && intent.Operation != "supervise-signal") || intent.ID != binding.Operation || a.SignalVerification == nil || *a.SignalVerification != binding || a.Installation != m.Installation || a.Root != m.Root || a.Paths.State != m.Paths.State || a.UnitDirectory != m.UnitDirectory || a.Identity != m.Identity || a.RecoveryCommitHash != m.RecoveryCommitHash || a.ConfigHash != m.ConfigHash || a.RuntimeHash != m.RuntimeHash || a.Schema != m.Schema {
+	if (intent.Operation != "adopt-signal" && intent.Operation != "supervise-signal" && intent.Operation != "adopt-recovery") || intent.ID != binding.Operation || a.SignalVerification == nil || *a.SignalVerification != binding || a.Installation != m.Installation || a.Root != m.Root || a.Paths.State != m.Paths.State || a.UnitDirectory != m.UnitDirectory || a.Identity != m.Identity || a.RecoveryCommitHash != m.RecoveryCommitHash || a.ConfigHash != m.ConfigHash || a.RuntimeHash != m.RuntimeHash || a.Schema != m.Schema {
 		return p, fmt.Errorf("managed Signal adoption authority changed")
 	}
 	if err = d.ReadJSON(base+"signal-endpoint.json", &p); err != nil {
@@ -217,7 +227,12 @@ func readManagedSignalBinding(d *safefs.Directory, m ManagedManifest) (p SignalV
 	if protocol.Hash(actual) != protocol.Hash(p) {
 		return p, fmt.Errorf("managed Signal endpoint copy differs from publication")
 	}
-	if err = validateManagedSignalService(m, binding.SignalVerificationReference); err != nil {
+	if successor != nil {
+		err = validateSignalServiceDescendant(m, *successor, allowRemovedSuccessor)
+	} else {
+		err = validateManagedSignalService(m, binding.SignalVerificationReference)
+	}
+	if err != nil {
 		return p, err
 	}
 	raw, err := p.gateway()
@@ -228,12 +243,37 @@ func readManagedSignalBinding(d *safefs.Directory, m ManagedManifest) (p SignalV
 	if err != nil {
 		return p, err
 	}
+	if intent.Operation == "adopt-recovery" {
+		if intent.Before == nil || intent.Before.SignalVerification == nil || p.Spec.CommitHash != m.RecoveryCommitHash || managedDigest(raw) != m.RuntimeHash || protocol.Hash(next) != m.ConfigHash {
+			return p, fmt.Errorf("next Signal adoption pins changed")
+		}
+		if _, e := readManagedSignalBindingRetained(d, *intent.Before, &binding.SignalVerificationReference, true); e != nil {
+			return p, e
+		}
+		if err = validateNextSignalEndpoint(*intent.Before, p); err != nil {
+			return p, err
+		}
+		original, e := decodeRuntime(p.OriginalConfig)
+		if e != nil {
+			return p, e
+		}
+		if protocol.Hash(original) != intent.Before.ConfigHash || protocol.Hash(original.Worker) != protocol.Hash(next.Worker) {
+			return p, fmt.Errorf("next Signal adoption changed worker configuration")
+		}
+		return p, nil
+	}
 	if intent.Operation == "supervise-signal" {
-		// Exactly one enrichment is allowed; its predecessor must be the original adoption.
-		if intent.Before.SignalVerification == nil || intent.Before.SignalVerification.ServiceRoot != "" {
+		if intent.Before.SignalVerification == nil {
 			return p, fmt.Errorf("invalid Signal supervision predecessor")
 		}
-		previous, e := readManagedSignalBinding(d, *intent.Before)
+		var nextService *SignalVerificationReference
+		if intent.Before.SignalVerification.ServiceRoot != "" {
+			nextService = &binding.SignalVerificationReference
+			if successor != nil {
+				nextService = successor
+			}
+		}
+		previous, e := readManagedSignalBindingRetained(d, *intent.Before, nextService, allowRemovedSuccessor)
 		if e != nil {
 			return p, e
 		}
@@ -261,6 +301,19 @@ func (i managedInstaller) probeSignalVerification(ctx context.Context, d *safefs
 			capability := "__managed-signal-verification-probe"
 			if m.SignalVerification.ServiceRoot != "" {
 				capability = "__managed-signal-supervision-probe"
+				service, err := inspectSignalServiceRetained(m.SignalVerification.SignalVerificationReference, m.Mode == "uninstalled")
+				if err != nil {
+					return err
+				}
+				if service.Spec.Previous != nil {
+					capability = "__managed-signal-replacement-probe"
+				}
+				if service.Spec.Runtime != nil {
+					capability = "__managed-signal-production-probe"
+				}
+			}
+			if m.DeliveryRecovery != nil && m.DeliveryRecovery.Version == 2 {
+				capability = "__signal-next-recovery-probe"
 			}
 			return probeManagedCapability(ctx, d, name, hash, capability)
 		}
@@ -282,6 +335,9 @@ func (i managedInstaller) checkSignalVerification(ctx context.Context, m Managed
 }
 
 func managedSignalConfigBridge(d *safefs.Directory, old, current ManagedManifest) bool {
+	return managedSignalConfigBridgePolicy(d, old, current, nil)
+}
+func managedSignalConfigBridgePolicy(d *safefs.Directory, old, current ManagedManifest, successor *SignalVerificationReference) bool {
 	if current.SignalVerification == nil || old.SignalVerification != nil {
 		return false
 	}
@@ -289,10 +345,13 @@ func managedSignalConfigBridge(d *safefs.Directory, old, current ManagedManifest
 	if d.ReadJSON("operations/"+current.SignalVerification.Operation+"/intent.json", &intent) != nil || (managedJournal{Intent: intent, Phase: "complete"}).validate() != nil || intent.Before == nil {
 		return false
 	}
-	if intent.Operation == "supervise-signal" {
+	for depth := 0; intent.Operation == "supervise-signal"; depth++ {
+		if depth >= 32 {
+			return false
+		}
 		predecessor := intent.Before.SignalVerification
 		intent = managedIntent{}
-		if predecessor == nil || predecessor.ServiceRoot != "" || d.ReadJSON("operations/"+predecessor.Operation+"/intent.json", &intent) != nil || (managedJournal{Intent: intent, Phase: "complete"}).validate() != nil || intent.Before == nil {
+		if predecessor == nil || d.ReadJSON("operations/"+predecessor.Operation+"/intent.json", &intent) != nil || (managedJournal{Intent: intent, Phase: "complete"}).validate() != nil || intent.Before == nil {
 			return false
 		}
 	}
@@ -301,6 +360,6 @@ func managedSignalConfigBridge(d *safefs.Directory, old, current ManagedManifest
 	if intent.Operation != "adopt-signal" || b.ConfigHash != old.ConfigHash || b.TelegramRenewalID != current.TelegramRenewalID || old.TelegramRenewalID != current.TelegramRenewalID {
 		return false
 	}
-	_, err := readManagedSignalBinding(d, current)
+	_, err := readManagedSignalBindingPolicy(d, current, successor)
 	return err == nil
 }

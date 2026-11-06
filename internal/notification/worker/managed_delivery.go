@@ -45,9 +45,6 @@ func InspectManagedDeliveryOwner(path string) (ManagedDeliveryOwner, error) {
 }
 
 func deliveryConfig(c Config) error {
-	if c.Interaction != nil || len(c.LEDBindings) != 0 {
-		return fmt.Errorf("managed delivery does not authorize commands or LEDs")
-	}
 	return c.Validate()
 }
 
@@ -142,7 +139,8 @@ func (s *Store) requireManagedDeliveryOwner(o ManagedDeliveryOwner, hash string,
 
 // OpenManagedDelivery never initializes/migrates state or activates a producer.
 // The installer must retain its shared lease and verify current admission before
-// startup and before each external send. Commands and LEDs are refused.
+// startup and before each external send. Commands require separate admission;
+// the installer guards every LED request with the qualified activation.
 func OpenManagedDelivery(path string, c Config, expected protocol.Identity, revision string, owner ManagedDeliveryOwner, ownerHash, activationHash string) (*Store, error) {
 	if !expected.Valid() || !safefs.ValidID(revision, "n") || !safefs.DigestPattern.MatchString(activationHash) {
 		return nil, fmt.Errorf("managed delivery requires exact instance and activation pins")

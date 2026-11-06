@@ -21,8 +21,9 @@ func registerBackupDailyObligations(tx *sql.Tx) error {
 
 func backupCatchupMembers(tx *sql.Tx, event notification.NotificationEvent) (members []notification.NotificationEvent, ready bool, err error) {
 	var pending int
-	if err = tx.QueryRow("SELECT count(*) FROM backup_notification_legacy l WHERE " + unresolvedLegacyPredicate).Scan(&pending); err != nil || pending != 0 {
-		return
+	held, e := backupHasHeldSources(tx)
+	if e != nil || held {
+		return members, false, e
 	}
 	// Unexported live alerts/reports must also block recovery; the shared ledger
 	// alone cannot prove that the source outbox has been fully drained.

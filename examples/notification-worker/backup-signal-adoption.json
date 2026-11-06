@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "operation": "n-REPLACE_WITH_32_HEX_DIGITS",
+  "home": "/home/backup",
+  "config_hash": "REVIEW_CONFIG_HASH",
+  "service_binding": "REVIEW_SERVICE_BINDING",
+  "account": "11111111-1111-4111-8111-111111111111",
+  "inbox": "/home/backup/.local/share/deploy/legacy-signal-inbox"
+}

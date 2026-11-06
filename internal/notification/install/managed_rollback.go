@@ -90,6 +90,8 @@ func reviewManagedRollback(root, revision string) (review managedRollback, binar
 			candidate := *m
 			candidate.Mode = "verification"
 			candidate.DeliveryActivation = nil
+			candidate.Commands = nil
+			candidate.CommandHistoryHash = review.Current.CommandHistoryHash
 			candidate.DeliveryOwnerHash = review.Current.DeliveryOwnerHash
 			unit, e := renderManagedUnit(candidate)
 			if e != nil {
@@ -110,6 +112,9 @@ func reviewManagedRollback(root, revision string) (review managedRollback, binar
 		return review, nil, nil, fmt.Errorf("revision has no retained installation intent")
 	}
 	a, b := review.Current, review.Selected
+	if protocol.Hash(a.DeliveryRecovery) != protocol.Hash(b.DeliveryRecovery) {
+		return review, nil, nil, fmt.Errorf("rollback cannot cross delivery recovery lineage")
+	}
 	if a.Installation != b.Installation || a.Root != b.Root || a.Paths.State != b.Paths.State || a.UnitDirectory != b.UnitDirectory || a.Identity != b.Identity || a.RecoveryCommitHash != b.RecoveryCommitHash || a.ConfigHash != b.ConfigHash || protocol.Hash(a.SignalProfiles) != protocol.Hash(b.SignalProfiles) || protocol.Hash(a.SignalVerification) != protocol.Hash(b.SignalVerification) || a.Schema != b.Schema || a.HelperHash != b.HelperHash || a.HelperRevision != b.HelperRevision || protocol.Hash(a.Paths.DeniedPaths) != protocol.Hash(b.Paths.DeniedPaths) {
 		return review, nil, nil, fmt.Errorf("rollback cannot cross configuration, schema, identity or recovery-helper changes")
 	}

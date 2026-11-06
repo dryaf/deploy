@@ -20,20 +20,27 @@ import (
 // managedInstaller coordinates files and a user manager. Its crash hook is only
 // supplied by tests; every hook follows a durable boundary or external effect.
 type managedInstaller struct {
-	deliveryProbe       func(context.Context, *safefs.Directory, string, string) error
-	deliveryInspect     func(context.Context, ManagedManifest, bool) error
-	services            managedServices
-	signalProbe         func(context.Context, *safefs.Directory, string, string) error
-	signalProfilesProbe func(context.Context, *safefs.Directory, string, string) error
-	signalCheck         func(context.Context, ManagedManifest) error
-	probe               func(context.Context, *safefs.Directory, string, string, bool) error
-	recoveryProbe       func(context.Context, *safefs.Directory, string, string) error
-	helperProbe         func(context.Context, *safefs.Directory, string, string) error
-	telegramProbe       func(context.Context, *safefs.Directory, string, string) error
-	telegramTransport   http.RoundTripper
-	ledProbe            func(context.Context, *safefs.Directory, string, string) error
-	ledAPI              func(string) worker.LEDAPI
-	fault               func(string) error
+	commandRecoveryProbe  func(context.Context, *safefs.Directory, string, string) error
+	telegramHandoffProbe  func(context.Context, *safefs.Directory, string, string) error
+	commandPolicyProbe    func(context.Context, *safefs.Directory, string, string) error
+	commandProbe          func(context.Context, *safefs.Directory, string, string) error
+	deliveryRecoveryProbe func(context.Context, *safefs.Directory, string, string) error
+	deliveryProbe         func(context.Context, *safefs.Directory, string, string) error
+	deliveryInspect       func(context.Context, ManagedManifest, bool) error
+	services              managedServices
+	signalProbe           func(context.Context, *safefs.Directory, string, string) error
+	signalProfilesProbe   func(context.Context, *safefs.Directory, string, string) error
+	signalCheck           func(context.Context, ManagedManifest) error
+	probe                 func(context.Context, *safefs.Directory, string, string, bool) error
+	nextRecoveryProbe     func(context.Context, *safefs.Directory, string, string) error
+	recoveryProbe         func(context.Context, *safefs.Directory, string, string) error
+	helperProbe           func(context.Context, *safefs.Directory, string, string) error
+	telegramProbe         func(context.Context, *safefs.Directory, string, string) error
+	telegramTransport     http.RoundTripper
+	ledProbe              func(context.Context, *safefs.Directory, string, string) error
+	ledDeliveryProbe      func(context.Context, *safefs.Directory, string, string) error
+	ledAPI                func(string) worker.LEDAPI
+	fault                 func(string) error
 }
 
 func newManagedInstaller() managedInstaller {
@@ -83,8 +90,12 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	if operation != "setup" && operation != "update" && operation != "migrate-schema" && operation != "migrate-led" && operation != "adopt-recovery" && operation != "upgrade-helper" && operation != "adopt-signal" && operation != "supervise-signal" && operation != "migrate-signal-profiles" {
 		return zero, fmt.Errorf("invalid preparation operation")
 	}
-	if (operation == "adopt-signal" || operation == "supervise-signal") != (spec.SignalVerification != nil) {
+	nextSignal := operation == "adopt-recovery" && spec.SignalVerification != nil
+	if !nextSignal && (operation == "adopt-signal" || operation == "supervise-signal") != (spec.SignalVerification != nil) {
 		return zero, fmt.Errorf("adopt-signal and supervise-signal require signal_verification")
+	}
+	if len(spec.SignalConversations) != 0 && operation != "migrate-signal-profiles" {
+		return zero, fmt.Errorf("Signal conversation enrollment requires migrate-signal-profiles")
 	}
 	if err := spec.validate(); err != nil {
 		return zero, err
@@ -104,6 +115,11 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	c, err := decodeRuntime(raw)
 	if err != nil {
 		return zero, err
+	}
+	if operation == "setup" {
+		if err = verifyReplacementEnrollment(spec, c); err != nil {
+			return zero, err
+		}
 	}
 	binary, err := readManagedInput(spec.BinaryFile, maxManagedBinary)
 	if err != nil {
@@ -158,6 +174,9 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		return zero, err
 	}
 	defer lock.Close()
+	if err = requireManagedNotRetired(d); err != nil {
+		return zero, err
+	}
 	if operation == "setup" {
 		lease, e := d.Lock("installation.lock", true, true)
 		if e != nil {
@@ -176,14 +195,19 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 			return zero, e
 		}
 		b := j.Intent.After
+		if operation != "adopt-recovery" {
+			if e = refuseManagedRecoveryPreparation(d, b); e != nil {
+				return zero, e
+			}
+		}
 		if b.Mode == "delivery" {
 			return zero, fmt.Errorf("deactivate delivery before changing the installation")
 		}
-		if b.DeliveryOwnerHash != "" && operation != "update" && operation != "upgrade-helper" {
+		if b.DeliveryOwnerHash != "" && operation != "update" && operation != "upgrade-helper" && operation != "adopt-recovery" {
 			return zero, fmt.Errorf("delivery-enrolled state requires an explicit future migration")
 		}
 		before = &b
-		if b.RecoveryCommitHash != "" && (operation == "adopt-recovery" || operation == "migrate-schema" || operation == "migrate-led") {
+		if b.RecoveryCommitHash != "" && (operation == "migrate-schema" || operation == "migrate-led") {
 			return zero, fmt.Errorf("recovered runtime migration requires ancestor support")
 		}
 		if (operation == "adopt-recovery" || operation == "upgrade-helper") && b.Mode != "verification" {
@@ -192,7 +216,7 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		if expected != "" && protocol.Hash(b) != expected {
 			return zero, fmt.Errorf("installation changed while preparing rollback; review the current revision")
 		}
-		if b.Root != spec.Root || b.Paths.State != spec.State || b.UnitDirectory != spec.UnitDirectory || (operation != "migrate-led" && operation != "adopt-signal" && b.ConfigHash != protocol.Hash(c)) {
+		if b.Root != spec.Root || b.Paths.State != spec.State || b.UnitDirectory != spec.UnitDirectory || (operation != "migrate-led" && operation != "adopt-signal" && !nextSignal && b.ConfigHash != protocol.Hash(c)) {
 			return zero, fmt.Errorf("update changes identity, configuration or schema; explicit migration required")
 		}
 		if operation == "migrate-schema" {
@@ -202,8 +226,20 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		} else if b.Schema != worker.StorageSchemaVersion() {
 			return zero, fmt.Errorf("schema change requires migrate-schema")
 		}
-		if _, e = verifyManagedArtifactsVersion(d, b, operation == "migrate-schema"); e != nil {
+		var successor *SignalVerificationReference
+		if (operation == "supervise-signal" || nextSignal) && b.SignalVerification != nil && b.SignalVerification.ServiceRoot != "" {
+			successor = spec.SignalVerification
+		}
+		if _, e = verifyManagedArtifactsPolicy(d, b, operation == "migrate-schema", "", successor); e != nil {
 			return zero, e
+		}
+		if operation == "adopt-recovery" && b.SignalVerification != nil && !nextSignal {
+			return zero, fmt.Errorf("later Signal recovery requires the successor endpoint reference")
+		}
+		if nextSignal {
+			if _, e = validateManagedNextSignalChange(b, c, raw, *spec.SignalVerification, spec.RecoveryCommitHash); e != nil {
+				return zero, e
+			}
 		}
 		if operation == "adopt-signal" || operation == "supervise-signal" {
 			if _, e = validateManagedSignalTransition(operation, b, c, raw, *spec.SignalVerification); e != nil {
@@ -306,6 +342,8 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		m.SignalVerification = before.SignalVerification
 		m.SignalProfiles = before.SignalProfiles
 		m.DeliveryOwnerHash = before.DeliveryOwnerHash
+		m.CommandHistoryHash = before.CommandHistoryHash
+		m.DeliveryRecovery = before.DeliveryRecovery
 	}
 	var profileManifest signalProfilesManifest
 	var profileRuntime []byte
@@ -322,21 +360,25 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		if e != nil {
 			return zero, e
 		}
-		profileManifest, profileRuntime, err = prepareSignalProfiles(*before, raw, endpoint, profileOperation)
+		profileManifest, profileRuntime, err = prepareSignalProfilesEnrolled(*before, raw, endpoint, profileOperation, spec.SignalConversations)
 		if err != nil {
 			return zero, err
 		}
-		m.SignalProfiles = &ManagedSignalProfiles{Operation: profileOperation, Hash: protocol.Hash(profileManifest)}
+		m.SignalProfiles = &ManagedSignalProfiles{Operation: profileOperation, Hash: protocol.Hash(profileManifest), Conversations: len(profileManifest.Conversations) != 0}
 	}
 	var signalEndpoint SignalVerificationManifest
 	var signalOperation string
-	if operation == "adopt-signal" || operation == "supervise-signal" {
+	if operation == "adopt-signal" || operation == "supervise-signal" || nextSignal {
 		signalOperation, err = safefs.NewID("n")
 		if err != nil {
 			return zero, err
 		}
 		m.SignalVerification = &ManagedSignalBinding{SignalVerificationReference: *spec.SignalVerification, Operation: signalOperation}
-		signalEndpoint, err = validateManagedSignalTransition(operation, *before, c, raw, *spec.SignalVerification)
+		if nextSignal {
+			signalEndpoint, err = validateManagedNextSignalChange(*before, c, raw, *spec.SignalVerification, spec.RecoveryCommitHash)
+		} else {
+			signalEndpoint, err = validateManagedSignalTransition(operation, *before, c, raw, *spec.SignalVerification)
+		}
 		if err != nil {
 			return zero, err
 		}
@@ -352,6 +394,28 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	}
 	if operation == "adopt-recovery" {
 		m.RecoveryCommitHash = spec.RecoveryCommitHash
+		m.TelegramRenewalID = ""
+		if before.DeliveryOwnerHash != "" {
+			m.DeliveryRecovery = &worker.ManagedDeliveryRecovery{Version: 1, Owner: deliveryOwner(*before, c), Before: before.Identity, After: m.Identity, CommitHash: m.RecoveryCommitHash}
+			if before.DeliveryRecovery != nil {
+				m.DeliveryRecovery.Version = 2
+			}
+		}
+	}
+	if nextSignal && before.SignalProfiles != nil {
+		profileOperation = signalOperation
+		profileManifest, profileRuntime, err = prepareNextSignalProfiles(d, *before, m, raw, signalEndpoint, profileOperation)
+		if err != nil {
+			return zero, err
+		}
+		m.SignalProfiles = &ManagedSignalProfiles{Operation: profileOperation, Hash: protocol.Hash(profileManifest), Conversations: before.SignalProfiles.Conversations}
+	}
+	if operation == "adopt-recovery" && before.CommandHistoryHash != "" {
+		r, e := commandRecoveryBinding(*before, m)
+		if e != nil {
+			return zero, e
+		}
+		m.CommandHistoryHash = protocol.Hash(r)
 	}
 	if operation == "migrate-schema" || operation == "migrate-led" || operation == "adopt-recovery" || operation == "upgrade-helper" || operation == "adopt-signal" || operation == "supervise-signal" || operation == "migrate-signal-profiles" {
 		m.HelperRevision = m.Revision
@@ -432,7 +496,7 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	if err != nil {
 		return zero, err
 	}
-	if operation == "migrate-signal-profiles" {
+	if operation == "migrate-signal-profiles" || (nextSignal && before.SignalProfiles != nil) {
 		opid = profileOperation
 		profileRelease, e := d.Sub("releases/" + revision)
 		if e != nil {
@@ -450,7 +514,7 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 			return zero, err
 		}
 	}
-	if operation == "adopt-signal" || operation == "supervise-signal" {
+	if operation == "adopt-signal" || operation == "supervise-signal" || nextSignal {
 		opid = signalOperation
 		if err = d.Mkdir("operations/" + opid); err != nil {
 			return zero, err
@@ -477,7 +541,8 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	return i.resumeLocked(ctx, d, j, lock)
 }
 
-func limitManagedHistory(d *safefs.Directory) error {
+func limitManagedHistory(d *safefs.Directory) error { return limitManagedHistoryFor(d, false) }
+func limitManagedHistoryFor(d *safefs.Directory, terminal bool) error {
 	for _, name := range []string{"operations", "releases"} {
 		items, err := d.Sub(name)
 		if os.IsNotExist(err) {
@@ -486,12 +551,12 @@ func limitManagedHistory(d *safefs.Directory) error {
 		if err != nil {
 			return err
 		}
-		names, err := items.File().Readdirnames(33)
+		names, err := items.File().Readdirnames(36)
 		items.Close()
 		if err != nil && !errors.Is(err, io.EOF) {
 			return err
 		}
-		if len(names) >= 32 {
+		if len(names) >= 32 && !(terminal && ((name == "releases" && len(names) == 32) || (name == "operations" && len(names) < 35))) {
 			return fmt.Errorf("installation history limit reached; offline archival is required")
 		}
 	}
@@ -619,7 +684,7 @@ func (i managedInstaller) uninstall(ctx context.Context, root string) (ManagedMa
 		previous = &p
 	}
 	j = managedJournal{Intent: managedIntent{Version: managedVersion, ID: id, Operation: "uninstall", Before: &b, After: after, BeforeUnit: string(unit), Supersedes: previous}, Phase: "prepared"}
-	if err = limitManagedHistory(d); err != nil {
+	if err = limitManagedHistoryFor(d, true); err != nil {
 		return zero, err
 	}
 	if err = writeManagedIntent(d, j); err != nil {
@@ -658,7 +723,11 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 	// Its After artifacts already validate the identical retained installation;
 	// revalidating Before as live would incorrectly require removed dependencies.
 	if j.Intent.Before != nil && !(j.Intent.Operation == "uninstall" && j.Phase == "complete") {
-		if _, err = verifyManagedArtifactsVersion(d, *j.Intent.Before, j.Intent.Operation == "migrate-schema"); err != nil {
+		var successor *SignalVerificationReference
+		if (j.Intent.Operation == "supervise-signal" || j.Intent.Operation == "adopt-recovery") && j.Intent.Before.SignalVerification != nil && j.Intent.Before.SignalVerification.ServiceRoot != "" {
+			successor = &m.SignalVerification.SignalVerificationReference
+		}
+		if _, err = verifyManagedArtifactsPolicy(d, *j.Intent.Before, j.Intent.Operation == "migrate-schema", "", successor); err != nil {
 			return m, err
 		}
 	}
@@ -819,6 +888,9 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 	if err = i.deliveryState(ctx, d, j, c); err != nil {
 		return m, err
 	}
+	if err = i.commandState(ctx, d, j, c); err != nil {
+		return m, err
+	}
 	s, err := openManagedStore(m, c)
 	if err != nil {
 		return m, err
@@ -831,8 +903,18 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 	if s.Identity() != m.Identity {
 		return m, fmt.Errorf("worker identity changed; recovery required")
 	}
-	if err = s.RequireInactiveProducers(); err != nil {
-		return m, err
+	if j.Intent.Operation == "disable-commands" || isManagedCommandPolicyOperation(j.Intent.Operation) || (j.Intent.Operation == "deactivate-delivery" && m.CommandHistoryHash != "") {
+		if err = s.WaitManagedCommandGrants(ctx); err != nil {
+			return m, err
+		}
+		if err = i.boundary("command-grants-drained"); err != nil {
+			return m, err
+		}
+	}
+	if j.Intent.Operation != "enable-commands" && j.Intent.Operation != "disable-commands" && !isManagedCommandPolicyOperation(j.Intent.Operation) {
+		if err = s.RequireInactiveProducers(); err != nil {
+			return m, err
+		}
 	}
 	if j.Intent.Operation == "migrate-led" {
 		if err = verifyManagedLEDCompletion(ctx, d, j, c); err != nil {

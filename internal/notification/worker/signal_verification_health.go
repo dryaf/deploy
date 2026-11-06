@@ -10,7 +10,7 @@ import (
 func (s *Store) BindSignalVerification(hash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.verificationOnly || s.installationRevision == "" || s.recoveryCommitHash == "" || !safefs.DigestPattern.MatchString(hash) || s.signalVerificationHash != "" {
+	if (!s.verificationOnly && s.deliveryActivationHash == "") || s.installationRevision == "" || s.recoveryCommitHash == "" || !safefs.DigestPattern.MatchString(hash) || s.signalVerificationHash != "" {
 		return fmt.Errorf("Signal verification health requires an unbound managed recovery runtime")
 	}
 	s.signalVerificationHash = hash

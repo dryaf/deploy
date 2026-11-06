@@ -18,6 +18,68 @@ import (
 )
 
 func runManagedCLI(args []string) error {
+	if args[0] == "__managed-next-recovery-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), NextRecovery: 1})
+	}
+
+	if args[0] == "__managed-led-delivery-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), LEDDelivery: 1})
+	}
+
+	if args[0] == "__managed-command-recovery-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), CommandRecovery: 1})
+	}
+	if args[0] == "__managed-telegram-handoff-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), TelegramHandoff: 1})
+	}
+	if args[0] == "__managed-signal-production-probe" || args[0] == "__managed-signal-replacement-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), SignalReplacement: 1, SignalProduction: 1})
+	}
+	if args[0] == "__managed-signal-conversations-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), SignalProfiles: 1, SignalConversations: 1})
+	}
+	if args[0] == "__managed-command-enrollment-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), CommandEnrollment: 1})
+	}
+	if args[0] == "__managed-command-policy-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), CommandPolicy: 1})
+	}
+	if args[0] == "__managed-commands-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), Commands: 1})
+	}
+	if args[0] == "__managed-delivery-recovery-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), DeliveryRecovery: 1})
+	}
 	if args[0] == "__managed-legacy-probe" {
 		if len(args) != 1 {
 			return fmt.Errorf("probe takes no arguments")
@@ -98,7 +160,10 @@ func runManagedCLI(args []string) error {
 		if err = spec.validate(); err != nil {
 			return err
 		}
-		if (args[0] == "adopt-signal" || args[0] == "supervise-signal") != (spec.SignalVerification != nil) {
+		if len(spec.SignalConversations) != 0 && args[0] != "migrate-signal-profiles" {
+			return fmt.Errorf("signal_conversations requires migrate-signal-profiles")
+		}
+		if args[0] != "adopt-recovery" && (args[0] == "adopt-signal" || args[0] == "supervise-signal") != (spec.SignalVerification != nil) {
 			return fmt.Errorf("adopt-signal and supervise-signal require signal_verification")
 		}
 		if (args[0] == "adopt-recovery") != (spec.RecoveryCommitHash != "") {
@@ -270,6 +335,9 @@ func serveManaged(ctx context.Context, root, revision string) error {
 	m := j.Intent.After
 	if m.Root != root || m.Revision != revision || (m.Mode != "verification" && m.Mode != "delivery") || managedPhase(j.Phase) < managedPhase("published") {
 		return fmt.Errorf("installation is not ready for verification service")
+	}
+	if err = requireManagedNotRetired(d); err != nil {
+		return err
 	}
 	if err = validateManagedPointer(d, j, true); err != nil {
 		return err

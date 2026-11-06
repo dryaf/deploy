@@ -42,8 +42,9 @@ type Profile struct {
 }
 
 type Adapter struct {
-	Profiles  map[string]Profile
-	Transport http.RoundTripper
+	Profiles        map[string]Profile
+	Transport       http.RoundTripper
+	SignalTransport http.RoundTripper
 }
 
 func ReadSecret(path string) (string, error) {
@@ -92,7 +93,7 @@ func (a Adapter) Send(ctx context.Context, name string, m protocol.Message) Resu
 		if d.Provider != p.Kind || d.Fingerprint() != p.Destination {
 			return Result{Permanent: true}
 		}
-		adapter := ConversationAdapter{Transport: a.Transport, TelegramAccount: d.Account, TelegramTokenFile: p.TokenFile}
+		adapter := ConversationAdapter{Transport: a.Transport, SignalTransport: a.SignalTransport, TelegramAccount: d.Account, TelegramTokenFile: p.TokenFile}
 		if p.Kind == "signal" {
 			adapter.Signal = &SignalAccount{Account: d.Account, Socket: p.Socket, InboxIdentity: p.RelayIdentity}
 		}

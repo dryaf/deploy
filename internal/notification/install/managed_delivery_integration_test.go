@@ -90,6 +90,15 @@ func TestManagedDeliveryNativeExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	d, err := privateManagedDir(spec.Root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = i.probeCommandPolicy(ctx, d, before, true)
+	d.Close()
+	if err != nil {
+		t.Fatal("native enrollment capability", err)
+	}
 	var out bytes.Buffer
 	if err := runQualificationCLI([]string{"qualification-template", "--local", "--root", spec.Root}, &out); err != nil {
 		t.Fatal(err)
@@ -156,6 +165,30 @@ func TestManagedDeliveryNativeExecutable(t *testing.T) {
 	if err := i.withManagedProducer(ctx, legacy, func(s ManagedProducerSession) error { return s.RevokeLegacy() }); err != nil {
 		t.Fatal("native legacy revocation", err)
 	}
+	next := legacy
+	next.Generation, next.LegacyGeneration, next.Revoke, next.LegacyRevoke = "native-shared-two", "", false, false
+	if err := i.withManagedProducer(ctx, next, func(s ManagedProducerSession) error {
+		predecessor, ok := s.(ManagedRemigrationProducerSession)
+		if !ok {
+			t.Fatal("native session missing remigration capability")
+		}
+		if err := predecessor.RequireRevokedPredecessors(legacy.Generation, legacy.LegacyGeneration); err != nil {
+			return err
+		}
+		if err := predecessor.RequireRevokedPredecessors(legacy.Generation, next.Generation); err == nil {
+			t.Fatal("current generation accepted as revoked predecessor")
+		}
+		if err := s.Stage(); err != nil {
+			return err
+		}
+		return s.Activate()
+	}); err != nil {
+		t.Fatal("native shared remigration", err)
+	}
+	next.Revoke = true
+	if err := i.withManagedProducer(ctx, next, func(s ManagedProducerSession) error { return s.Revoke(ctx) }); err != nil {
+		t.Fatal("native successor revoke", err)
+	}
 	if err := os.Remove(c.Providers["telegram"].TokenFile); err != nil {
 		t.Fatal(err)
 	}
@@ -190,6 +223,36 @@ func TestManagedDeliveryNativeExecutable(t *testing.T) {
 	rolled, err := i.rollback(ctx, spec.Root, before.Revision)
 	if err != nil || rolled.BinaryHash != before.BinaryHash || rolled.DeliveryOwnerHash != active.DeliveryOwnerHash || rolled.Mode != "verification" {
 		t.Fatal("enrolled verification rollback", err)
+	}
+	if err := native.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered := publishManagedRecovery(t, spec)
+	spec.RecoveryCommitHash = recovered.Commit.CommitHash
+	adopted, err := i.prepare(ctx, "adopt-recovery", spec)
+	if err != nil {
+		t.Fatal("native recovered owner adoption", err)
+	}
+	if adopted.DeliveryRecovery == nil || adopted.DeliveryOwnerHash != active.DeliveryOwnerHash {
+		t.Fatal("native recovery lost owner")
+	}
+	if err := os.WriteFile(c.Providers["telegram"].TokenFile, []byte("123:secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	record := freshDeliveryQualification(t, spec.Root)
+	reactivated, err := i.prepareDelivery(ctx, "activate-delivery", spec.Root, protocol.Hash(adopted), protocol.Hash(record), false)
+	if err != nil {
+		t.Fatal("native recovered activation", err)
+	}
+	api = client.Client{Socket: reactivated.Paths.Socket, Identity: reactivated.Identity, PeerPID: uint32(native.cmd.Process.Pid)}
+	if _, err := api.Call(ctx, protocol.Request{Operation: "system.status"}, &health); err != nil || health.VerificationOnly || health.RecoveryCommitHash != spec.RecoveryCommitHash {
+		t.Fatal(health, err)
+	}
+	if _, err := i.resume(ctx, spec.Root); err != nil {
+		t.Fatal("native recovered restart", err)
+	}
+	if _, err := i.prepareDelivery(ctx, "deactivate-delivery", spec.Root, protocol.Hash(reactivated), "", false); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := i.uninstall(ctx, spec.Root); err != nil {
 		t.Fatal(err)

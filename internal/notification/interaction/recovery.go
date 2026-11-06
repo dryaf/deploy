@@ -32,6 +32,7 @@ type CommandRecoveryRecord struct {
 	Fenced                bool
 	Results               []RecoveryResult
 	NonAdmission          *NonAdmissionProof
+	HistoricalIdentity    *protocol.Identity `json:"historical_identity,omitempty"`
 }
 type CommandRecoverySummary struct {
 	Challenge                            protocol.RecoveryChallenge
@@ -78,6 +79,12 @@ func ValidateCommandRecoveryChallenge(ch protocol.RecoveryChallenge, old protoco
 
 func (v CommandRecoveryRecord) Validate(m CommandRecoveryManifest) error {
 	c := v.Command
+	if v.HistoricalIdentity != nil {
+		if !v.Fenced || !v.HistoricalIdentity.Valid() || v.HistoricalIdentity.Worker != m.Identity.Worker || *v.HistoricalIdentity == m.Identity {
+			return fmt.Errorf("invalid historical command epoch")
+		}
+		m.Identity = *v.HistoricalIdentity
+	}
 	raw, err := json.Marshal(v)
 	if err != nil || len(raw)+4098 > protocol.MaxRequest || c.Producer != m.Producer || !protocol.ValidToken(c.ID) ||
 		!protocol.ValidToken(c.RequestKey) || !protocol.ValidToken(c.InputHash) || c.Scope.Validate() != nil || c.Deadline.IsZero() ||

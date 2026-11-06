@@ -204,8 +204,11 @@ func (u userSignalServiceManager) verifyOnce(ctx context.Context, m SignalServic
 	if _, err = u.Inspect(ctx, m); err != nil {
 		return err
 	}
-	gateway := ManagedManifest{SignalVerification: &ManagedSignalBinding{SignalVerificationReference: SignalVerificationReference{Root: m.Spec.Endpoint.Root, ManifestHash: m.Spec.Endpoint.ManifestHash, ServiceRoot: m.Spec.Root, ServiceHash: m.ManifestHash}}}
-	if err = checkManagedSignalHealthPID(ctx, gateway, state.PID); err != nil {
+	want, err := signalServiceHealth(m)
+	if err != nil {
+		return err
+	}
+	if err = checkSignalHealthResponse(ctx, want, filepath.Join(m.Spec.Endpoint.Root, "api.sock"), state.PID, &m); err != nil {
 		return err
 	}
 	after, _, err := u.snapshot(ctx, m)

@@ -361,6 +361,24 @@ func requireBackupUnsentSource(tx *sql.Tx, event notification.NotificationEvent)
 	if held {
 		return fmt.Errorf("backup source %s is held by legacy outcome reconciliation", event.ID)
 	}
+	var remigrated backupCutoverDecision
+	if e := backupNotificationMeta(tx, remigrationSourcePrefix+event.ID, &remigrated); e == nil {
+		if remigrated.Disposition == "held" {
+			released, err := requireBackupLegacyRetry(tx, event)
+			if err != nil {
+				return err
+			}
+			if released {
+				return nil
+			}
+		}
+		if remigrated.Disposition != "unsent" {
+			return fmt.Errorf("remigrated source is not proven unsent")
+		}
+		return requireBackupUnattemptedSource(tx, event)
+	} else if e != sql.ErrNoRows {
+		return e
+	}
 	exists, err := notificationTable(tx, "backup_notification_legacy")
 	if err != nil {
 		return err

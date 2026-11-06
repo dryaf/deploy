@@ -65,6 +65,23 @@ func (i managedInstaller) prepareTelegramRenewal(ctx context.Context, root strin
 	if c.Telegram == nil {
 		return zero, fmt.Errorf("managed gateway has no interactive Telegram account")
 	}
+	state, err := privateManagedDir(before.Paths.State, true)
+	if err != nil {
+		return zero, err
+	}
+	var consumed worker.ManagedTelegramHandoff
+	handoffName := "managed-telegram-handoff-" + protocol.Hash(c.Telegram.Account)
+	if before.DeliveryRecovery != nil && before.DeliveryRecovery.Version == 2 {
+		handoffName += "-" + protocol.Hash(before.Identity)
+	}
+	err = state.ReadJSON(handoffName+".json", &consumed)
+	state.Close()
+	if err == nil {
+		return zero, fmt.Errorf("Telegram cutoff already consumed; retain it for this recovery epoch")
+	}
+	if !os.IsNotExist(err) {
+		return zero, err
+	}
 	units, err := managedUnitDirectory(before.UnitDirectory)
 	if err != nil {
 		return zero, err

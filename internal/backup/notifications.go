@@ -519,7 +519,12 @@ func runNotifier(ctx context.Context, c WorkerInstallation, state *backupState) 
 			return e
 		}
 		var intent backupLegacyRollbackIntent
-		e = d.ReadJSON(legacyRollbackFile, &intent)
+		rollbackFile, e := currentMigrationArtifact(state, legacyRollbackFile)
+		if e != nil {
+			d.Close()
+			return e
+		}
+		e = d.ReadJSON(rollbackFile, &intent)
 		d.Close()
 		if e != nil {
 			return e
@@ -527,7 +532,7 @@ func runNotifier(ctx context.Context, c WorkerInstallation, state *backupState) 
 		if notify.Hash(intent) != restored {
 			return fmt.Errorf("legacy sender intent differs from its committed credential binding")
 		}
-		sender = notification.PinnedTelegramSender(intent.Spec.CredentialHash)
+		sender = notification.PinnedLegacySender(intent.Spec.CredentialHash, intent.Spec.Cutover.signalProfile())
 	} else if e != sql.ErrNoRows {
 		return e
 	}

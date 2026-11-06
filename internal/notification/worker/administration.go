@@ -184,7 +184,7 @@ func (a messageAdministrator) currentReview(ctx context.Context, tx *sql.Tx, o o
 		if o.Generations[g] != "active" && o.Generations[g] != "staged" {
 			return j, fmt.Errorf("retry cannot revive a revoked or draining generation")
 		}
-		route, ok := a.s.config.Routes[j.Message.Route]
+		route, ok := a.s.effectiveRoutes()[j.Message.Route]
 		if !ok || route.Revision != j.RouteRevision {
 			return j, fmt.Errorf("retry cannot redirect a message to a changed route")
 		}

@@ -57,6 +57,9 @@ func readRetainedCheckpoint(ctx context.Context, stage, d *safefs.Directory, c C
 	if err = journal.validate(c); err != nil {
 		return out, err
 	}
+	if err = verifyOriginalRuntime(ctx, stage, journal, c); err != nil {
+		return out, err
+	}
 	if journal.Phase != "quarantined" || journal.binding() != intent.Binding || journal.CandidateHash != intent.CandidateHash {
 		return out, fmt.Errorf("retained recovery journal mismatch")
 	}
@@ -117,7 +120,7 @@ func readRetainedCheckpoint(ctx context.Context, stage, d *safefs.Directory, c C
 	if err = checkRetainedSnapshot(ctx, stage, "source.db", journal.Snapshot, c); err != nil {
 		return out, err
 	}
-	if err = checkRetainedSnapshot(ctx, stage, originalArchiveFile, SnapshotManifest{Identity: journal.Before, Schema: original.Schema}, c); err != nil {
+	if err = checkRetainedSnapshot(ctx, stage, originalArchiveFile, journal.originalSnapshot(original.Schema), c); err != nil {
 		return out, err
 	}
 	if err = checkRetainedRecoverySQL(ctx, stage, "candidate.db", journal, "", ""); err != nil {
@@ -144,7 +147,7 @@ func readRetainedCheckpoint(ctx context.Context, stage, d *safefs.Directory, c C
 	if checked.ArchiveHash != evidence.ArchiveHash {
 		return out, fmt.Errorf("retained proof evidence changed during SQL checks")
 	}
-	out = RecoveryCheckpointProof{Version: 1, Operation: operation, Snapshot: journal.Snapshot.ID,
+	out = RecoveryCheckpointProof{OriginalRuntimeHash: journal.RuntimeHash, AncestorHash: journal.Snapshot.RecoveryHash, Version: 1, Operation: operation, Snapshot: journal.Snapshot.ID,
 		Before: journal.Before, After: journal.After, ConfigHash: review.ConfigHash, ReviewHash: reviewHash,
 		CheckpointHash: checkpointHash, EvidenceArchiveHash: evidence.ArchiveHash, OriginalSourceHash: original.hash(),
 		SourceDatabaseHash: journal.Snapshot.DatabaseHash, CandidateDatabaseHash: journal.CandidateHash,
@@ -188,7 +191,7 @@ func checkRetainedSnapshot(ctx context.Context, d *safefs.Directory, name string
 		return err
 	}
 	defer func() { err = errors.Join(err, db.Close()) }()
-	return verifySnapshotDB(ctx, db, manifest, c)
+	return verifyRetainedSnapshotSQL(ctx, d, db, manifest, c)
 }
 
 func checkRetainedRecoverySQL(ctx context.Context, d *safefs.Directory, name string, journal snapshotRecovery, reconciliation, original string) (err error) {

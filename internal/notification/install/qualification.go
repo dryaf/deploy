@@ -34,6 +34,7 @@ type QualificationCheck struct {
 
 type QualificationEnvironment struct {
 	SignalImageDigest string `json:"signal_image_digest,omitempty"`
+	SignalCLISHA256   string `json:"signal_cli_sha256,omitempty"`
 	LEDVersion        string `json:"led_version,omitempty"`
 	LEDConfigHash     string `json:"led_config_sha256,omitempty"`
 }
@@ -141,6 +142,9 @@ func (r QualificationReport) validate() error {
 		}
 	}
 	e := r.Environment
+	if e.SignalCLISHA256 != "" && (!safefs.DigestPattern.MatchString(e.SignalCLISHA256) || e.SignalImageDigest != "") {
+		return fmt.Errorf("Signal qualification requires one exact image or native CLI identity")
+	}
 	if (e.SignalImageDigest != "" && (!strings.HasPrefix(e.SignalImageDigest, "sha256:") || !safefs.DigestPattern.MatchString(strings.TrimPrefix(e.SignalImageDigest, "sha256:")))) || (e.LEDVersion != "" && !protocol.ValidToken(e.LEDVersion)) || (e.LEDConfigHash != "" && !safefs.DigestPattern.MatchString(e.LEDConfigHash)) {
 		return fmt.Errorf("invalid qualification environment")
 	}
@@ -185,14 +189,14 @@ func (r QualificationReport) matches(b QualificationBinding, c Runtime, now time
 	}
 	// Unspecified environment leaves reports incomplete; inventing irrelevant
 	// environment identities is rejected instead of widening their authority.
-	if (!qualificationUsesSignal(c) && r.Environment.SignalImageDigest != "") || (c.LEDSocket == "" && (r.Environment.LEDVersion != "" || r.Environment.LEDConfigHash != "")) {
+	if (!qualificationUsesSignal(c) && (r.Environment.SignalImageDigest != "" || r.Environment.SignalCLISHA256 != "")) || (c.LEDSocket == "" && (r.Environment.LEDVersion != "" || r.Environment.LEDConfigHash != "")) {
 		return fmt.Errorf("qualification environment is not configured")
 	}
 	return nil
 }
 
 func (r QualificationReport) evidenceComplete(c Runtime) bool {
-	if qualificationUsesSignal(c) && r.Environment.SignalImageDigest == "" {
+	if qualificationUsesSignal(c) && r.Environment.SignalImageDigest == "" && r.Environment.SignalCLISHA256 == "" {
 		return false
 	}
 	if c.LEDSocket != "" && (r.Environment.LEDVersion == "" || r.Environment.LEDConfigHash == "") {

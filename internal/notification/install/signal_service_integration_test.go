@@ -226,6 +226,30 @@ func TestSignalServiceNativeExecutable(t *testing.T) {
 	if err = native.Verify(ctx, gateway); err != nil {
 		t.Fatal(err)
 	}
+	// Replace the verifier with another immutable native executable enrollment,
+	// then explicitly rebind the gateway while retaining migrated profiles.
+	if err = native.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = si.uninstall(ctx, s.Root); err != nil {
+		t.Fatal(err)
+	}
+	nextService := replacementServiceSpec(t, m)
+	m, err = si.setup(ctx, nextService)
+	if err != nil {
+		t.Fatal("native service replacement", err)
+	}
+	s = nextService
+	ref = s.Endpoint
+	ref.ServiceRoot, ref.ServiceHash = s.Root, m.ManifestHash
+	spec.SignalVerification = &ref
+	gateway, err = i.prepare(ctx, "supervise-signal", spec)
+	if err != nil {
+		t.Fatal("native gateway rebind", err)
+	}
+	if err = native.Verify(ctx, gateway); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = i.uninstall(ctx, spec.Root); err != nil {
 		t.Fatal("gateway uninstall", err)
 	}

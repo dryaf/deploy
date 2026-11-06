@@ -14,6 +14,7 @@ import (
 // also need producer/command reconciliation and managed service/relay draining.
 // The original live database and canonical ownership histories remain untouched.
 type snapshotRecovery struct {
+	RuntimeHash   string            `json:"runtime_hash,omitempty"`
 	Version       int               `json:"version"`
 	Operation     string            `json:"operation"`
 	Before        protocol.Identity `json:"before"`
@@ -35,12 +36,15 @@ func (j snapshotRecovery) binding() recoveryBinding {
 }
 
 func (j snapshotRecovery) validate(c Config) error {
+	if j.Version == 1 && j.RuntimeHash != "" || j.Version == 2 && !safefs.DigestPattern.MatchString(j.RuntimeHash) {
+		return fmt.Errorf("invalid original runtime evidence binding")
+	}
 	if j.Snapshot.Schema == 6 && len(c.LEDBindings) != 0 {
 		return fmt.Errorf("legacy recovery cannot contain LED bindings")
 	}
-	if j.Version != 1 || !safefs.ValidID(j.Operation, "n") || !j.Before.Valid() || !j.After.Valid() ||
+	if (j.Version != 1 && j.Version != 2) || j.Version != j.Snapshot.Version || !safefs.ValidID(j.Operation, "n") || !j.Before.Valid() || !j.After.Valid() ||
 		j.Before.Worker != j.After.Worker || j.Before.Recovery == j.After.Recovery || j.Snapshot.Identity != j.Before ||
-		j.Snapshot.Version != 1 || !supportedSnapshotSchema(j.Snapshot.Schema) || !safefs.ValidID(j.Snapshot.ID, "n") ||
+		!validSnapshotVersion(j.Snapshot) || !supportedSnapshotSchema(j.Snapshot.Schema) || !safefs.ValidID(j.Snapshot.ID, "n") ||
 		j.Snapshot.ConfigHash != protocol.Hash(c) || !safefs.DigestPattern.MatchString(j.Snapshot.DatabaseHash) ||
 		j.Snapshot.DatabaseBytes <= 0 || j.Snapshot.DatabaseBytes > c.MaxDatabaseBytes || j.Snapshot.CreatedAt.IsZero() {
 		return fmt.Errorf("invalid recovery authority or snapshot")
@@ -72,6 +76,10 @@ func prepareSnapshotRecovery(ctx context.Context, statePath, snapshotPath string
 }
 
 func preparePinnedSnapshotRecovery(ctx context.Context, statePath, snapshotPath string, c Config, expected *SnapshotManifest, fault func(string) error) (j snapshotRecovery, err error) {
+	return preparePinnedSnapshotRecoveryOwner(ctx, statePath, snapshotPath, c, expected, nil, "", fault)
+}
+
+func preparePinnedSnapshotRecoveryOwner(ctx context.Context, statePath, snapshotPath string, c Config, expected *SnapshotManifest, owner *ManagedDeliveryOwner, revision string, fault func(string) error) (j snapshotRecovery, err error) {
 	m, source, err := readSnapshot(ctx, snapshotPath, c)
 	if err != nil {
 		return j, err
@@ -82,11 +90,24 @@ func preparePinnedSnapshotRecovery(ctx context.Context, statePath, snapshotPath 
 	}
 	// Open takes the stable instance lease and upgrades the readable schema.
 	// It refuses a running worker; this primitive never stops a live service.
-	s, err := Open(statePath, c, false)
+	var s *Store
+	if owner == nil {
+		s, err = Open(statePath, c, false)
+	} else {
+		s, err = OpenManagedRuntime(statePath, c, owner.Identity, revision)
+	}
 	if err != nil {
 		return j, err
 	}
 	defer s.Close()
+	if owner != nil {
+		if err = s.RequireManagedDeliveryOwner(*owner, protocol.Hash(*owner)); err != nil {
+			return j, err
+		}
+		if err = s.RequireInactiveProducers(); err != nil {
+			return j, err
+		}
+	}
 	if s.Identity() != m.Identity {
 		return j, fmt.Errorf("snapshot belongs to another worker or recovery epoch")
 	}
@@ -164,6 +185,12 @@ func finishSnapshotRecovery(ctx context.Context, dir *safefs.Directory, c Config
 		return err
 	}
 	defer stage.Close()
+	if err = verifyOriginalRuntime(ctx, stage, *j, c); err != nil {
+		return err
+	}
+	if _, err = retainedSnapshotRecovery(ctx, stage, j.Snapshot, c); err != nil {
+		return err
+	}
 	source, err := snapshotFile(stage, "source.db", c.MaxDatabaseBytes)
 	if err != nil {
 		return err
@@ -247,8 +274,14 @@ func quarantineSnapshot(ctx context.Context, dir *safefs.Directory, j snapshotRe
 	err = db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='recovery'").Scan(&body)
 	if err == nil {
 		var binding recoveryBinding
-		if err = protocol.Decode([]byte(body), &binding, 4096); err != nil || binding != j.binding() {
-			return fmt.Errorf("candidate recovery binding mismatch")
+		if err = protocol.Decode([]byte(body), &binding, 4096); err != nil {
+			return err
+		}
+		if binding != j.binding() {
+			if j.Version != 2 {
+				return fmt.Errorf("candidate recovery binding mismatch")
+			}
+			return quarantineAncestorSnapshot(ctx, dir, db, j, c, fault)
 		}
 		if err = db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='identity'").Scan(&body); err != nil {
 			return err
@@ -277,11 +310,20 @@ func quarantineSnapshot(ctx context.Context, dir *safefs.Directory, j snapshotRe
 	if err = verifySnapshotDB(ctx, db, j.Snapshot, c); err != nil {
 		return err
 	}
+	return classifyRecoverySnapshot(ctx, dir, db, j, fault, false)
+}
+
+func classifyRecoverySnapshot(ctx context.Context, dir *safefs.Directory, db *sql.DB, j snapshotRecovery, fault func(string) error, ancestor bool) (err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if ancestor {
+		if err = archiveAncestorProjection(ctx, tx, j); err != nil {
+			return err
+		}
+	}
 	identity, _ := json.Marshal(j.After)
 	binding, _ := json.Marshal(j.binding())
 	if _, err = tx.ExecContext(ctx, "UPDATE metadata SET value=? WHERE key='identity'", string(identity)); err != nil {

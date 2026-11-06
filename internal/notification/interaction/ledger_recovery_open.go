@@ -30,6 +30,9 @@ func OpenRecoveryLedger(ctx context.Context, db *sql.DB, p protocol.Producer, be
 	if err = protocol.Decode([]byte(raw), &pin, 4096); err != nil {
 		return nil, err
 	}
+	if pin.NextOperation != "" && (pin.NextOperation != operation || pin.NextIdentity == nil || *pin.NextIdentity != after) {
+		return nil, fmt.Errorf("next command recovery pins changed")
+	}
 	if pin.Producer != p || (pin.Identity != before && pin.Identity != after) || (pin.RecoveryOperation != "" && pin.RecoveryOperation != operation) {
 		return nil, fmt.Errorf("command ledger belongs to another recovery")
 	}

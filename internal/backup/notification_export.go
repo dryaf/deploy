@@ -179,7 +179,9 @@ func freezeNotificationExport(tx *sql.Tx, m notify.Message, members []notificati
 // Receipt pages and their cursor commit together. Terminal events never masquerade
 // as delivery; open obligations survive expiry even before a successor exists.
 func importNotificationReceipts(tx *sql.Tx, c notify.Cursor, receipts []notify.Receipt) error {
-	if err := requireNotificationRecoveryInactive(tx); err != nil {
+	// A pending migration blocks new exports, while still permitting receipt
+	// reconciliation after its canonical generation has been revoked.
+	if err := requireNotificationRecoverySettled(tx); err != nil {
 		return err
 	}
 	if err := installNotificationReceiptHistory(tx); err != nil {

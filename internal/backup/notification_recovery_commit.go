@@ -102,11 +102,19 @@ func backupRecoveryDeliveryBinding(tx *sql.Tx, j backupNotificationRecovery) (b 
 // never reached the old worker. Domain decisions and pending cancellations may
 // still change while fenced; they are intentionally not rewritten here.
 func validateBackupCommitPayloads(tx *sql.Tx, j backupNotificationRecovery) error {
+	return validateBackupRetainedCommitPayloads(tx, j, false)
+}
+
+func validateBackupRetainedCommitPayloads(tx *sql.Tx, j backupNotificationRecovery, active bool) error {
+	_, inherited, err := readBackupRecoveryAncestors(tx, j, nil)
+	if err != nil {
+		return err
+	}
 	var exports, transfers uint64
 	if err := tx.QueryRow("SELECT (SELECT count(*) FROM notification_exports),(SELECT count(*) FROM backup_notification_transfers)").Scan(&exports, &transfers); err != nil {
 		return err
 	}
-	if exports != j.Records || transfers != j.Records {
+	if (!active && (exports != j.Records || transfers != j.Records)) || exports < j.Records || transfers < j.Records {
 		return fmt.Errorf("backup recovery commit export membership changed")
 	}
 	rows, err := tx.Query(`SELECT r.seq,r.hash,r.body,e.id,e.body FROM backup_notification_recovery_records r
@@ -135,7 +143,7 @@ func validateBackupCommitPayloads(tx *sql.Tx, j backupNotificationRecovery) erro
 		}
 		count++
 		if seq != count || record.Message.Sequence != seq || id != message.ID || hash != notify.Hash(record) ||
-			notify.Hash(record.Message) != notify.Hash(message) || message.Producer != j.Binding.Producer || message.Generation != j.Binding.Generation || message.Route != j.Binding.Route {
+			notify.Hash(record.Message) != notify.Hash(message) || message.Producer != j.Binding.Producer || (message.Generation != j.Binding.Generation && notify.Hash(inherited[message.ID]) != notify.Hash(message)) || message.Route != j.Binding.Route {
 			return fmt.Errorf("backup recovery payload changed before commit")
 		}
 	}

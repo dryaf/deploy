@@ -2,6 +2,7 @@ package worker
 
 import (
 	"fmt"
+	"maps"
 
 	"github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/safefs"
@@ -11,11 +12,12 @@ import (
 // after the installer has verified its immutable Signal profile transition.
 // Recovery is opened against its original configuration first. Existing queued
 // route revisions, destinations, receipts and recovery anchors are never rewritten.
-// The instance remains verification-only; this cannot authorize dispatch/intake.
+// Binding never changes canonical recovery/ownership configuration or grants
+// delivery/intake. An already admitted delivery instance may use these routes.
 func (s *Store) BindSignalProfileRoutes(c Config, hash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.verificationOnly || s.installationRevision == "" || s.recoveryCommitHash == "" || s.signalProfilesHash != "" || s.signalVerificationHash != "" || len(s.runtimeLoops) != 0 || !safefs.DigestPattern.MatchString(hash) {
+	if (!s.verificationOnly && s.deliveryActivationHash == "") || s.installationRevision == "" || s.recoveryCommitHash == "" || s.signalProfilesHash != "" || s.signalVerificationHash != "" || len(s.runtimeLoops) != 0 || !safefs.DigestPattern.MatchString(hash) {
 		return fmt.Errorf("Signal profile routes require a managed recovered verification instance")
 	}
 	if err := c.Validate(); err != nil {
@@ -32,7 +34,15 @@ func (s *Store) BindSignalProfileRoutes(c Config, hash string) error {
 			return fmt.Errorf("Signal profile routes changed provider selection")
 		}
 	}
-	s.config = c
+	s.signalProfileRoutes = maps.Clone(c.Routes)
 	s.signalProfilesHash = hash
 	return nil
+}
+
+// Accessed under the store mutex, or during single-threaded runtime preparation.
+func (s *Store) effectiveRoutes() map[string]Route {
+	if s.signalProfileRoutes != nil {
+		return s.signalProfileRoutes
+	}
+	return s.config.Routes
 }

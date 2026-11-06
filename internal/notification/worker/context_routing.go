@@ -18,10 +18,10 @@ const contextRetention = 90 * 24 * time.Hour
 // Alias tombstones survive configuration changes. Reassignment requires an
 // explicit administrative migration; merely editing the configuration is unsafe.
 func (s *Store) reserveAliases(tx *sql.Tx) error {
-	if s.config.Interaction == nil {
+	if s.commandConfig() == nil {
 		return nil
 	}
-	for _, w := range s.config.Interaction.Workers {
+	for _, w := range s.commandConfig().Workers {
 		var id, epoch string
 		err := tx.QueryRow("SELECT producer,epoch FROM command_aliases WHERE alias=?", w.Alias).Scan(&id, &epoch)
 		if err != nil && err != sql.ErrNoRows {
@@ -38,13 +38,13 @@ func (s *Store) reserveAliases(tx *sql.Tx) error {
 }
 
 func (s *Store) freezeReference(tx *sql.Tx, m protocol.Message) error {
-	if m.Context == nil || s.config.Interaction == nil {
+	if m.Context == nil || s.commandConfig() == nil {
 		return nil
 	}
 	if err := s.reserveAliases(tx); err != nil {
 		return err
 	}
-	for _, w := range s.config.Interaction.Workers {
+	for _, w := range s.commandConfig().Workers {
 		if w.Producer != m.Producer {
 			continue
 		}
@@ -91,7 +91,7 @@ func (s *Store) referenceContext(tx *sql.Tx, in interaction.Inbound, ref string)
 	fail := func() (referenceContext, error) {
 		return referenceContext{}, interaction.Reject("notification reference unavailable; use explicit worker and target")
 	}
-	c := s.config.Interaction
+	c := s.commandConfig()
 	known := false
 	for _, p := range c.Permissions {
 		if p.Actor == in.Actor && p.Conversation == in.Conversation {
@@ -168,7 +168,7 @@ func (s *Store) routeCommand(tx *sql.Tx, in interaction.Inbound) (parsed interac
 		}
 		fields := strings.Fields(text)
 		if len(fields) > 0 {
-			if _, explicit := s.config.Interaction.Resolve(fields[0]); !explicit {
+			if _, explicit := s.commandConfig().Resolve(fields[0]); !explicit {
 				if _, implicit := resolved.worker.Commands[fields[0]]; implicit {
 					text = resolved.worker.Alias + " " + text
 				}
@@ -197,7 +197,7 @@ func (s *Store) routeCommand(tx *sql.Tx, in interaction.Inbound) (parsed interac
 	if !ok {
 		return parsed, nil, interaction.Reject("command unavailable")
 	}
-	scope, ok := s.config.Interaction.Authorize(in.Actor, in.Conversation, resolved.worker.Producer.ID, d.Permission)
+	scope, ok := s.commandConfig().Authorize(in.Actor, in.Conversation, resolved.worker.Producer.ID, d.Permission)
 	if !ok {
 		return parsed, nil, interaction.Reject("command not authorized")
 	}

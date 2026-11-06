@@ -110,6 +110,24 @@ func backupSourceHeld(tx *sql.Tx, event notification.NotificationEvent) (bool, e
 		return false, err
 	}
 	for _, id := range append([]string{event.ID}, event.Members...) {
+		var disposition backupCutoverDecision
+		e := backupNotificationMeta(tx, remigrationSourcePrefix+id, &disposition)
+		if e == nil {
+			if disposition.Disposition == "held" {
+				_, released, err := readBackupLegacyResolution(tx, id)
+				if err != nil || !released {
+					return true, err
+				}
+				continue
+			}
+			if disposition.Disposition != "accepted" && disposition.Disposition != "unsent" {
+				return false, fmt.Errorf("invalid remigration disposition")
+			}
+			continue
+		}
+		if e != sql.ErrNoRows {
+			return false, e
+		}
 		var held bool
 		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM backup_notification_legacy WHERE source=? AND disposition='held')", id).Scan(&held); err != nil {
 			return false, err
@@ -163,4 +181,47 @@ func validateBackupCutoverFence(tx *sql.Tx, intent backupCutoverIntent) error {
 		}
 	}
 	return nil
+}
+
+// New native work may have appeared after the original cutover. Include its
+// remigration holds when deciding catch-up readiness and reporting health.
+func backupHasHeldSources(tx *sql.Tx) (bool, error) {
+	rows, err := tx.Query(`SELECT source FROM backup_notification_legacy WHERE disposition='held'
+ UNION SELECT substr(key,length('notification_remigration_source/')+1) FROM meta
+ WHERE key LIKE 'notification_remigration_source/%' AND json_extract(value,'$.disposition')='held'`)
+	if err != nil {
+		return false, err
+	}
+	var sources []string
+	for rows.Next() {
+		var source string
+		if err = rows.Scan(&source); err != nil {
+			rows.Close()
+			return false, err
+		}
+		sources = append(sources, source)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return false, err
+	}
+	archived, err := effectiveBackupRemigration(tx)
+	if err != nil {
+		return false, err
+	}
+	if archived != nil {
+		for source, decision := range archived.Spec.Cutover.Decisions {
+			if decision.Disposition == "held" {
+				sources = append(sources, source)
+			}
+		}
+	}
+	for _, source := range sources {
+		held, e := backupSourceHeld(tx, notification.NotificationEvent{ID: source})
+		if e != nil || held {
+			return held, e
+		}
+	}
+	return false, nil
 }

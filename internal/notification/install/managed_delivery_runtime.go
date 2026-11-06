@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/dryaf/deploy/internal/notification/led"
 	"github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/notification/provider"
 	"github.com/dryaf/deploy/internal/notification/worker"
@@ -26,6 +27,11 @@ func (a admittedDeliverySender) Send(ctx context.Context, name string, message p
 }
 
 func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.Store, c Runtime, m ManagedManifest, installation *safefs.Lock, sender worker.Sender) error {
+	effective, err := managedEffectiveRuntime(d, m, c)
+	if err != nil {
+		return err
+	}
+	var observeSignal func(error)
 	check := func(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -50,6 +56,25 @@ func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.St
 		if protocol.Hash(canonical) != protocol.Hash(c) {
 			return fmt.Errorf("delivery runtime changed")
 		}
+		runtime, err := managedEffectiveRuntime(d, m, canonical)
+		if err != nil {
+			return err
+		}
+		if protocol.Hash(runtime) != protocol.Hash(effective) {
+			return fmt.Errorf("effective delivery runtime changed")
+		}
+		if m.SignalVerification != nil {
+			if _, err := readManagedSignalBinding(d, m); err != nil {
+				return err
+			}
+			err := checkManagedSignalHealth(ctx, m)
+			if observeSignal != nil {
+				observeSignal(err)
+			}
+			if err != nil {
+				return err
+			}
+		}
 		units, err := managedUnitDirectory(m.UnitDirectory)
 		if err != nil {
 			return err
@@ -62,8 +87,19 @@ func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.St
 		if !present || managedDigest(unit) != m.UnitHash {
 			return fmt.Errorf("delivery unit changed")
 		}
-		if err := s.RequireManagedDeliveryOwner(deliveryOwner(m, c), m.DeliveryOwnerHash); err != nil {
+		if err := requireDeliveryOwner(s, m, c); err != nil {
 			return err
+		}
+		if err := s.RequireManagedCommandHistory(m.CommandHistoryHash); err != nil {
+			return err
+		}
+		if m.Commands != nil {
+			if err := requireManagedTelegramCommandHandoff(ctx, d, s, m, c); err != nil {
+				return err
+			}
+			if _, err := readManagedCommandAdmission(d, m, c); err != nil {
+				return err
+			}
 		}
 		return checkDeliveryAdmission(d, m, c, time.Now().UTC())
 	}
@@ -73,13 +109,10 @@ func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.St
 	if err := check(ctx); err != nil {
 		return err
 	}
-	observe, err := s.MonitorRuntimeLoop("delivery-admission")
-	if err != nil {
-		return err
-	}
-	observe(nil)
-	if sender == nil {
-		sender = provider.Adapter{Profiles: c.Providers}
+	if m.SignalVerification != nil {
+		if err := s.BindSignalVerification(m.SignalVerification.ManifestHash); err != nil {
+			return err
+		}
 	}
 	fatal := make(chan error, 1)
 	fail := func(err error) {
@@ -88,8 +121,50 @@ func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.St
 		default:
 		}
 	}
+	if sender == nil {
+		adapter := provider.Adapter{Profiles: effective.Providers}
+		if c.Signal != nil {
+			transport, closeTransport, err := managedSignalTransport(m, check, fail)
+			if err != nil {
+				return err
+			}
+			defer closeTransport()
+			adapter.SignalTransport = transport
+		}
+		sender = adapter
+	}
+	if m.Commands != nil {
+		if err := s.BindManagedCommandAuthority(func(ctx context.Context) error {
+			err := check(ctx)
+			if err != nil {
+				fail(err)
+			}
+			return err
+		}); err != nil {
+			return err
+		}
+	}
+	if m.SignalVerification != nil {
+		observeSignal, err = s.MonitorRuntimeLoop("signal-verification")
+		if err != nil {
+			return err
+		}
+		observeSignal(nil)
+		defer observeSignal(fmt.Errorf("Signal supervision stopped"))
+	}
+	observe, err := s.MonitorRuntimeLoop("delivery-admission")
+	if err != nil {
+		return err
+	}
+	observe(nil)
 	adapter := admittedDeliverySender{check: check, fail: fail, sender: sender}
-	return runRuntimeGroup(ctx, []runtimeService{
+	if c.LEDSocket != "" && m.RecoveryCommitHash != "" {
+		api := admittedLEDClient{api: led.Client{Socket: c.LEDSocket, Budget: 2 * time.Second}, check: check, fail: fail}
+		if err := s.BindManagedLEDRecovery(api, check); err != nil {
+			return err
+		}
+	}
+	services := []runtimeService{
 		func(ctx context.Context) error { return s.Serve(ctx, m.Paths.Socket) },
 		func(ctx context.Context) error { return s.RunDispatcher(ctx, adapter) },
 		func(ctx context.Context) error {
@@ -111,5 +186,13 @@ func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.St
 				}
 			}
 		},
-	})
+	}
+	commands, err := managedCommandServices(d, s, c, m, check, fail, nil)
+	if err != nil {
+		return err
+	}
+	if c.LEDSocket != "" {
+		services = append(services, managedLEDService(s, c.LEDSocket, check, fail, nil))
+	}
+	return runRuntimeGroup(ctx, append(services, commands...))
 }

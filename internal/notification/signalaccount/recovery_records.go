@@ -31,6 +31,7 @@ func (r RecoveryRequest) validate() error {
 }
 
 type recoveryIntent struct {
+	Ancestor                                                 string `json:"ancestor,omitempty"`
 	Version                                                  int
 	Request                                                  RecoveryRequest
 	DirectoryDevice, DirectoryInode, LeaseDevice, LeaseInode uint64
@@ -122,7 +123,7 @@ func readRecovery(d *safefs.Directory) (r recoveryRecords, err error) {
 		}
 		return
 	}
-	if r.Intent.Version != RecoveryVersion || r.Intent.Request.validate() != nil || r.Intent.DirectoryInode == 0 || r.Intent.LeaseInode == 0 {
+	if (r.Intent.Version != RecoveryVersion && r.Intent.Version != 2) || (r.Intent.Version == 1 && r.Intent.Ancestor != "") || (r.Intent.Version == 2 && !safefs.DigestPattern.MatchString(r.Intent.Ancestor)) || r.Intent.Request.validate() != nil || r.Intent.DirectoryInode == 0 || r.Intent.LeaseInode == 0 {
 		err = fmt.Errorf("invalid Signal recovery intent")
 		return
 	}
@@ -130,7 +131,7 @@ func readRecovery(d *safefs.Directory) (r recoveryRecords, err error) {
 	if e != nil {
 		return r, e
 	}
-	actual.Version, actual.Request = r.Intent.Version, r.Intent.Request
+	actual.Version, actual.Request, actual.Ancestor = r.Intent.Version, r.Intent.Request, r.Intent.Ancestor
 	links, e := readHistory(d)
 	if e != nil {
 		return r, e
@@ -142,6 +143,9 @@ func readRecovery(d *safefs.Directory) (r recoveryRecords, err error) {
 	actual.LinkHash, actual.MaintenanceHash = protocol.Hash(links), protocol.Hash(maintenance)
 	if actual != r.Intent {
 		return r, fmt.Errorf("Signal recovery directory, lease or account maintenance history changed")
+	}
+	if err = verifyRecoveryAncestors(d, r.Intent); err != nil {
+		return r, err
 	}
 	if r.HasFence && fence != r.Intent || r.HasResult && !r.HasFence || r.Complete && !r.HasResult {
 		return r, fmt.Errorf("Signal recovery records diverged")

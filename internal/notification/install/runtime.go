@@ -14,6 +14,19 @@ import (
 
 type runtimeService func(context.Context) error
 
+func unmanagedCommandPolicy(c Runtime) error {
+	if c.Worker.Interaction != nil {
+		for _, w := range c.Worker.Interaction.Workers {
+			for _, d := range w.Commands {
+				if d.Effect != "read" {
+					return fmt.Errorf("mutation commands require explicit qualified managed admission")
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func runRuntimeGroup(ctx context.Context, services []runtimeService) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -47,6 +60,11 @@ func runRuntimeGroup(ctx context.Context, services []runtimeService) error {
 // serveRuntime registers health observations before exposing the API and joins
 // every service before the caller can close the store.
 func serveRuntime(ctx context.Context, s *worker.Store, c Runtime, socket string) error {
+	if !s.VerificationOnly() {
+		if err := unmanagedCommandPolicy(c); err != nil {
+			return err
+		}
+	}
 	monitors := map[string]func(error){}
 	var names []string
 	if c.Telegram != nil && !s.VerificationOnly() {

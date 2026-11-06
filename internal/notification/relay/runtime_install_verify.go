@@ -68,15 +68,24 @@ func verifyRuntimeInstallation(ctx context.Context, src, dst *safefs.Directory, 
 	if uint64(st.Dev) != p.DestinationDevice || st.Ino != p.DestinationInode {
 		return fmt.Errorf("Signal installation destination replaced")
 	}
+	if err = verifyIncomingRuntime(ctx, src, p.intent()); err != nil {
+		return err
+	}
 	for _, d := range []*safefs.Directory{src, dst} {
+		name := func(n string) string {
+			if d == src {
+				return runtimeSourceName(p.Version, p.Ancestor, n)
+			}
+			return n
+		}
 		var intent signalRuntimeIntent
-		if err = d.ReadJSON(runtimeInstallIntent, &intent); err != nil {
+		if err = d.ReadJSON(name(runtimeInstallIntent), &intent); err != nil {
 			return err
 		}
 		if protocol.Hash(intent) != protocol.Hash(p.intent()) {
 			return fmt.Errorf("Signal installation intent changed")
 		}
-		exists, e := runtimeInstallationRecord(d, runtimeInstallComplete, p)
+		exists, e := runtimeInstallationRecord(d, name(runtimeInstallComplete), p)
 		if e != nil {
 			return e
 		}

@@ -37,6 +37,11 @@ func (f *executableManagedServices) Stop(ctx context.Context) error {
 		}
 		select {
 		case err := <-f.done:
+			// The wait result is consumed even on failure. Clear the process
+			// before returning so cleanup cannot wait on the same channel twice.
+			f.cmd = nil
+			f.log.Close()
+			f.log = nil
 			if err != nil {
 				return fmt.Errorf("verification process exit: %w", err)
 			}
@@ -45,11 +50,11 @@ func (f *executableManagedServices) Stop(ctx context.Context) error {
 		case <-time.After(5 * time.Second):
 			f.cmd.Process.Kill()
 			<-f.done
+			f.cmd = nil
+			f.log.Close()
+			f.log = nil
 			return fmt.Errorf("verification process did not stop")
 		}
-		f.cmd = nil
-		f.log.Close()
-		f.log = nil
 	}
 	return f.fakeManagedServices.Stop(ctx)
 }

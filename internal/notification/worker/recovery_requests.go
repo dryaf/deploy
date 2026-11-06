@@ -114,7 +114,10 @@ func importRetainedRequest(tx *sql.Tx, m retainedRequest) error {
 			}
 		} else if err == sql.ErrNoRows {
 			body, _ := json.Marshal(c)
-			if _, err = tx.Exec("INSERT INTO commands(id,request_key,input_hash,producer,body,state,created) VALUES(?,?,?,?,?,'outcome_unknown',?)", c.ID, c.RequestKey, c.InputHash, c.Producer.ID, string(body), c.IssuedAt.UnixNano()); err != nil {
+			// This command was absent from the snapshot and is now imported as
+			// historical evidence, just as when the specialist supplies it first.
+			// Both import orders must produce the same pre-installation head.
+			if _, err = tx.Exec("INSERT INTO commands(id,request_key,input_hash,producer,body,state,imported,created) VALUES(?,?,?,?,?,'outcome_unknown',1,?)", c.ID, c.RequestKey, c.InputHash, c.Producer.ID, string(body), c.IssuedAt.UnixNano()); err != nil {
 				return err
 			}
 		} else {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -52,9 +53,30 @@ func TestSignalServiceCrashHelper(t *testing.T) {
 	t.Fatal("helper survived", err)
 }
 func TestSignalServiceSIGKILL(t *testing.T) {
-	for _, at := range []string{"bound", "unit", "published", "start-returned", "complete", "remove-intent", "stop-returned", "unit-removed"} {
+	testSignalServiceSIGKILL(t, false)
+}
+func TestSignalProductionSIGKILL(t *testing.T) {
+	testSignalServiceSIGKILL(t, true)
+}
+func testSignalServiceSIGKILL(t *testing.T, production bool) {
+	for _, at := range []string{"replacement-intent", "replacement-bound", "replacement-complete", "bound", "unit", "published", "start-returned", "complete", "remove-intent", "stop-returned", "unit-removed"} {
 		t.Run(at, func(t *testing.T) {
-			s, i, f := signalServiceFixture(t)
+			fixture := signalServiceFixture
+			if production {
+				fixture = productionSignalFixture
+			}
+			s, i, f := fixture(t)
+			if strings.HasPrefix(at, "replacement-") {
+				prior, err := i.setup(context.Background(), s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = i.uninstall(context.Background(), s.Root); err != nil {
+					t.Fatal(err)
+				}
+				s = replacementServiceSpec(t, prior)
+				s.Runtime = prior.Spec.Runtime
+			}
 			removing := at == "remove-intent" || at == "stop-returned" || at == "unit-removed"
 			if removing {
 				if _, err := i.setup(context.Background(), s); err != nil {

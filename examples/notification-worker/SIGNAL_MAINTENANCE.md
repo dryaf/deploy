@@ -23,8 +23,9 @@ operation. The installation coordinator lease excludes concurrent setup/update;
 setup and recovery also refuse unfinished account/service maintenance after a
 coordinator exits. Only the canonical installed worker config/state paths are
 accepted. Configuration or credential drift fences resume rather than silently
-changing the destination. Shared notification service installation/account handoff
-is still unfinished; this adapter manages only the existing backup relay.
+changing the destination. This adapter manages the existing backup relay. Use
+[legacy Signal adoption](LEGACY_SIGNAL_ADOPTION.md) and [Signal production](SIGNAL_PRODUCTION.md)
+for shared gateway account handoff.
 
 A disconnected/killed coordinator is resumed by repeating the same backup
 `signal-link` command. It recovers the unfinished operation and original activity,
@@ -138,8 +139,8 @@ service/account mount and recovery-capable executable or image, including
 `notification-worker __signal-recovery-probe` version 1. The older account-linking
 probe alone is insufficient. The native user-systemd adapter below now connects
 this gate to offline inbox installation. The rootless Podman backend is described
-in [Signal Podman recovery](SIGNAL_PODMAN_RECOVERY.md); endpoint switching remains
-unfinished.
+in [Signal Podman recovery](SIGNAL_PODMAN_RECOVERY.md). Native shared endpoint
+installation and replacement use [Signal production](SIGNAL_PRODUCTION.md).
 
 The operation pins one request ID, service binding, recovery target, directory and
 account-lock identities, and the existing linking/service-maintenance history.

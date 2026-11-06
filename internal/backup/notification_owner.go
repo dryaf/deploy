@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -28,8 +29,19 @@ func readBackupNotificationOwner(tx *sql.Tx) (owner backupNotificationOwner, err
 	if err = backupNotificationMeta(tx, "notification_owner", &owner); err != nil {
 		return
 	}
-	if owner.Schema != 1 || (owner.Mode != "fenced" && owner.Mode != "shared" && owner.Mode != "legacy") || !filepath.IsAbs(owner.Socket) || filepath.Clean(owner.Socket) != owner.Socket || len(owner.Socket) > 103 || strings.ContainsAny(owner.Socket, "\x00\r\n") {
+	if (owner.Schema != 1 && owner.Schema != 2 && owner.Schema != 3) || (owner.Mode != "fenced" && owner.Mode != "shared" && owner.Mode != "legacy") || !filepath.IsAbs(owner.Socket) || filepath.Clean(owner.Socket) != owner.Socket || len(owner.Socket) > 103 || strings.ContainsAny(owner.Socket, "\x00\r\n") {
 		return owner, fmt.Errorf("invalid backup notification ownership record")
+	}
+	remigration, e := readBackupRemigration(tx)
+	if e != nil {
+		return owner, e
+	}
+	cycles, e := readBackupMigrationCycles(tx, nil)
+	if e != nil {
+		return owner, e
+	}
+	if (owner.Schema == 3) != (len(cycles) != 0) || owner.Schema != 3 && (owner.Schema == 2) != (remigration != nil) || (remigration != nil && (owner.CutoverHash != remigration.Before.CutoverHash || owner.LegacyHash != "" || owner.Mode == "legacy")) {
+		return owner, fmt.Errorf("remigration ownership schema or lineage changed")
 	}
 	if owner.Mode == "legacy" && (!notify.ValidToken(owner.LegacyGeneration) || owner.LegacyGeneration == owner.Binding.Generation || !backupRecoveryPath(owner.LegacyState) || !safefs.DigestPattern.MatchString(owner.LegacyHash)) {
 		return owner, fmt.Errorf("invalid restored legacy authority")
@@ -113,9 +125,30 @@ func backupNotifierLease(state *backupState) (*safefs.Lock, error) {
 }
 
 func requireBackupCutoverOwner(state *backupState, owner backupNotificationOwner) error {
+	if err := backupTransferTx(context.Background(), state, requireNoPendingMigrationCycle); err != nil {
+		return err
+	}
+	return requireBackupCutoverHistory(state, owner)
+}
+
+func requireBackupCutoverHistory(state *backupState, owner backupNotificationOwner) error {
+	if _, err := requireRecoveryActivationFiles(state); err != nil {
+		return err
+	}
+	if _, err := requireRemigrationFiles(state, owner.Binding); err != nil {
+		return err
+	}
+	binding, err := backupHistoricalBinding(state, owner.Binding)
+	if err != nil {
+		return err
+	}
+	return requireBackupOriginalCutover(state, owner, binding)
+}
+
+func requireBackupOriginalCutover(state *backupState, owner backupNotificationOwner, binding backupNotificationBinding) error {
 	if owner.CutoverHash == "" {
 		return nil
-	} // Pre-migration fixture/recovery owners.
+	} // Pre-migration fixtures.
 	d, err := safefs.Open(state.directory)
 	if err != nil {
 		return err
@@ -129,7 +162,7 @@ func requireBackupCutoverOwner(state *backupState, owner backupNotificationOwner
 	if err = state.get("notification_cutover", &hash); err != nil {
 		return err
 	}
-	if hash != owner.CutoverHash || notify.Hash(intent) != hash || intent.Spec.Managed.Producer != owner.Binding.Producer || intent.Spec.Managed.Generation != owner.Binding.Generation || intent.Spec.Managed.Route != owner.Binding.Route {
+	if hash != owner.CutoverHash || notify.Hash(intent) != hash || intent.Spec.Managed.Producer != binding.Producer || intent.Spec.Managed.Generation != binding.Generation || intent.Spec.Managed.Route != binding.Route {
 		return fmt.Errorf("shared report cutover authority changed")
 	}
 	return requireBackupLegacyResolutionFiles(state, d)

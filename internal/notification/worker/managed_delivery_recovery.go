@@ -16,12 +16,14 @@ import (
 type ManagedDeliveryRecovery struct {
 	Version    int                  `json:"version"`
 	Owner      ManagedDeliveryOwner `json:"owner"`
+	Before     protocol.Identity    `json:"before"`
 	After      protocol.Identity    `json:"after"`
 	CommitHash string               `json:"commit_hash"`
 }
 
 func (r ManagedDeliveryRecovery) Validate() error {
-	if r.Version != 1 || r.Owner.validate() != nil || !r.After.Valid() || r.Owner.Identity.Worker != r.After.Worker || r.Owner.Identity.Recovery == r.After.Recovery || !safefs.DigestPattern.MatchString(r.CommitHash) {
+	validOwnerEpoch := r.Version == 1 && (r.Owner.Identity == r.Before || r.Owner.Identity == r.After) || r.Version == 2 && r.Owner.Identity.Worker == r.Before.Worker
+	if !validOwnerEpoch || r.Owner.validate() != nil || !r.Before.Valid() || !r.After.Valid() || r.Before.Worker != r.After.Worker || r.Before.Recovery == r.After.Recovery || !safefs.DigestPattern.MatchString(r.CommitHash) {
 		return fmt.Errorf("invalid managed delivery recovery binding")
 	}
 	return nil
@@ -33,7 +35,18 @@ func (s *Store) checkDeliveryRecovery(r ManagedDeliveryRecovery) error {
 	if err := s.checkRetirementLease(); err != nil {
 		return err
 	}
-	if r.Validate() != nil || r.After != s.identity || r.CommitHash != s.recoveryCommitHash || r.Owner.ConfigHash != protocol.Hash(s.config) || r.Owner.Identity != s.recoveryProof.Before || r.After != s.recoveryProof.After {
+	held, err := s.dir.File().Stat()
+	if err != nil {
+		return err
+	}
+	current, err := os.Lstat(s.dir.File().Name())
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(held, current) {
+		return fmt.Errorf("recovered delivery state directory changed")
+	}
+	if r.Validate() != nil || r.After != s.identity || r.CommitHash != s.recoveryCommitHash || r.Owner.ConfigHash != protocol.Hash(s.config) || r.Before != s.recoveryProof.Before || r.After != s.recoveryProof.After {
 		return fmt.Errorf("delivery recovery does not bind the verified publication")
 	}
 	// Startup audits all immutable source evidence. During bounded operations,
@@ -47,7 +60,7 @@ func (s *Store) checkDeliveryRecovery(r ManagedDeliveryRecovery) error {
 			return fmt.Errorf("delivery recovery publication anchor missing")
 		}
 	}
-	want := RecoveryVerification{1, r.CommitHash, protocol.Hash(s.config), r.Owner.Identity, r.After, true}
+	want := RecoveryVerification{1, r.CommitHash, protocol.Hash(s.config), r.Before, r.After, true}
 	for _, name := range []string{recoveryVerificationIntent, recoveryVerificationComplete} {
 		ok, err := verificationRecord(s.dir, name, want)
 		if err != nil {
@@ -66,7 +79,7 @@ func (s *Store) checkDeliveryRecovery(r ManagedDeliveryRecovery) error {
 		return err
 	}
 	p := s.recoveryProof
-	if id != r.After || gate.validate(s.config) != nil || gate.Phase != "quarantined" || gate.Before != p.Before || gate.After != p.After || gate.Operation != p.Operation || gate.Snapshot.ID != p.Snapshot || gate.CandidateHash != p.CandidateDatabaseHash || gate.Snapshot.DatabaseHash != p.SourceDatabaseHash {
+	if gate.RuntimeHash != p.OriginalRuntimeHash || gate.Snapshot.RecoveryHash != p.AncestorHash || id != r.After || gate.validate(s.config) != nil || gate.Phase != "quarantined" || gate.Before != p.Before || gate.After != p.After || gate.Operation != p.Operation || gate.Snapshot.ID != p.Snapshot || gate.CandidateHash != p.CandidateDatabaseHash || gate.Snapshot.DatabaseHash != p.SourceDatabaseHash {
 		return fmt.Errorf("delivery recovery identity or quarantine changed")
 	}
 	return verifyRecoveryRuntimeSQL(context.Background(), s.db, p)
@@ -107,27 +120,41 @@ func (s *Store) enrollManagedDeliveryRecovery(r ManagedDeliveryRecovery, fault f
 	if err := s.RequireInactiveProducers(); err != nil {
 		return err
 	}
+	if r.Version == 2 {
+		if err := s.requireAncestorDeliveryOwner(r); err != nil {
+			return err
+		}
+	}
+	fresh := r.Owner.Identity == r.After
 	var owner ManagedDeliveryOwner
-	if err := readCheckpointJSON(s.dir, managedDeliveryOwnerFile, &owner); err != nil {
+	err := readCheckpointJSON(s.dir, managedDeliveryOwnerFile, &owner)
+	missingOwner := os.IsNotExist(err)
+	if err != nil && (!missingOwner || !fresh) {
 		return err
 	}
-	if owner != r.Owner {
+	if !missingOwner && owner != r.Owner {
 		return fmt.Errorf("original delivery owner file changed")
 	}
-	archive, err := snapshotDB(s.dir, publicationExchange, true)
+	if err := verifyRetainedDatabase(context.Background(), s.dir, publicationExchange, s.recoveryPublication.OriginalDatabaseHash, s.recoveryPublication.OriginalDatabaseBytes, s.config.MaxDatabaseBytes); err != nil {
+		return err
+	}
+	archive, err := immutableOriginalDB(s.dir, publicationExchange)
 	if err != nil {
 		return err
 	}
 	var raw string
 	err = archive.QueryRow("SELECT value FROM metadata WHERE key=?", managedDeliveryOwnerKey).Scan(&raw)
 	closeErr := archive.Close()
-	if err != nil {
+	if err != nil && !(fresh && err == sql.ErrNoRows) {
 		return err
 	}
 	if closeErr != nil {
 		return closeErr
 	}
-	if protocol.Decode([]byte(raw), &owner, 8192) != nil || owner != r.Owner {
+	if fresh && err != sql.ErrNoRows {
+		return fmt.Errorf("original source was already enrolled; preserve its delivery owner")
+	}
+	if !fresh && (protocol.Decode([]byte(raw), &owner, 8192) != nil || owner != r.Owner) {
 		return fmt.Errorf("original source does not prove delivery ownership")
 	}
 	intent, err := deliveryRecoveryRecord(s.dir, r.name()+".json", r)
@@ -137,6 +164,16 @@ func (s *Store) enrollManagedDeliveryRecovery(r ManagedDeliveryRecovery, fault f
 	complete, err := deliveryRecoveryRecord(s.dir, r.name()+"-complete.json", r)
 	if err != nil {
 		return err
+	}
+	if missingOwner {
+		var existing int
+		e := s.db.QueryRow("SELECT count(*) FROM metadata WHERE key IN (?,?)", managedDeliveryOwnerKey, r.name()).Scan(&existing)
+		if intent || complete || e != nil || existing != 0 {
+			return fmt.Errorf("recovered owner file missing while independent authority remains")
+		}
+		if err = s.dir.WriteJSON(managedDeliveryOwnerFile, r.Owner, false); err != nil {
+			return err
+		}
 	}
 	err = s.db.QueryRow("SELECT value FROM metadata WHERE key=?", r.name()).Scan(&raw)
 	anchored := err == nil
@@ -203,10 +240,15 @@ func (s *Store) RequireManagedDeliveryRecovery(r ManagedDeliveryRecovery, ownerH
 	if err := s.checkDeliveryRecovery(r); err != nil {
 		return err
 	}
+	if r.Version == 2 {
+		if err := s.requireAncestorDeliveryOwner(r); err != nil {
+			return err
+		}
+	}
 	if err := s.requireManagedDeliveryOwner(r.Owner, ownerHash, r.Owner.Identity); err != nil {
 		return err
 	}
-	for _, name := range []string{r.name()+".json", r.name()+"-complete.json"} {
+	for _, name := range []string{r.name() + ".json", r.name() + "-complete.json"} {
 		ok, err := deliveryRecoveryRecord(s.dir, name, r)
 		if err != nil {
 			return err
@@ -246,4 +288,40 @@ func OpenManagedRecoveredDelivery(path string, c Config, revision string, r Mana
 	s.verificationOnly = false
 	s.deliveryActivationHash = activationHash
 	return s, nil
+}
+
+// A later epoch must prove the same owner was enrolled in its immediate parent,
+// not merely share a worker identifier with an arbitrary older installation.
+func (s *Store) requireAncestorDeliveryOwner(r ManagedDeliveryRecovery) error {
+	stage, err := s.dir.Sub("recovery/" + s.recoveryProof.Operation)
+	if err != nil {
+		return err
+	}
+	defer stage.Close()
+	var j snapshotRecovery
+	if err = readCheckpointJSON(s.dir, "recovery.json", &j); err != nil {
+		return err
+	}
+	e, err := readSnapshotRecovery(stage, j.Snapshot, s.config)
+	if err != nil {
+		return err
+	}
+	if e == nil || e.Proof.After != r.Before {
+		return fmt.Errorf("later delivery recovery lost its parent")
+	}
+	db, err := immutableOriginalDB(s.dir, publicationExchange)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var raw string
+	name := "managed-delivery-recovery-" + e.Publication.CommitHash
+	if err = db.QueryRow("SELECT value FROM metadata WHERE key=?", name).Scan(&raw); err != nil {
+		return err
+	}
+	var parent ManagedDeliveryRecovery
+	if protocol.Decode([]byte(raw), &parent, 16384) != nil || parent.Validate() != nil || parent.Owner != r.Owner || parent.Before != e.Proof.Before || parent.After != r.Before || parent.CommitHash != e.Publication.CommitHash {
+		return fmt.Errorf("later recovery changed its independently retained owner")
+	}
+	return nil
 }

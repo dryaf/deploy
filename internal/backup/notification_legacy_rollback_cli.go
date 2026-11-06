@@ -77,7 +77,7 @@ func runBackupLegacyRollbackCLI(args []string, out io.Writer) error {
 		if notify.Hash(c) != spec.Cutover.ConfigHash {
 			return fmt.Errorf("backup configuration changed")
 		}
-		spec.CredentialHash, err = notification.TelegramCredentialHash(c.Policy.Notifications)
+		spec.CredentialHash, err = notification.LegacyCredentialHash(c.Policy.Notifications, spec.Cutover.signalProfile())
 		if err != nil {
 			return err
 		}

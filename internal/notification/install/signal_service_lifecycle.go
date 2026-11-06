@@ -31,7 +31,14 @@ func (i signalServiceInstaller) capability(ctx context.Context, d *safefs.Direct
 	if i.probe != nil {
 		return i.probe(ctx, d, m)
 	}
-	return probeManagedCapability(ctx, d, "deploy", m.Spec.BinarySHA256, "__signal-verification-service-probe")
+	capability := "__signal-verification-service-probe"
+	if m.Spec.Previous != nil {
+		capability = "__signal-verification-replacement-probe"
+	}
+	if m.Spec.Runtime != nil {
+		capability = "__signal-production-service-probe"
+	}
+	return probeManagedCapability(ctx, d, "deploy", m.Spec.BinarySHA256, capability)
 }
 func (i signalServiceInstaller) advance(d *safefs.Directory, m SignalServiceManifest, j *signalServiceJournal, phase string) error {
 	if signalServicePhase(j.Phase) >= signalServicePhase(phase) {
@@ -79,7 +86,7 @@ func (i signalServiceInstaller) setup(ctx context.Context, s SignalServiceSpec) 
 	defer lock.Close()
 	m, err := readSignalService(d, "intent.json")
 	if err == nil {
-		if m.Spec != s {
+		if protocol.Hash(m.Spec) != protocol.Hash(s) {
 			return out, fmt.Errorf("Signal service is enrolled with different pins")
 		}
 		return i.resumeLocked(ctx, d, m)
@@ -99,6 +106,11 @@ func (i signalServiceInstaller) setup(ctx context.Context, s SignalServiceSpec) 
 	p, err := inspectSignalVerificationPublication(s.Endpoint)
 	if err != nil {
 		return out, err
+	}
+	if s.Previous != nil {
+		if _, err = signalServicePredecessor(s); err != nil {
+			return out, err
+		}
 	}
 	// No endpoint/account mutation before verifying an unowned unit and executable.
 	m = SignalServiceManifest{Spec: s, Endpoint: p}
@@ -145,6 +157,9 @@ func (i signalServiceInstaller) setup(ctx context.Context, s SignalServiceSpec) 
 	m.UnitHash = managedDigest([]byte(body))
 	m.ManifestHash = protocol.Hash(m)
 	if err = m.validate(); err != nil {
+		return out, err
+	}
+	if err = checkSignalProductionInputs(m); err != nil {
 		return out, err
 	}
 	raw, err := nativeSignalRead(s.BinaryFile, maxManagedBinary, false)
@@ -204,7 +219,11 @@ func (i signalServiceInstaller) resumeLocked(ctx context.Context, d *safefs.Dire
 		if e != nil {
 			return m, e
 		}
-		e = checkSignalServiceBinding(ed, signalServiceBinding{})
+		expected := signalServiceBinding{}
+		if m.Spec.Previous != nil {
+			expected = signalServiceBinding{m.Spec.Previous.ServiceRoot, m.Spec.Previous.ServiceHash}
+		}
+		e = checkSignalServiceBinding(ed, expected)
 		ed.Close()
 		if e != nil {
 			return m, e
@@ -247,12 +266,14 @@ func (i signalServiceInstaller) resumeLocked(ctx context.Context, d *safefs.Dire
 		e = endpoint.ReadJSON(signalServiceEndpointBinding, &bound)
 		endpoint.Close()
 		if e == nil {
-			if bound != m.binding() {
+			if bound != m.binding() && (m.Spec.Previous == nil || bound != (signalServiceBinding{m.Spec.Previous.ServiceRoot, m.Spec.Previous.ServiceHash})) {
 				return m, fmt.Errorf("Signal endpoint belongs to another service")
 			}
-			// A binding proves staging already finished. Never recreate lost evidence.
-			if e = checkSignalServiceFiles(d, m, false); e != nil {
-				return m, e
+			// This installation's binding proves staging already finished.
+			if bound == m.binding() {
+				if e = checkSignalServiceFiles(d, m, false); e != nil {
+					return m, e
+				}
 			}
 		} else if !os.IsNotExist(e) {
 			return m, e
@@ -271,6 +292,9 @@ func (i signalServiceInstaller) resumeLocked(ctx context.Context, d *safefs.Dire
 			return m, e
 		}
 		if e = frozenManagedFile(d, "deploy", raw, 0700); e != nil {
+			return m, e
+		}
+		if e = stageSignalProduction(d, m); e != nil {
 			return m, e
 		}
 		if e = runtimeJSONOnceForService(d, "endpoint.json", m.Endpoint); e != nil {
@@ -336,6 +360,11 @@ func (i signalServiceInstaller) resumeLocked(ctx context.Context, d *safefs.Dire
 		return m, err
 	}
 	defer lease.Close()
+	if m.Spec.Previous != nil && j.Phase == "prepared" {
+		if err = i.replaceBinding(ctx, d, m); err != nil {
+			return m, err
+		}
+	}
 	endpoint, err := privateManagedDir(m.Spec.Endpoint.Root, true)
 	if err != nil {
 		return m, err

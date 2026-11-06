@@ -31,6 +31,20 @@ func QuarantineRecovery(ctx context.Context, statePath, snapshotPath string, c C
 }
 
 func quarantineRecovery(ctx context.Context, statePath, snapshotPath string, c Config, snapshotID, databaseHash string, fault func(string) error) (out RecoveryQuarantineView, err error) {
+	return quarantineRecoveryOwner(ctx, statePath, snapshotPath, c, snapshotID, databaseHash, nil, "", fault)
+}
+
+// QuarantineManagedDeliveryRecovery requires the caller's exclusive installation
+// lease and a stopped verification service. It preserves enrollment and refuses
+// active producers; it never clears managed ownership to use unmanaged recovery.
+func QuarantineManagedDeliveryRecovery(ctx context.Context, statePath, snapshotPath string, c Config, snapshotID, databaseHash, revision string, owner ManagedDeliveryOwner) (RecoveryQuarantineView, error) {
+	if owner.validate() != nil || owner.ConfigHash != protocol.Hash(c) || !safefs.ValidID(revision, "n") {
+		return RecoveryQuarantineView{}, fmt.Errorf("managed quarantine requires exact original owner and revision")
+	}
+	return quarantineRecoveryOwner(ctx, statePath, snapshotPath, c, snapshotID, databaseHash, &owner, revision, nil)
+}
+
+func quarantineRecoveryOwner(ctx context.Context, statePath, snapshotPath string, c Config, snapshotID, databaseHash string, owner *ManagedDeliveryOwner, revision string, fault func(string) error) (out RecoveryQuarantineView, err error) {
 	if !safefs.ValidID(snapshotID, "n") || !safefs.DigestPattern.MatchString(databaseHash) {
 		return out, fmt.Errorf("exact verified snapshot ID and database hash required")
 	}
@@ -44,11 +58,23 @@ func quarantineRecovery(ctx context.Context, statePath, snapshotPath string, c C
 	if m.ID != snapshotID || m.DatabaseHash != databaseHash {
 		return out, fmt.Errorf("reviewed recovery snapshot changed")
 	}
+	if owner != nil && m.Version == 1 && m.Identity != owner.Identity {
+		return out, fmt.Errorf("managed recovery snapshot does not match original owner")
+	}
 	dir, err := privateDirectory(statePath)
 	if err != nil {
 		return out, err
 	}
 	defer dir.Close()
+	if owner != nil {
+		var current ManagedDeliveryOwner
+		if err = dir.ReadJSON(managedDeliveryOwnerFile, &current); err != nil {
+			return out, err
+		}
+		if current != *owner {
+			return out, fmt.Errorf("managed recovery original owner changed")
+		}
+	}
 	lease, err := dir.Lock("worker.lock", true, false)
 	if err != nil {
 		return out, err
@@ -61,7 +87,7 @@ func quarantineRecovery(ctx context.Context, statePath, snapshotPath string, c C
 		// created in this gap. The snapshot is rechecked against the full manifest
 		// before any identity or recovery state changes.
 		lease.Close()
-		j, err = preparePinnedSnapshotRecovery(ctx, statePath, snapshotPath, c, &m, fault)
+		j, err = preparePinnedSnapshotRecoveryOwner(ctx, statePath, snapshotPath, c, &m, owner, revision, fault)
 	} else if err == nil {
 		if j.Snapshot != m {
 			return out, fmt.Errorf("another recovery snapshot is already prepared")
@@ -85,6 +111,25 @@ func quarantineRecovery(ctx context.Context, statePath, snapshotPath string, c C
 	originalHash, err := r.preserveOriginal(ctx)
 	if err != nil {
 		return out, err
+	}
+	if owner != nil {
+		originalDB, e := r.originalDB(ctx, r.db)
+		if e != nil {
+			return out, e
+		}
+		var raw string
+		err = originalDB.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key=?", managedDeliveryOwnerKey).Scan(&raw)
+		closeErr := originalDB.Close()
+		if err != nil {
+			return out, err
+		}
+		if closeErr != nil {
+			return out, closeErr
+		}
+		var original ManagedDeliveryOwner
+		if protocol.Decode([]byte(raw), &original, 8192) != nil || original != *owner {
+			return out, fmt.Errorf("managed recovery original SQL owner changed")
+		}
 	}
 	if err = recoveryBoundary(fault, "quarantine_cli_result"); err != nil {
 		return out, err

@@ -23,6 +23,11 @@ func renderBackupLegacyUnits(p WorkerUnitPaths, c WorkerInstallation) (map[strin
 			return nil, err
 		}
 	}
+	if policy.Notifications.Signal != nil {
+		if err := requireBackupLegacyReadablePaths(p, policy.Notifications.Signal.AccountFile, policy.Notifications.Signal.RecipientFile); err != nil {
+			return nil, err
+		}
+	}
 	// The legacy provider adapter needs its enrolled messenger credentials.
 	// Archive, source keys and Signal account storage remain inaccessible.
 	policy.Notifications = config.WorkerNotifications{}

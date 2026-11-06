@@ -87,6 +87,9 @@ func serveSignalService(ctx context.Context, root, operation string) error {
 	if err = check(); err != nil {
 		return err
 	}
+	if m.Spec.Runtime != nil {
+		return serveSignalProduction(ctx, d, m, check)
+	}
 	v, err := openSignalEndpointVerifierService(ctx, m.Spec.Endpoint.Root, m.Spec.Endpoint.ManifestHash, m.binding())
 	if err != nil {
 		return err

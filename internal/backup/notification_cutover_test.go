@@ -111,6 +111,9 @@ func (s *cutoverFixtureSession) RestoreLegacy() error {
 }
 func (s *cutoverFixtureSession) RevokeLegacy() error { return s.store.RevokeLegacy(s.p, s.legacy) }
 func backupCutoverFixture(t *testing.T) (string, WorkerInstallation, backupCutoverSpec, backupCutoverDependencies, *cutoverFixtureSession) {
+	return backupCutoverFixtureUsing(t, "", nil)
+}
+func backupCutoverFixtureUsing(t *testing.T, home string, change func(*WorkerInstallation, *worker.Config)) (string, WorkerInstallation, backupCutoverSpec, backupCutoverDependencies, *cutoverFixtureSession) {
 	t.Helper()
 	state, c, _ := legacyAttemptFixture(t)
 	var control ArchiveControl
@@ -121,7 +124,9 @@ func backupCutoverFixture(t *testing.T) (string, WorkerInstallation, backupCutov
 	c.ConfigHash = control.ConfigHash
 	c.Policy.Notifications.Signal = nil
 	c.Policy.Notifications.Primary = "telegram"
-	home := t.TempDir()
+	if home == "" {
+		home = t.TempDir()
+	}
 	c.Policy.Notifications.Telegram = &config.WorkerTelegram{}
 	c.Policy.Notifications.Telegram.TokenFile = filepath.Join(home, "telegram-token")
 	c.Policy.Notifications.Telegram.ChatIDFile = filepath.Join(home, "telegram-chat")
@@ -148,6 +153,10 @@ func backupCutoverFixture(t *testing.T) (string, WorkerInstallation, backupCutov
 	testutil.Must(t, backupTransferTx(context.Background(), state, func(tx *sql.Tx) error { var e error; evidence, e = readBackupCutoverEvidence(tx); return e }))
 	p := notify.Producer{ID: c.WorkerID, Epoch: "one"}
 	cfg := worker.Config{Producers: []worker.Enrollment{{Producer: p, Routes: []string{"ops"}, MaxMessages: 100, MaxSilenceSeconds: 150, MaxEvidenceSeconds: 86400}}, Routes: map[string]worker.Route{"ops": {Revision: "one", Primary: "telegram"}}, MaxMessages: 100, MaxPayloadBytes: 1 << 20, MaxDatabaseBytes: 32 << 20}
+	if change != nil {
+		change(&c, &cfg)
+		testutil.Must(t, safefs.WritePrivateJSON(paths.Config, c))
+	}
 	gatewayPath := t.TempDir()
 	testutil.Must(t, os.Chmod(gatewayPath, 0700))
 	gateway, err := worker.Open(gatewayPath, cfg, true)

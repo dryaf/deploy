@@ -32,11 +32,17 @@ func (s *Store) TelegramOffset(ctx context.Context, account string) (offset int6
 // a subsequent poll can acknowledge the provider page. Domain conversion resumes
 // separately and cannot lose the request if the process exits after this commit.
 func (s *Store) PersistTelegram(ctx context.Context, page provider.IntakePage) error {
-	if s.config.Interaction == nil || !protocol.ValidToken(page.Account) || page.Next < 0 || len(page.Events) > 16 {
+	if err := s.checkManagedCommandAuthority(ctx); err != nil {
+		return err
+	}
+	if !s.commandIntakeEnabled() {
+		return fmt.Errorf("Telegram intake is not admitted")
+	}
+	if s.commandConfig() == nil || !protocol.ValidToken(page.Account) || page.Next < 0 || len(page.Events) > 16 {
 		return fmt.Errorf("invalid intake page")
 	}
 	known := false
-	for _, d := range s.config.Interaction.Destinations {
+	for _, d := range s.commandConfig().Destinations {
 		if d.Provider == "telegram" && d.Account == page.Account {
 			known = true
 		}
@@ -45,7 +51,7 @@ func (s *Store) PersistTelegram(ctx context.Context, page provider.IntakePage) e
 		return fmt.Errorf("account not enrolled")
 	}
 	return s.transaction(ctx, func(tx *sql.Tx) error {
-		recovery, err := readTelegramRecoveryCursor(tx, page.Account)
+		recovery, err := telegramAdmissionCursor(tx, page.Account)
 		if err != nil {
 			return err
 		}
@@ -91,13 +97,13 @@ func (s *Store) PersistTelegram(ctx context.Context, page provider.IntakePage) e
 					return fmt.Errorf("inbound identity mismatch")
 				}
 				authorized := false
-				for _, permission := range s.config.Interaction.Permissions {
+				for _, permission := range s.commandConfig().Permissions {
 					if permission.Actor == in.Actor && permission.Conversation == in.Conversation {
 						authorized = true
 					}
 				}
 				destinationOK := false
-				for _, d := range s.config.Interaction.Destinations {
+				for _, d := range s.commandConfig().Destinations {
 					if d.ID == in.Conversation && d.Account == in.Account && d.Provider == in.Provider && d.Fingerprint() == in.DestinationFingerprint {
 						destinationOK = true
 					}
@@ -131,8 +137,11 @@ func (s *Store) PersistTelegram(ctx context.Context, page provider.IntakePage) e
 }
 
 func (s *Store) RunTelegramIntake(ctx context.Context, p provider.TelegramPoller) error {
-	if s.verificationOnly {
+	if !s.commandIntakeEnabled() {
 		return fmt.Errorf("Telegram intake unavailable in verification mode")
+	}
+	if err := s.checkManagedCommandAuthority(ctx); err != nil {
+		return err
 	}
 	if err := p.Preflight(ctx); err != nil {
 		return err
@@ -140,6 +149,9 @@ func (s *Store) RunTelegramIntake(ctx context.Context, p provider.TelegramPoller
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if err := s.checkManagedCommandAuthority(ctx); err != nil {
+			return err
 		}
 		offset, err := s.TelegramOffset(ctx, p.Profile.Account)
 		if err != nil {
@@ -158,8 +170,11 @@ func (s *Store) RunTelegramIntake(ctx context.Context, p provider.TelegramPoller
 // One supervised intake attempt. Preflight is read-only; failure never changes
 // webhook configuration or acknowledges unpersisted updates.
 func (s *Store) PullTelegram(ctx context.Context, p provider.TelegramPoller) error {
-	if s.verificationOnly {
+	if !s.commandIntakeEnabled() {
 		return fmt.Errorf("Telegram intake unavailable in verification mode")
+	}
+	if err := s.checkManagedCommandAuthority(ctx); err != nil {
+		return err
 	}
 	if err := p.Preflight(ctx); err != nil {
 		return err
@@ -176,6 +191,12 @@ func (s *Store) PullTelegram(ctx context.Context, p provider.TelegramPoller) err
 }
 
 func (s *Store) ConvertIntake(ctx context.Context) error {
+	if err := s.checkManagedCommandAuthority(ctx); err != nil {
+		return err
+	}
+	if !s.commandIntakeEnabled() {
+		return fmt.Errorf("command conversion is not admitted")
+	}
 	type pending struct {
 		account string
 		id      int64

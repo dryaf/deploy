@@ -38,7 +38,7 @@ func (s *Store) Grant(ctx context.Context, p protocol.Producer, id string) (j Jo
 			if o.Active != generation || o.Generations[o.Active] != "active" {
 				return s.transition(tx, j, "fenced")
 			}
-			route, ok := s.config.Routes[j.Message.Route]
+			route, ok := s.effectiveRoutes()[j.Message.Route]
 			if !ok || route.Revision != j.RouteRevision {
 				return s.transition(tx, j, "blocked")
 			}
@@ -150,7 +150,7 @@ func (s *Store) Finish(ctx context.Context, j Job, result Result) error {
 			case result.Ambiguous:
 				r.State = "ambiguous"
 			case result.Permanent:
-				route := s.config.Routes[j.Message.Route]
+				route := s.effectiveRoutes()[j.Message.Route]
 				if j.Provider == route.Primary && route.Fallback != "" {
 					r.State = "retry_wait"
 				} else {

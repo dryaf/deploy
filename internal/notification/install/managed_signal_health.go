@@ -36,7 +36,23 @@ func checkManagedSignalHealthPID(ctx context.Context, m ManagedManifest, pid uin
 		return err
 	}
 	want := SignalVerificationHealth{ServiceHash: m.SignalVerification.ServiceHash, Version: 1, VerificationOnly: true, ManifestHash: p.ManifestHash, InstallationHash: p.Installation.InstallationHash, RecoveryOperation: p.Spec.Recovery.Operation, CommitHash: p.Spec.CommitHash, Signal: *c.Signal}
+	var native *SignalServiceManifest
+	if m.SignalVerification.ServiceRoot != "" {
+		service, err := inspectSignalService(m.SignalVerification.SignalVerificationReference)
+		if err != nil {
+			return err
+		}
+		want, err = signalServiceHealth(service)
+		if err != nil {
+			return err
+		}
+		native = &service
+	}
 	socket := filepath.Join(p.Spec.Root, "api.sock")
+	return checkSignalHealthResponse(ctx, want, socket, pid, native)
+}
+
+func checkSignalHealthResponse(ctx context.Context, want SignalVerificationHealth, socket string, pid uint32, native *SignalServiceManifest) error {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	transport := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -62,6 +78,12 @@ func checkManagedSignalHealthPID(ctx context.Context, m ManagedManifest, pid uin
 		if err != nil || peerErr != nil || cred == nil || cred.Uid != uint32(os.Getuid()) || pid != 0 && cred.Pid != int32(pid) || e != nil || !os.SameFile(info, current) {
 			c.Close()
 			return nil, fmt.Errorf("Signal verification socket peer changed")
+		}
+		if native != nil {
+			if err = checkSignalServiceProcess(uint32(cred.Pid), *native); err != nil {
+				c.Close()
+				return nil, err
+			}
 		}
 		return c, nil
 	}}

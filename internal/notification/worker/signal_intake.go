@@ -39,11 +39,17 @@ func (s *Store) signalCursor(ctx context.Context, p provider.SignalAccount) (cur
 }
 
 func (s *Store) PersistSignal(ctx context.Context, p provider.SignalAccount, page interaction.SpoolPage) error {
-	if p.Validate() != nil || page.Cursor.Identity != p.InboxIdentity || page.Cursor.Account != p.Account || len(page.Events) > 16 || s.config.Interaction == nil {
+	if err := s.checkManagedCommandAuthority(ctx); err != nil {
+		return err
+	}
+	if !s.commandIntakeEnabled() {
+		return fmt.Errorf("Signal intake is not admitted")
+	}
+	if p.Validate() != nil || page.Cursor.Identity != p.InboxIdentity || page.Cursor.Account != p.Account || len(page.Events) > 16 || s.commandConfig() == nil {
 		return fmt.Errorf("invalid Signal relay page")
 	}
 	known := false
-	for _, d := range s.config.Interaction.Destinations {
+	for _, d := range s.commandConfig().Destinations {
 		if d.Provider == "signal" && d.Account == p.Account {
 			known = true
 		}
@@ -101,9 +107,9 @@ func (s *Store) PersistSignal(ctx context.Context, p provider.SignalAccount, pag
 					return fmt.Errorf("Signal request identity mismatch")
 				}
 				authorized := false
-				for _, d := range s.config.Interaction.Destinations {
+				for _, d := range s.commandConfig().Destinations {
 					if d.Provider == "signal" && d.Account == p.Account && d.ID == in.Conversation && d.Fingerprint() == in.DestinationFingerprint {
-						for _, permission := range s.config.Interaction.Permissions {
+						for _, permission := range s.commandConfig().Permissions {
 							if permission.Actor == in.Actor && permission.Conversation == d.ID {
 								authorized = true
 							}
@@ -142,8 +148,11 @@ func (s *Store) PersistSignal(ctx context.Context, p provider.SignalAccount, pag
 // PullSignal acknowledges the relay only after the gateway's inbox and cursor
 // have committed. A lost ACK can be repeated using the retained relay identity.
 func (s *Store) PullSignal(ctx context.Context, c provider.SignalInboxClient) error {
-	if s.verificationOnly {
+	if !s.commandIntakeEnabled() {
 		return fmt.Errorf("Signal intake unavailable in verification mode")
+	}
+	if err := s.checkManagedCommandAuthority(ctx); err != nil {
+		return err
 	}
 	cursor, err := s.signalCursor(ctx, c.Profile)
 	if err != nil {

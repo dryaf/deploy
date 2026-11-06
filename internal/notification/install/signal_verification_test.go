@@ -27,9 +27,12 @@ func signalVerificationFixtureWithGateway(t *testing.T, beforeRecovery func(stri
 func signalVerificationFixtureProviders(t *testing.T, beforeRecovery func(string, string), telegram bool) SignalVerificationSpec {
 	return signalVerificationFixtureConfigured(t, beforeRecovery, telegram, nil)
 }
-func signalVerificationFixtureConfigured(t *testing.T, beforeRecovery func(string, string), telegram bool, configure func(*Runtime)) SignalVerificationSpec {
+func signalVerificationFixtureConfigured(t *testing.T, beforeRecovery func(string, string), telegram bool, configure func(*Runtime), producerRecovery ...signalProducerRecoveryFixture) SignalVerificationSpec {
+	return signalVerificationFixtureConfiguredBootstrap(t, beforeRecovery, telegram, configure, false, producerRecovery...)
+}
+func signalVerificationFixtureConfiguredBootstrap(t *testing.T, beforeRecovery func(string, string), telegram bool, configure func(*Runtime), bootstrap bool, producerRecovery ...signalProducerRecoveryFixture) SignalVerificationSpec {
 	t.Helper()
-	args := signalRuntimeCLIArgumentsConfigured(t, beforeRecovery, telegram, configure)
+	args := signalRuntimeCLIArgumentsConfiguredBootstrap(t, beforeRecovery, telegram, configure, bootstrap, producerRecovery...)
 	c, err := ReadRuntime(args[2])
 	if err != nil {
 		t.Fatal(err)

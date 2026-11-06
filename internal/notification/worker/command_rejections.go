@@ -64,7 +64,7 @@ func (s *Store) recordCommandRejection(ctx context.Context, in interaction.Inbou
 				reply = false
 			}
 		}
-		q := gatewayQuery{ID: "Q-" + in.RequestKey(), Input: in, Policy: protocol.Hash(s.config.Interaction), Expires: s.now().Add(10 * time.Minute), Kind: "rejected"}
+		q := gatewayQuery{ID: "Q-" + in.RequestKey(), Input: in, Policy: protocol.Hash(s.commandConfig()), Expires: s.now().Add(10 * time.Minute), Kind: "rejected"}
 		if !authorized {
 			q.Input.Text = ""
 		}

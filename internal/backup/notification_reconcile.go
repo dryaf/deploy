@@ -42,6 +42,9 @@ func reconcileBackupNotificationsWith(ctx context.Context, s *backupState, c Wor
 	defer cancel()
 	var owner backupNotificationOwner
 	err = backupTransferTx(ctx, s, func(tx *sql.Tx) error {
+		if err := requireNoPendingMigrationCycle(tx); err != nil {
+			return err
+		}
 		var err error
 		owner, err = readBackupNotificationOwner(tx)
 		if err != nil {
@@ -62,20 +65,28 @@ func reconcileBackupNotificationsWith(ctx context.Context, s *backupState, c Wor
 	if !errors.Is(err, notify.ErrRecoveryIncomplete) {
 		return summary, err
 	}
+	ch, err := session.Challenge(ctx, owner.Binding.Producer)
+	if err != nil {
+		return summary, err
+	}
 	err = backupTransferTx(ctx, s, func(tx *sql.Tx) error {
-		var count int
-		if err := tx.QueryRow("SELECT count(*) FROM meta WHERE key='notification_recovery_summary'").Scan(&count); err != nil {
+		var previous backupNotificationRecovery
+		err := backupNotificationMeta(tx, "notification_recovery", &previous)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
 			return err
 		}
-		if count != 0 {
+		var complete int
+		if err = tx.QueryRow("SELECT count(*) FROM meta WHERE key='notification_recovery_summary'").Scan(&complete); err != nil {
+			return err
+		}
+		if complete != 0 && (previous.Challenge.Operation == ch.Operation || owner.Mode != "shared") {
 			return fmt.Errorf("gateway lost a locally recorded recovery completion")
 		}
 		return nil
 	})
-	if err != nil {
-		return summary, err
-	}
-	ch, err := session.Challenge(ctx, owner.Binding.Producer)
 	if err != nil {
 		return summary, err
 	}

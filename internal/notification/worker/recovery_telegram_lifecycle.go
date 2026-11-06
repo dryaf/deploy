@@ -30,7 +30,7 @@ func ReviewTelegramRenewalHead(ctx context.Context, path string, c Config, commi
 	}
 	defer s.close()
 	var state telegramRenewalState
-	_, err = readRenewalJSON(s.root, renewalIndex(account), &state, 16384)
+	_, err = readRenewalJSON(s.root, s.renewalIndex(), &state, 16384)
 	if os.IsNotExist(err) {
 		if err = s.requireOriginalTelegramHandoff(); err != nil {
 			return out, err

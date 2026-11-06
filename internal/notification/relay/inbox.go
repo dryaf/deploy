@@ -18,6 +18,9 @@ import (
 )
 
 type Inbox struct {
+	runtimeAdmission func(context.Context) error
+	releaseSource    func()
+
 	installation *SignalRuntimeInstallation // Verification-only recovery installation; never a receiver.
 	db           *sql.DB
 	dir          *safefs.Directory
@@ -42,14 +45,21 @@ func OpenInbox(path, account string, create bool) (*Inbox, error) {
 }
 
 func openInbox(path, account string, create bool, installation *SignalRuntimeInstallation) (_ *Inbox, err error) {
+	return openInboxLeased(path, account, create, installation, nil, nil)
+}
+
+func openInboxLeased(path, account string, create bool, installation *SignalRuntimeInstallation, adoptedDir *safefs.Directory, adoptedLease *safefs.Lock) (_ *Inbox, err error) {
 	if !protocol.ValidToken(account) {
 		return nil, fmt.Errorf("invalid relay account")
 	}
-	dir, err := safefs.Open(path)
-	if err != nil {
-		return nil, err
+	dir := adoptedDir
+	if dir == nil {
+		dir, err = safefs.Open(path)
+		if err != nil {
+			return nil, err
+		}
 	}
-	s := &Inbox{dir: dir, account: account, installation: installation}
+	s := &Inbox{dir: dir, account: account, installation: installation, lease: adoptedLease}
 	defer func() {
 		if err != nil {
 			s.Close()
@@ -78,9 +88,11 @@ func openInbox(path, account string, create bool, installation *SignalRuntimeIns
 			}
 		}
 	}
-	s.lease, err = dir.Lock("inbox.lock", true, create)
-	if err != nil {
-		return nil, err
+	if s.lease == nil {
+		s.lease, err = dir.Lock("inbox.lock", true, create)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err = s.checkRuntimeFence(); err != nil {
 		return nil, err
@@ -200,6 +212,10 @@ func (s *Inbox) Close() error {
 		return nil
 	}
 	var err error
+	if s.releaseSource != nil {
+		defer s.releaseSource()
+		s.releaseSource = nil
+	}
 	if s.db != nil {
 		err = s.db.Close()
 		s.db = nil
@@ -220,6 +236,11 @@ func (s *Inbox) Cursor() interaction.SpoolCursor {
 func (s *Inbox) transaction(ctx context.Context, fn func(*sql.Tx) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.runtimeAdmission != nil {
+		if err := s.runtimeAdmission(ctx); err != nil {
+			return err
+		}
+	}
 	if err := s.checkLease(); err != nil {
 		return err
 	}
@@ -241,6 +262,11 @@ func (s *Inbox) transaction(ctx context.Context, fn func(*sql.Tx) error) error {
 	}
 	if s.ready {
 		if err = s.checkBaseline(tx); err != nil {
+			return err
+		}
+	}
+	if s.runtimeAdmission != nil {
+		if err := s.runtimeAdmission(ctx); err != nil {
 			return err
 		}
 	}
@@ -284,7 +310,7 @@ func (s *Inbox) checkLease() error {
 }
 
 func (s *Inbox) CheckActive(ctx context.Context) error {
-	if s.installation != nil {
+	if s.installation != nil && s.runtimeAdmission == nil {
 		return fmt.Errorf("Signal intake unavailable in verification mode")
 	}
 	return s.transaction(ctx, func(*sql.Tx) error { return nil })
@@ -317,13 +343,13 @@ func (s *Inbox) capacity(tx *sql.Tx, reserve int) error {
 	return nil
 }
 func (s *Inbox) CanReceive(ctx context.Context) error {
-	if s.installation != nil {
+	if s.installation != nil && s.runtimeAdmission == nil {
 		return fmt.Errorf("Signal intake unavailable in verification mode")
 	}
 	return s.transaction(ctx, func(tx *sql.Tx) error { return s.capacity(tx, 16) })
 }
 func (s *Inbox) Enqueue(ctx context.Context, e interaction.SpoolEvent) error {
-	if s.installation != nil {
+	if s.installation != nil && s.runtimeAdmission == nil {
 		return fmt.Errorf("Signal intake unavailable in verification mode")
 	}
 	if e.Position != 0 || !protocol.ValidToken(e.Key) || !safefs.DigestPattern.MatchString(e.Hash) {
@@ -356,7 +382,7 @@ func (s *Inbox) Enqueue(ctx context.Context, e interaction.SpoolEvent) error {
 	})
 }
 func (s *Inbox) List(ctx context.Context, c interaction.SpoolCursor) (page interaction.SpoolPage, err error) {
-	if s.installation != nil {
+	if s.installation != nil && s.runtimeAdmission == nil {
 		return page, fmt.Errorf("Signal intake unavailable in verification mode")
 	}
 	if c.Identity != s.identity || c.Account != s.account {
@@ -421,7 +447,7 @@ func (s *Inbox) List(ctx context.Context, c interaction.SpoolCursor) (page inter
 	return
 }
 func (s *Inbox) Ack(ctx context.Context, c interaction.SpoolCursor) error {
-	if s.installation != nil {
+	if s.installation != nil && s.runtimeAdmission == nil {
 		return fmt.Errorf("Signal intake unavailable in verification mode")
 	}
 	if c.Identity != s.identity || c.Account != s.account {

@@ -117,6 +117,9 @@ func checkSignalServiceFiles(d *safefs.Directory, m SignalServiceManifest, publi
 	if err := checkSignalServiceAuthority(d, m); err != nil {
 		return err
 	}
+	if err := checkSignalProductionFiles(m); err != nil {
+		return err
+	}
 	executable, raw, err := nativeSignalFile(filepath.Join(m.Spec.Root, "deploy"), maxManagedBinary, false)
 	if err != nil {
 		return err
@@ -148,6 +151,17 @@ func checkSignalServiceFiles(d *safefs.Directory, m SignalServiceManifest, publi
 	}
 	if protocol.Hash(actual) != protocol.Hash(m.Endpoint) {
 		return fmt.Errorf("Signal endpoint publication changed")
+	}
+	if m.Spec.Previous != nil {
+		j, err := readSignalServiceJournal(d, m)
+		if err != nil {
+			return err
+		}
+		if j.Phase != "prepared" {
+			if err := checkSignalServiceReplacement(d, m); err != nil {
+				return err
+			}
+		}
 	}
 	if published {
 		ready, err := readSignalService(d, "ready.json")

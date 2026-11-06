@@ -18,6 +18,7 @@ import (
 
 type SnapshotManifest struct {
 	Version       int               `json:"version"`
+	RecoveryHash  string            `json:"recovery_hash,omitempty"`
 	ID            string            `json:"id"`
 	Identity      protocol.Identity `json:"identity"`
 	Schema        int               `json:"schema"`
@@ -93,6 +94,10 @@ func snapshotFile(dir *safefs.Directory, name string, limit int64) (*os.File, er
 }
 
 func verifySnapshotDB(ctx context.Context, db *sql.DB, m SnapshotManifest, c Config) error {
+	return verifySnapshotDatabase(ctx, db, m, c, nil)
+}
+
+func verifySnapshotDatabase(ctx context.Context, db *sql.DB, m SnapshotManifest, c Config, recovery *snapshotRecoveryEvidence) error {
 	var check, body string
 	var version, count int
 	if err := db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&check); err != nil || check != "ok" {
@@ -108,8 +113,20 @@ func verifySnapshotDB(ctx context.Context, db *sql.DB, m SnapshotManifest, c Con
 	if err := protocol.Decode([]byte(body), &id, 4096); err != nil || id != m.Identity {
 		return fmt.Errorf("snapshot identity mismatch")
 	}
-	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM metadata WHERE key='recovery'").Scan(&count); err != nil || count != 0 {
-		return fmt.Errorf("snapshot is already quarantined")
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM metadata WHERE key='recovery'").Scan(&count); err != nil {
+		return err
+	}
+	if recovery == nil {
+		if count != 0 || m.RecoveryHash != "" || m.Version == 2 {
+			return fmt.Errorf("snapshot is already quarantined or lost recovery provenance")
+		}
+	} else {
+		if count != 1 || recovery.validate(m, c) != nil {
+			return fmt.Errorf("recovered snapshot provenance changed")
+		}
+		if err := verifyRecoveryRuntimeSQL(ctx, db, recovery.Proof); err != nil {
+			return err
+		}
 	}
 	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM producers").Scan(&count); err != nil || count != len(c.Producers) {
 		return fmt.Errorf("snapshot enrollment mismatch")
@@ -169,7 +186,7 @@ func readSnapshot(ctx context.Context, path string, c Config) (m SnapshotManifes
 	if err = dir.ReadJSON("snapshot.json", &m); err != nil {
 		return
 	}
-	if m.Version != 1 || !supportedSnapshotSchema(m.Schema) || !safefs.ValidID(m.ID, "n") || !m.Identity.Valid() || m.ConfigHash != protocol.Hash(c) ||
+	if !validSnapshotVersion(m) || !supportedSnapshotSchema(m.Schema) || !safefs.ValidID(m.ID, "n") || !m.Identity.Valid() || m.ConfigHash != protocol.Hash(c) ||
 		!safefs.DigestPattern.MatchString(m.DatabaseHash) || m.DatabaseBytes <= 0 || m.DatabaseBytes > c.MaxDatabaseBytes || m.CreatedAt.IsZero() {
 		err = fmt.Errorf("invalid snapshot manifest or configuration mismatch")
 		return
@@ -214,7 +231,15 @@ func readSnapshot(ctx context.Context, path string, c Config) (m SnapshotManifes
 		err = e
 		return
 	}
-	err = verifySnapshotDB(ctx, db, m, c)
+	recovery, evidenceErr := readSnapshotRecovery(dir, m, c)
+	if evidenceErr == nil && recovery != nil {
+		evidenceErr = verifySnapshotProofArchive(ctx, dir, c, *recovery)
+	}
+	if evidenceErr == nil {
+		err = verifySnapshotDatabase(ctx, db, m, c, recovery)
+	} else {
+		err = evidenceErr
+	}
 	closeErr := db.Close()
 	if err == nil {
 		err = closeErr
@@ -227,6 +252,12 @@ func readSnapshot(ctx context.Context, path string, c Config) (m SnapshotManifes
 func (s *Store) Snapshot(ctx context.Context, destination string) (m SnapshotManifest, err error) {
 	if !filepath.IsAbs(destination) || filepath.Clean(destination) != destination {
 		return m, fmt.Errorf("snapshot destination must be clean and absolute")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	recovery, err := s.snapshotRecoveryEvidence(ctx)
+	if err != nil {
+		return m, err
 	}
 	parent, err := safefs.Open(filepath.Dir(destination))
 	if err != nil {
@@ -247,8 +278,6 @@ func (s *Store) Snapshot(ctx context.Context, destination string) (m SnapshotMan
 		return m, err
 	}
 	defer dir.Close()
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, err = s.db.ExecContext(ctx, "VACUUM INTO ?", fmt.Sprintf("/proc/self/fd/%d/state.db", dir.File().Fd())); err != nil {
 		return m, err
 	}
@@ -274,6 +303,9 @@ func (s *Store) Snapshot(ctx context.Context, destination string) (m SnapshotMan
 		return m, fmt.Errorf("snapshot exceeds database budget")
 	}
 	m.Version, m.Schema, m.Identity, m.ConfigHash, m.DatabaseBytes, m.CreatedAt = 1, currentSchema, s.identity, protocol.Hash(s.config), i.Size(), s.now().UTC()
+	if recovery != nil {
+		m.Version, m.RecoveryHash = 2, protocol.Hash(*recovery)
+	}
 	m.ID, err = safefs.NewID("n")
 	if err != nil {
 		return m, err
@@ -282,7 +314,7 @@ func (s *Store) Snapshot(ctx context.Context, destination string) (m SnapshotMan
 	if err != nil {
 		return m, err
 	}
-	err = verifySnapshotDB(ctx, db, m, s.config)
+	err = verifySnapshotDatabase(ctx, db, m, s.config, recovery)
 	closeErr := db.Close()
 	if err != nil {
 		return m, err
@@ -292,6 +324,14 @@ func (s *Store) Snapshot(ctx context.Context, destination string) (m SnapshotMan
 	}
 	if err = dir.File().Sync(); err != nil {
 		return m, err
+	}
+	if recovery != nil {
+		if err = copyRecoveryProofArchive(ctx, s.dir, dir, s.config, *recovery); err != nil {
+			return m, err
+		}
+		if err = dir.WriteJSON(snapshotRecoveryFile, *recovery, false); err != nil {
+			return m, err
+		}
 	}
 	err = dir.WriteJSON("snapshot.json", m, false)
 	return

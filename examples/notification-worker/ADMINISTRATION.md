@@ -6,6 +6,12 @@ and refuse to run alongside the service. Stop/start the service explicitly; the
 commands never manage services, contact providers or change LED state. Managed
 verification mode continues to withhold delivery after a retry.
 
+## Command enrollment
+
+See [Managed command enrollment changes](COMMAND_MIGRATION.md) for retained alias
+renames, conversation removal/generation rotation and recovered configuration
+changes through `migrate-commands`.
+
 ## Producer retirement
 
 Retirement permanently closes one enrolled producer epoch. First publish explicit
@@ -50,9 +56,11 @@ supported.
 
 Keep the producer's configuration enrollment and the whole state directory,
 including canonical ownership history. There is no in-place unretire operation,
-configuration removal or producer-host uninstall coordinator. The retirement
-record survives ownership recovery epoch changes; incompatible restored ledgers
-fail closed. Final recovered-state publication remains unfinished. Schema-4
+in-place configuration removal. Whole-installation UID/socket/configuration and
+history changes use [retirement and replacement](RETIREMENT_REPLACEMENT.md), with
+fresh specialist enrollment. The retirement record survives ownership recovery
+epoch changes; incompatible restored ledgers fail closed. Recovered publication
+and repeated adoption use [delivery recovery](DELIVERY_ACTIVATION.md). Schema-4
 ownership events require a compatible runtime and retained recovery helper;
 older binaries reject them. This does not change SQLite schema 10 or enable
 production delivery.
@@ -135,12 +143,14 @@ Snapshot recovery retains old-epoch decisions, including decisions newer than th
 snapshot, solely as audit. They never enter the new acknowledgement stream or
 reapply their actions. The preserved original database and independent
 `administration` directory are required for this reconciliation; preserve the
-whole state directory. Final restored-state publication remains unfinished.
+whole state directory. Recovery publication and first managed adoption are separate explicit steps;
+see [DELIVERY_ACTIVATION.md](DELIVERY_ACTIVATION.md).
 
 History is bounded to 1,024 distinct decisions, including interrupted intents.
 At the limit new decisions fail; existing pending decisions can finish. No audit
-or queue data is silently evicted. Administrative history compaction is not yet
-implemented. `--dry-run` validates arguments and the review file without opening
+or queue data is silently evicted. At the bound, settle outstanding work and use
+[retirement and replacement](RETIREMENT_REPLACEMENT.md) to retain the audit archive
+and begin a fresh installation. There is no in-place administrative history deletion. `--dry-run` validates arguments and the review file without opening
 or modifying worker state; it does not prove that the review is still current.
 
 ## Receipt compaction

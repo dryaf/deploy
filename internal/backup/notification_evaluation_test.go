@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dryaf/deploy/internal/backup/protocol"
+	deploysource "github.com/dryaf/deploy/internal/backup/source"
 	notify "github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/notification/worker"
 	"github.com/dryaf/deploy/internal/process"
@@ -383,5 +384,33 @@ func TestBackupEvaluationMissingAndCorruptLatestSnapshot(t *testing.T) {
 				t.Fatal(evaluation, messages)
 			}
 		})
+	}
+}
+
+func TestBackupEvaluationRetiresAggregateOnlyAfterEverySource(t *testing.T) {
+	f := newBackupEvaluationFixture(t)
+	var control ArchiveControl
+	testutil.Must(t, f.state.get("control", &control))
+	source := control.Instances[f.subject].SourceID
+	f.config.Sources = []deploysource.WorkerSource{{SourceID: source}, {SourceID: "still-enrolled"}}
+	control.RetiredSources[source] = "Operator retired source"
+	testutil.Must(t, f.state.put("control", control))
+	partial, _ := f.evaluate(t)
+	if partial.Snapshot.Subjects[0].Condition == "retired" {
+		t.Fatal("unretired source hidden")
+	}
+	control.RetiredSources["still-enrolled"] = "Operator retired final source"
+	testutil.Must(t, f.state.put("control", control))
+	retired, _ := f.evaluate(t)
+	for _, subject := range retired.Snapshot.Subjects {
+		if subject.Condition != "retired" {
+			t.Fatal("aggregate retirement did not settle coverage", subject)
+		}
+	}
+	delete(control.RetiredSources, "still-enrolled")
+	testutil.Must(t, f.state.put("control", control))
+	restored, _ := f.evaluate(t)
+	if restored.Snapshot.Subjects[0].Condition == "retired" {
+		t.Fatal("source reactivation retained retired aggregate")
 	}
 }

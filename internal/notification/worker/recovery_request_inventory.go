@@ -104,6 +104,11 @@ func (r *recoveryReconciler) requestInventory(tx *sql.Tx) (summary RecoveryReque
 	if missing != 0 {
 		return summary, nil, fmt.Errorf("recovered command lost primary mapping")
 	}
+	ancestors, err := r.ancestorRequestFences(tx, byKey)
+	if err != nil {
+		return summary, nil, err
+	}
+	evidence = append(evidence, ancestors...)
 	rows, err = tx.Query("SELECT account,id,hash,body,state FROM provider_inbox ORDER BY account,id")
 	if err != nil {
 		return

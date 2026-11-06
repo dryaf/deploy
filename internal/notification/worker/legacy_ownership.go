@@ -61,7 +61,8 @@ func (s *Store) RequireLegacyAccepted(ctx context.Context, m protocol.Message) e
 	if err != nil || status.State != "revoked" {
 		return fmt.Errorf("shared generation not revoked")
 	}
-	return s.transaction(ctx, func(tx *sql.Tx) error {
+	missingReceipt := false
+	err = s.transaction(ctx, func(tx *sql.Tx) error {
 		j, err := readJob(tx, m.Producer.ID, m.ID)
 		if err != nil {
 			return err
@@ -70,7 +71,10 @@ func (s *Store) RequireLegacyAccepted(ctx context.Context, m protocol.Message) e
 			return fmt.Errorf("canonical acceptance unavailable")
 		}
 		var raw string
-		if err = tx.QueryRow("SELECT body FROM receipts WHERE producer=? AND json_extract(body,'$.event_id')=? AND json_extract(body,'$.state')='provider_accepted' ORDER BY position DESC LIMIT 1", m.Producer.ID, m.ID).Scan(&raw); err != nil {
+		if err = tx.QueryRow("SELECT body FROM receipts WHERE producer=? AND json_extract(body,'$.event_id')=? AND json_extract(body,'$.state')='provider_accepted' ORDER BY position DESC LIMIT 1", m.Producer.ID, m.ID).Scan(&raw); err == sql.ErrNoRows {
+			missingReceipt = true
+			return nil
+		} else if err != nil {
 			return fmt.Errorf("retained canonical acceptance required before rollback: %w", err)
 		}
 		var receipt protocol.Receipt
@@ -82,6 +86,10 @@ func (s *Store) RequireLegacyAccepted(ctx context.Context, m protocol.Message) e
 		}
 		return nil
 	})
+	if err != nil || !missingReceipt {
+		return err
+	}
+	return s.requireHistoricalLegacyAcceptance(ctx, m)
 }
 
 // Missing queue rows are never proof of no send below the submission watermark.

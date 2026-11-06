@@ -40,7 +40,10 @@ func (c recoveryCoordinator) boundary(at string) error {
 func FenceRecovery(ctx context.Context, path string, req RecoveryRequest, svc RecoveryService, apply RecoveryApply, verify RecoveryVerify) (RecoveryStatus, error) {
 	return (recoveryCoordinator{}).run(ctx, path, req, svc, apply, verify)
 }
-func (c recoveryCoordinator) run(ctx context.Context, path string, req RecoveryRequest, svc RecoveryService, apply RecoveryApply, verify RecoveryVerify) (out RecoveryStatus, err error) {
+func (c recoveryCoordinator) run(ctx context.Context, path string, req RecoveryRequest, svc RecoveryService, apply RecoveryApply, verify RecoveryVerify) (RecoveryStatus, error) {
+	return c.runExpectedParent(ctx, path, req, svc, apply, verify, nil)
+}
+func (c recoveryCoordinator) runExpectedParent(ctx context.Context, path string, req RecoveryRequest, svc RecoveryService, apply RecoveryApply, verify RecoveryVerify, parent *RecoveryStatus) (out RecoveryStatus, err error) {
 	if err = req.validate(); err != nil {
 		return
 	}
@@ -117,6 +120,22 @@ func (c recoveryCoordinator) run(ctx context.Context, path string, req RecoveryR
 		r, err = readRecovery(q)
 		if err != nil {
 			return
+		}
+		if parent != nil {
+			if !r.HasIntent || r.Intent.Version != 2 {
+				err = fmt.Errorf("next Signal recovery lost its prepared ancestor")
+				return
+			}
+			var ancestor recoveryRecords
+			var exists bool
+			exists, err = readRecord(q, ancestorRecoveryName(r.Intent.Ancestor), &ancestor)
+			if err != nil {
+				return
+			}
+			if !exists || ancestor.status() != *parent {
+				err = fmt.Errorf("next Signal recovery parent changed")
+				return
+			}
 		}
 		if r.HasIntent {
 			if r.Intent.Request != req {

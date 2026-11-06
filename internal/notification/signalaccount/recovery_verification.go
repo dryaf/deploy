@@ -89,6 +89,9 @@ func (v *RecoveryVerification) Check() error {
 			return err
 		}
 	}
+	if err = refuseSupersededRecovery(d, v.expected); err != nil {
+		return err
+	}
 	r, err := readRecovery(d)
 	if err != nil {
 		return err

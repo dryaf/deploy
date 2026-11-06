@@ -39,7 +39,7 @@ func (f *fakeDeliveryServices) Verify(ctx context.Context, m ManagedManifest) er
 	if err != nil || h.VerificationOnly || h.DeliveryActivationHash != m.DeliveryActivation.Hash {
 		return errors.New("delivery health pin differs")
 	}
-	return s.RequireInactiveProducers()
+	return nil
 }
 
 func deliveryFixture(t *testing.T) (ManagedSpec, managedInstaller, *fakeDeliveryServices, Runtime, ManagedManifest, QualificationRecord) {

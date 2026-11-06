@@ -43,7 +43,7 @@ func (j *telegramRenewalJournal) check(ctx context.Context) error {
 		return err
 	}
 	var pin telegramRenewalState
-	if _, err = readRenewalJSON(j.s.root, renewalIndex(j.state.Binding.Account), &pin, 16384); err != nil {
+	if _, err = readRenewalJSON(j.s.root, j.s.renewalIndex(), &pin, 16384); err != nil {
 		return err
 	}
 	if pin != j.state {
@@ -126,7 +126,7 @@ func (j *telegramRenewalJournal) append(ctx context.Context, offset int64, page 
 	if err = j.check(ctx); err != nil {
 		return err
 	}
-	if err = j.s.root.WriteJSON(renewalIndex(j.state.Binding.Account), next, true); err != nil {
+	if err = j.s.root.WriteJSON(j.s.renewalIndex(), next, true); err != nil {
 		return err
 	}
 	j.state = next

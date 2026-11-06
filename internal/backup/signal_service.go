@@ -68,6 +68,7 @@ type signalService struct {
 	home, configuration, image, unitText, imagesHash, pinned string
 	installation                                             WorkerInstallation
 	run                                                      func(context.Context, ...string) ([]byte, error)
+	adoptionProbe                                            func(context.Context, string) error
 }
 
 func signalSystemctl(ctx context.Context, args ...string) ([]byte, error) {
@@ -225,6 +226,21 @@ func signalAccountProbe(ctx context.Context, image string) error {
 	}
 	if err = safefs.DecodeJSON(raw, &v, 4096); err != nil || v.Version != signalaccount.MaintenanceVersion {
 		return fmt.Errorf("Signal relay image maintenance protocol mismatch")
+	}
+	return nil
+}
+
+func (s *signalService) VerifyRecoverySupport(ctx context.Context) error {
+	return s.VerifyNextRecoverySupport(ctx)
+}
+func (s *signalService) VerifyNextRecoverySupport(ctx context.Context) error {
+	if s.adoptionProbe != nil {
+		return s.adoptionProbe(ctx, s.image)
+	}
+	cmd := exec.CommandContext(ctx, "podman", "run", "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=all", "--security-opt=no-new-privileges", "--memory=128m", "--pids-limit=64", "--entrypoint=/usr/local/bin/deploy", s.image, "backup-worker", "__signal-adoption-probe")
+	raw, err := process.LimitedOutput(cmd, 30*time.Second, 1024)
+	if err != nil || strings.TrimSpace(string(raw)) != "backup-signal-adoption-v1" {
+		return fmt.Errorf("legacy Signal image lacks account adoption support; update it before migration")
 	}
 	return nil
 }

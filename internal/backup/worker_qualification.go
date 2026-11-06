@@ -141,8 +141,34 @@ func copyQualification(original map[string]bool) map[string]bool {
 }
 
 func activateWorker(c WorkerInstallation, state *backupState) error {
-	if err := requireLegacyNotificationOwner(state); err != nil {
+	return activateWorkerUsing(c, state, requireSharedBackupReportUnits, deploysource.QualifyRestrictedSource)
+}
+func activateWorkerUsing(c WorkerInstallation, state *backupState, verifyReports func(string, WorkerInstallation, *backupState, backupNotificationOwner) error, qualifySource func(deploysource.WorkerSource, deployconfig.WorkerTimeouts) error) error {
+	home := strings.TrimSuffix(state.directory, "/.local/state/deploy/backup-worker/state")
+	if home != state.directory {
+		root, e := safefs.Open(home)
+		if e != nil {
+			return e
+		}
+		defer root.Close()
+		lock, e := root.Lock(".local/state/deploy/locks/backup-worker-setup.lock", true, false)
+		if e != nil {
+			return e
+		}
+		defer lock.Close()
+	}
+	owner, err := currentSharedBackupOwner(state)
+	if err != nil {
 		return err
+	}
+	if owner != nil {
+		home := strings.TrimSuffix(state.directory, "/.local/state/deploy/backup-worker/state")
+		if state.directory != filepath.Join(home, ".local/state/deploy/backup-worker/state") {
+			return fmt.Errorf("shared activation requires canonical backup state")
+		}
+		if err = verifyReports(home, c, state, *owner); err != nil {
+			return err
+		}
 	}
 	if err := notification.ValidateMonitoringChecks(c.Policy.Monitoring); err != nil {
 		return err
@@ -161,11 +187,11 @@ func activateWorker(c WorkerInstallation, state *backupState) error {
 		return fmt.Errorf("activation requires a recent successful manual backup pass")
 	}
 	for _, source := range c.Sources {
-		if err := deploysource.QualifyRestrictedSource(source, c.Policy.Timeouts); err != nil {
+		if err := qualifySource(source, c.Policy.Timeouts); err != nil {
 			return err
 		}
 	}
-	units := []string{"deploy-backup-health.timer", "deploy-backup-notifier.timer", "deploy-backup-notifier.path", "deploy-backup-maintenance.timer", "deploy-backup.timer"}
+	units := workerActivationUnitsFor(owner != nil)
 	if _, err := process.LimitedOutput(exec.Command("systemctl", append([]string{"--user", "enable", "--now"}, units...)...), 30*time.Second, 4096); err != nil {
 		_, _ = process.LimitedOutput(exec.Command("systemctl", append([]string{"--user", "disable", "--now"}, units...)...), 30*time.Second, 4096)
 		return fmt.Errorf("worker timer activation failed; activation rolled back")
@@ -173,7 +199,7 @@ func activateWorker(c WorkerInstallation, state *backupState) error {
 	if err := state.put("installation", "active"); err != nil {
 		return err
 	}
-	fmt.Println("Backup, host-health and notifier timers activated.")
+	fmt.Println("Qualified backup, host-health and current reporting timers activated.")
 	return nil
 }
 

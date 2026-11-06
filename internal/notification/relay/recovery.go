@@ -31,8 +31,22 @@ func OpenRecoveryInbox(path, account string) (*RecoveryInbox, error) {
 	if err != nil {
 		return nil, err
 	}
+	return openRecoveryInbox(inbox)
+}
+
+// OpenInstalledRecoveryInbox retains the installed baseline while exposing only
+// offline reconciliation. Account service removal is owned by the managed caller.
+func OpenInstalledRecoveryInbox(ctx context.Context, path, pin string) (*RecoveryInbox, error) {
+	inbox, err := OpenInstalledInboxVerification(ctx, path, pin)
+	if err != nil {
+		return nil, err
+	}
+	return openRecoveryInbox(inbox)
+}
+
+func openRecoveryInbox(inbox *Inbox) (*RecoveryInbox, error) {
 	r := &RecoveryInbox{inbox: inbox}
-	err = inbox.transaction(context.Background(), func(tx *sql.Tx) error {
+	err := inbox.transaction(context.Background(), func(tx *sql.Tx) error {
 		var tables int
 		if err := tx.QueryRow("SELECT count(*) FROM sqlite_master WHERE name IN ('recovery_exports','recovery_records')").Scan(&tables); err != nil {
 			return err

@@ -77,12 +77,12 @@ func runBackupLegacyRollback(ctx context.Context, home string, c WorkerInstallat
 		if revoke {
 			return nil
 		}
-		hash, err := notification.TelegramCredentialHash(c.Policy.Notifications)
+		hash, err := notification.LegacyCredentialHash(c.Policy.Notifications, spec.Cutover.signalProfile())
 		if err != nil {
 			return err
 		}
 		if hash != spec.CredentialHash {
-			return fmt.Errorf("reviewed legacy Telegram credentials changed")
+			return fmt.Errorf("reviewed legacy provider credentials changed")
 		}
 		return nil
 	}
@@ -99,6 +99,11 @@ func runBackupLegacyRollback(ctx context.Context, home string, c WorkerInstallat
 	if err = deps.Services.Prepare(ctx, c, paths, spec.Cutover.HelperHash); err != nil {
 		return err
 	}
+	if spec.Cutover.Version == 4 {
+		if err = requireMigrationCycleCapability(ctx, deps.Services, paths, spec.Cutover.HelperHash); err != nil {
+			return err
+		}
+	}
 	if err = deps.Services.StopLegacy(ctx); err != nil {
 		return err
 	}
@@ -112,6 +117,10 @@ func runBackupLegacyRollback(ctx context.Context, home string, c WorkerInstallat
 		return err
 	}
 	defer state.Close()
+	rollbackFile, err := currentMigrationArtifact(state, legacyRollbackFile)
+	if err != nil {
+		return err
+	}
 	notifier, err := backupNotifierLease(state)
 	if err != nil {
 		return err
@@ -146,7 +155,7 @@ func runBackupLegacyRollback(ctx context.Context, home string, c WorkerInstallat
 	if err = dir.ReadJSON(backupCutoverFile, &cutover); err != nil {
 		return err
 	}
-	if notify.Hash(cutover.Spec) != notify.Hash(spec.Cutover) {
+	if matchCycleCutover(state, cutover, spec.Cutover) != nil {
 		return fmt.Errorf("rollback changed original cutover")
 	}
 	var revoked string
@@ -154,7 +163,7 @@ func runBackupLegacyRollback(ctx context.Context, home string, c WorkerInstallat
 		return fmt.Errorf("revoke and reconcile shared receipts before legacy rollback")
 	}
 	var intent backupLegacyRollbackIntent
-	err = dir.ReadJSON(legacyRollbackFile, &intent)
+	err = dir.ReadJSON(rollbackFile, &intent)
 	fresh := os.IsNotExist(err)
 	if err != nil && !fresh {
 		return err
@@ -169,6 +178,9 @@ func runBackupLegacyRollback(ctx context.Context, home string, c WorkerInstallat
 	request.Revoke, request.LegacyGeneration = true, spec.Generation
 	request.LegacyRevoke = revoke
 	err = deps.Managed(ctx, request, func(session install.ManagedProducerSession) error {
+		if err := requireBackupSignalMigration(ctx, home, c, spec.Cutover, session, revoke); err != nil {
+			return err
+		}
 		if !revoke {
 			if err := requireBackupLegacyReadablePaths(paths, session.Manifest().Paths.State); err != nil {
 				return err
@@ -205,12 +217,8 @@ func runBackupLegacyRollback(ctx context.Context, home string, c WorkerInstallat
 				if owner.Mode != "fenced" {
 					return fmt.Errorf("legacy ownership exists without rollback intent")
 				}
-				var unresolved int
-				if err = tx.QueryRow("SELECT count(*) FROM backup_notification_legacy l WHERE " + unresolvedLegacyPredicate).Scan(&unresolved); err != nil {
+				if err = requireResolvedLegacyRows(tx); err != nil {
 					return err
-				}
-				if unresolved != 0 {
-					return fmt.Errorf("resolve all held legacy outcomes before restoring legacy delivery")
 				}
 				evidence, err := readBackupCutoverEvidence(tx)
 				if err != nil {
@@ -313,7 +321,7 @@ func runBackupLegacyRollback(ctx context.Context, home string, c WorkerInstallat
 			}
 		}
 		if fresh {
-			if err = dir.WriteJSON(legacyRollbackFile, intent, false); err != nil {
+			if err = dir.WriteJSON(rollbackFile, intent, false); err != nil {
 				return err
 			}
 		}
@@ -369,8 +377,12 @@ func readRestoredLegacyOwner(state *backupState) (owner backupNotificationOwner,
 		return owner, err
 	}
 	defer d.Close()
+	rollbackFile, err := currentMigrationArtifact(state, legacyRollbackFile)
+	if err != nil {
+		return owner, err
+	}
 	var intent backupLegacyRollbackIntent
-	if err = d.ReadJSON(legacyRollbackFile, &intent); err != nil {
+	if err = d.ReadJSON(rollbackFile, &intent); err != nil {
 		return
 	}
 	var committed string
@@ -380,7 +392,7 @@ func readRestoredLegacyOwner(state *backupState) (owner backupNotificationOwner,
 	if committed != owner.LegacyHash || notify.Hash(intent) != committed || intent.Owner.Binding != owner.Binding || intent.Spec.Generation != owner.LegacyGeneration || !filepath.IsAbs(owner.LegacyState) || owner.LegacyState != intent.CanonicalState {
 		return owner, fmt.Errorf("legacy restoration authority changed")
 	}
-	hash, err := notification.TelegramCredentialHash(intent.Policy)
+	hash, err := notification.LegacyCredentialHash(intent.Policy, intent.Spec.Cutover.signalProfile())
 	if err != nil {
 		return owner, err
 	}
@@ -392,11 +404,11 @@ func readRestoredLegacyOwner(state *backupState) (owner backupNotificationOwner,
 }
 
 func requireResolvedLegacyRows(tx *sql.Tx) error {
-	var count int
-	if err := tx.QueryRow("SELECT count(*) FROM backup_notification_legacy l WHERE " + unresolvedLegacyPredicate).Scan(&count); err != nil {
+	held, err := backupHasHeldSources(tx)
+	if err != nil {
 		return err
 	}
-	if count != 0 {
+	if held {
 		return fmt.Errorf("legacy delivery has unresolved held rows")
 	}
 	return nil
@@ -411,12 +423,16 @@ func acquireBackupLegacyAuthority(state *backupState, c *WorkerInstallation) (ch
 		return nil, nil, err
 	}
 	if c != nil {
+		rollbackFile, err := currentMigrationArtifact(state, legacyRollbackFile)
+		if err != nil {
+			return nil, nil, err
+		}
 		var intent backupLegacyRollbackIntent
 		d, err := safefs.Open(state.directory)
 		if err != nil {
 			return nil, nil, err
 		}
-		err = d.ReadJSON(legacyRollbackFile, &intent)
+		err = d.ReadJSON(rollbackFile, &intent)
 		d.Close()
 		if err != nil {
 			return nil, nil, err

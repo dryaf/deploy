@@ -8,6 +8,7 @@ import (
 	"time"
 
 	notify "github.com/dryaf/deploy/internal/notification/protocol"
+	"github.com/dryaf/deploy/internal/safefs"
 )
 
 func backupNotificationMeta(tx *sql.Tx, key string, dest any) error {
@@ -15,7 +16,14 @@ func backupNotificationMeta(tx *sql.Tx, key string, dest any) error {
 	if err := tx.QueryRow("SELECT value FROM meta WHERE key=?", key).Scan(&raw); err != nil {
 		return err
 	}
-	return notify.Decode([]byte(raw), dest, 8192)
+	limit := 8192
+	if key == remigrationKey || key == migrationCyclePendingKey {
+		limit = safefs.MaxRecordBytes
+	}
+	if err := notify.Decode([]byte(raw), dest, limit); err != nil {
+		return fmt.Errorf("backup metadata %s: %w", key, err)
+	}
+	return nil
 }
 
 func backupNotificationOutage(tx *sql.Tx) (outage deliveryOutage, err error) {

@@ -75,3 +75,43 @@ func TestSignalRuntimeInstallSIGKILL(t *testing.T) {
 		}
 	}
 }
+
+func TestInstalledSignalNextRecoverySIGKILL(t *testing.T) {
+	for _, restored := range []bool{false} {
+		for _, point := range runtimeInstallBoundaries {
+			t.Run(fmt.Sprintf("%t/%s", restored, point), func(t *testing.T) {
+				_, src, prior, _ := managedInboxFixture(t, restored)
+				p := nextInstalledCursor(t, src, prior)
+				dst := t.TempDir()
+				if err := os.Chmod(dst, 0700); err != nil {
+					t.Fatal(err)
+				}
+				raw, err := json.Marshal(runtimeInstallCrash{src, dst, point, p})
+				if err != nil {
+					t.Fatal(err)
+				}
+				input := filepath.Join(t.TempDir(), "input.json")
+				if err = os.WriteFile(input, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command(os.Args[0], "-test.run=^TestSignalRuntimeInstallCrashHelper$", "-test.timeout=45s")
+				cmd.Env = append(os.Environ(), "DEPLOY_SIGNAL_RUNTIME_CRASH="+input)
+				out, err := process.LimitedOutput(cmd, 50*time.Second, 16384)
+				if err == nil || cmd.ProcessState == nil {
+					t.Fatal("missing crash", err, string(out))
+				}
+				status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+				if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+					t.Fatal("wrong exit", string(out))
+				}
+				one, err := InstallSignalRuntime(context.Background(), src, dst, p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = VerifyInstalledSignalRuntime(context.Background(), dst, one.InstallationHash); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}

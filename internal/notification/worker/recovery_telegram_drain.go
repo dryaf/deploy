@@ -9,6 +9,7 @@ import (
 
 	"github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/notification/provider"
+	"github.com/dryaf/deploy/internal/safefs"
 )
 
 // An empty provider response is a dated observation, not proof of complete
@@ -50,7 +51,8 @@ type telegramRecoveryPoller interface {
 // DrainTelegramRecovery is an internal recovery building block. It makes real
 // provider requests when invoked, so managed lifecycle code must stop all other
 // receivers first. The exclusive worker lease fences this installation's normal
-// receiver. No production CLI or automatic recovery activation invokes it.
+// receiver. The explicit pinned CLI requires separate receiver-stop acknowledgement;
+// ordinary activation never invokes this recovery drain.
 func DrainTelegramRecovery(ctx context.Context, path string, c Config, p provider.TelegramPoller) (TelegramDrainSummary, error) {
 	// Normalize against the recovery-bound configuration, never caller routing.
 	if c.Interaction == nil {
@@ -59,7 +61,20 @@ func DrainTelegramRecovery(ctx context.Context, path string, c Config, p provide
 	p.Destinations = c.Interaction.Destinations
 	return drainTelegramRecovery(ctx, path, c, p.Profile.Account, p, nil)
 }
+
+// DrainPinnedTelegramRecovery makes provider requests only after the exact
+// quarantine operation has been checked under the exclusive worker lease.
+func DrainPinnedTelegramRecovery(ctx context.Context, path string, c Config, operation string, p provider.TelegramPoller) (TelegramDrainSummary, error) {
+	if !safefs.ValidID(operation, "n") || c.Interaction == nil {
+		return TelegramDrainSummary{}, fmt.Errorf("Telegram drain requires exact operation and interactive configuration")
+	}
+	p.Destinations = c.Interaction.Destinations
+	return drainTelegramRecoveryPinned(ctx, path, c, p.Profile.Account, p, operation, nil)
+}
 func drainTelegramRecovery(ctx context.Context, path string, c Config, account string, p telegramRecoveryPoller, fault func(string) error) (summary TelegramDrainSummary, err error) {
+	return drainTelegramRecoveryPinned(ctx, path, c, account, p, "", fault)
+}
+func drainTelegramRecoveryPinned(ctx context.Context, path string, c Config, account string, p telegramRecoveryPoller, operation string, fault func(string) error) (summary TelegramDrainSummary, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	if p == nil {
@@ -70,6 +85,9 @@ func drainTelegramRecovery(ctx context.Context, path string, c Config, account s
 		return summary, err
 	}
 	defer r.Close()
+	if operation != "" && operation != r.journal.Operation {
+		return summary, fmt.Errorf("Telegram drain recovery operation changed")
+	}
 	s, err := r.openTelegramDrain(ctx, account)
 	if err != nil {
 		return summary, err

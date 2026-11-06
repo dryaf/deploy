@@ -20,6 +20,8 @@ import (
 func runRecoveryQuarantineCLI(args []string, out io.Writer) error {
 	f := flag.NewFlagSet("notification-worker recovery-prepare", flag.ContinueOnError)
 	local := f.Bool("local", false, "Prepare or resume offline local snapshot quarantine")
+	root := f.String("root", "", "Managed installation root (instead of --config and --state-dir)")
+	manifestHash := f.String("manifest-hash", "", "Exact deactivated installation manifest hash")
 	config := f.String("config", "", "Private runtime JSON path")
 	state := f.String("state-dir", "", "Existing offline worker state directory")
 	from := f.String("from", "", "Completed verified snapshot directory")
@@ -30,6 +32,25 @@ func runRecoveryQuarantineCLI(args []string, out io.Writer) error {
 	}
 	if !*local || f.NArg() != 0 || !safefs.ValidID(*id, "n") || !safefs.DigestPattern.MatchString(*hash) {
 		return fmt.Errorf("recovery preparation requires --local, exact --snapshot-id and --database-hash, and no positional arguments")
+	}
+	if *root != "" {
+		if *config != "" || *state != "" {
+			return fmt.Errorf("managed recovery uses --root and --manifest-hash, not separate runtime/state paths")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		v, err := newManagedInstaller().prepareManagedRecovery(ctx, *root, *manifestHash, *from, *id, *hash, ui.DryRun)
+		if err != nil {
+			return err
+		}
+		if ui.DryRun {
+			_, err = fmt.Fprintln(out, "[DRY] managed recovery pins validated; no services stopped or state changed")
+			return err
+		}
+		return json.NewEncoder(out).Encode(v)
+	}
+	if *manifestHash != "" {
+		return fmt.Errorf("--manifest-hash requires --root")
 	}
 	for _, p := range []string{*config, *state, *from} {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p || p == "/" || strings.ContainsAny(p, "\x00\r\n") {

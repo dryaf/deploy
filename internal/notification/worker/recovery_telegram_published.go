@@ -101,7 +101,7 @@ func readPublishedTelegramCursor(ctx context.Context, db *sql.DB, account string
 // Once a renewal starts, the old cutoff must not be advertised as current even
 // while that renewal is incomplete. A missing root index cannot hide its archive.
 func (s *publishedTelegramSession) requireOriginalTelegramHandoff() error {
-	if err := absentOriginalFile(s.root, renewalIndex(s.cursor.Drain.Account)); err != nil {
+	if err := absentOriginalFile(s.root, s.renewalIndex()); err != nil {
 		return fmt.Errorf("Telegram handoff has renewal state; inspect its exact completion: %w", err)
 	}
 	p, err := s.renewalParent(false)

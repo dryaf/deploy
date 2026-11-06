@@ -42,7 +42,15 @@ func (s SignalRecoverySpec) validate() error {
 // InstallSignalRecoveryWithService is the lifecycle integration point. The
 // service adapter must verify recovery-capable installed code and exact loaded
 // service/account binding. It never starts a receiver or changes gateway config.
-func InstallSignalRecoveryWithService(ctx context.Context, c Runtime, spec SignalRecoverySpec, svc signalaccount.RecoveryService) (result relay.SignalRuntimeInstallation, status signalaccount.RecoveryStatus, err error) {
+func InstallSignalRecoveryWithService(ctx context.Context, c Runtime, spec SignalRecoverySpec, svc signalaccount.RecoveryService) (relay.SignalRuntimeInstallation, signalaccount.RecoveryStatus, error) {
+	return installSignalRecoveryWithService(ctx, c, spec, svc, nil)
+}
+
+func InstallNextSignalRecoveryWithService(ctx context.Context, c Runtime, spec SignalRecoverySpec, parent signalaccount.RecoveryStatus, svc signalaccount.NextRecoveryService) (relay.SignalRuntimeInstallation, signalaccount.RecoveryStatus, error) {
+	return installSignalRecoveryWithService(ctx, c, spec, svc, &parent)
+}
+
+func installSignalRecoveryWithService(ctx context.Context, c Runtime, spec SignalRecoverySpec, svc signalaccount.RecoveryService, parent *signalaccount.RecoveryStatus) (result relay.SignalRuntimeInstallation, status signalaccount.RecoveryStatus, err error) {
 	if err = spec.validate(); err != nil {
 		return
 	}
@@ -107,7 +115,15 @@ func InstallSignalRecoveryWithService(ctx context.Context, c Runtime, spec Signa
 			return nil
 		}
 		var e error
-		status, e = signalaccount.FenceRecovery(ctx, spec.AccountState, request, svc, apply, verify)
+		if parent == nil {
+			status, e = signalaccount.FenceRecovery(ctx, spec.AccountState, request, svc, apply, verify)
+		} else {
+			next, ok := svc.(signalaccount.NextRecoveryService)
+			if !ok {
+				return fmt.Errorf("Signal service lacks next recovery support")
+			}
+			status, e = signalaccount.FenceNextRecovery(ctx, spec.AccountState, *parent, request, next, apply, verify)
+		}
 		return e
 	})
 	if err != nil {

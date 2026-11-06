@@ -46,6 +46,10 @@ func (s *Store) Handle(ctx context.Context, r protocol.Request) (out protocol.Re
 			h.LEDOperations, err = s.LEDOperations(ctx)
 		}
 		value = h
+	case "led.recovery-review":
+		value, err = s.ReviewRuntimeLEDRecovery(ctx)
+	case "led.recovery-clear":
+		value, err = s.ClearRuntimeLEDRecovery(ctx, r.EventID, r.PayloadHash)
 	case "producer.ownership":
 		value, err = s.OwnershipStatus(r.Producer, r.Generation)
 	case "message.enqueue":
@@ -93,7 +97,12 @@ func validateRequest(r protocol.Request) error {
 	c.Operation = ""
 	c.Expected = protocol.Identity{}
 	switch r.Operation {
-	case "system.ping", "system.status":
+	case "system.ping", "system.status", "led.recovery-review":
+	case "led.recovery-clear":
+		if len(r.EventID) == 0 || len(r.EventID) > 256 || !safefs.DigestPattern.MatchString(r.PayloadHash) {
+			return fmt.Errorf("exact inherited LED review required")
+		}
+		c.EventID, c.PayloadHash = "", ""
 	case "inspection.queue", "inspection.receipts":
 		if !r.Producer.Valid() || r.After < 0 || r.Limit < 1 || r.Limit > 128 {
 			return fmt.Errorf("invalid inspection range")

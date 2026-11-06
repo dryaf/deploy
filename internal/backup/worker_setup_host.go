@@ -46,6 +46,7 @@ type WorkerSetupRequest struct {
 }
 
 type WorkerSetupJournal struct {
+	Shared              *sharedWorkerSetup                             `json:"shared,omitempty"`
 	RecoveryNeeded      bool                                           `json:"recovery_needed,omitempty"`
 	ArchivePath         string                                         `json:"archive_path,omitempty"`
 	BeforeInstallation  string                                         `json:"before_installation,omitempty"`
@@ -206,10 +207,13 @@ func WorkerSetupCoordinator() error {
 		}
 	} else if err != nil {
 		return err
-	} else if journal.Schema != 1 {
+	} else if (journal.Schema != 1 || journal.Shared != nil) && (journal.Schema != 2 || journal.Shared == nil) {
 		return fmt.Errorf("unsupported setup journal")
 	}
-	if err = requireLegacyWorkerSetup(home, &journal); err != nil {
+	if err = prepareSharedWorkerSetup(home, root, stateRoot, &journal, request.Operation); err != nil {
+		return err
+	}
+	if err = requireWorkerSetupOwnership(home, &journal); err != nil {
 		return err
 	}
 	if journal.RecoveryNeeded {
@@ -536,7 +540,7 @@ func installSetupFile(home, stateRoot *safefs.Directory, journal *WorkerSetupJou
 }
 
 func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *WorkerSetupJournal, request WorkerSetupRequest, archive *backupArchive) error {
-	if err := requireLegacyWorkerSetup(home, journal); err != nil {
+	if err := requireWorkerSetupOwnership(home, journal); err != nil {
 		return err
 	}
 	c := WorkerInstallation{Image: request.Image, RelayImage: request.RelayImage, Schema: 1, WorkerID: journal.WorkerID, ArchiveID: journal.ArchiveID, Policy: request.Policy, Qualification: map[string]bool{}}
@@ -589,7 +593,11 @@ func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *
 		return err
 	}
 	c.Qualification["rootless_runtime"] = true
-	for file := range notificationMounts(c.Policy) {
+	mountPolicy := c.Policy
+	if journal.Shared != nil {
+		mountPolicy.Notifications = config.WorkerNotifications{}
+	}
+	for file := range notificationMounts(mountPolicy) {
 		if _, err = notification.ReadWorkerSecret(file); err != nil {
 			return fmt.Errorf("notification/monitoring secret unavailable: configure private worker-host files")
 		}
@@ -600,7 +608,7 @@ func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *
 		}
 	}
 	paths := WorkerUnitPaths{Home: home, Config: filepath.Join(home, ".config/deploy/backup-worker/runtime.json"), State: filepath.Join(home, ".local/state/deploy/backup-worker/state"), Archive: c.Policy.Storage.Path, Keys: filepath.Join(home, ".config/deploy/backup-worker/ssh"), RelayState: filepath.Join(home, ".local/share/deploy/backup-worker/signal"), RelaySocket: filepath.Join(home, ".local/state/deploy/backup-worker/relay")}
-	units, err := renderWorkerUnits(c, paths, request.Image, request.RelayImage)
+	units, err := workerSetupUnits(c, paths, journal)
 	if err != nil {
 		return err
 	}
@@ -665,7 +673,7 @@ func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *
 		return err
 	}
 	defer state.Close()
-	if err = requireLegacyNotificationOwner(state); err != nil {
+	if err = requireWorkerSetupOwner(state, journal); err != nil {
 		return err
 	}
 	if err = installRecoverySupervisor(home, root, stateRoot, journal); err != nil {
@@ -702,7 +710,7 @@ func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *
 				return err
 			}
 		}
-		if err = stopWorkerUnits(); err != nil {
+		if err = stopWorkerUnitsFor(journal.Shared != nil); err != nil {
 			return err
 		}
 	}

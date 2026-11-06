@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dryaf/deploy/internal/backup/notification"
 	deploysource "github.com/dryaf/deploy/internal/backup/source"
 	"github.com/dryaf/deploy/internal/notification/client"
 	"github.com/dryaf/deploy/internal/notification/install"
@@ -75,12 +76,21 @@ func runBackupCutoverCLI(args []string, out io.Writer) error {
 			}
 			decisions[r.ID] = backupCutoverDecision{notify.Hash(r), disposition, "Review legacy history; never infer unsent from zero attempts"}
 		}
+		var signalSelectors, signalAccount string
+		if c.Policy.Notifications.Signal != nil {
+			signalSelectors, signalAccount, err = notification.LegacySignalSelectors(c.Policy.Notifications)
+			if err != nil {
+				return err
+			}
+		}
 		return json.NewEncoder(out).Encode(struct {
-			ConfigHash   string                           `json:"config_hash"`
-			EvidenceHash string                           `json:"evidence_hash"`
-			Evidence     backupCutoverEvidence            `json:"evidence"`
-			Decisions    map[string]backupCutoverDecision `json:"decisions"`
-		}{notify.Hash(c), notify.Hash(evidence), evidence, decisions})
+			ConfigHash      string                           `json:"config_hash"`
+			EvidenceHash    string                           `json:"evidence_hash"`
+			Evidence        backupCutoverEvidence            `json:"evidence"`
+			Decisions       map[string]backupCutoverDecision `json:"decisions"`
+			SignalSelectors string                           `json:"signal_selectors,omitempty"`
+			SignalAccount   string                           `json:"signal_account_selector,omitempty"`
+		}{notify.Hash(c), notify.Hash(evidence), evidence, decisions, signalSelectors, signalAccount})
 	}
 	d, err := safefs.Open(filepath.Dir(*specFile))
 	if err != nil {
