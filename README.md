@@ -1,5 +1,12 @@
 # Deploy Tool 🚀
 
+Implementation status and remaining acceptance gates are tracked in
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md), with the original acceptance
+criteria mapped in [ACCEPTANCE_MATRIX.md](ACCEPTANCE_MATRIX.md). The initialized Telegram
+backup profile supports [reviewed held-outcome release and canonical legacy
+rollback](examples/notification-worker/BACKUP_CUTOVER.md). Broader recovered/Signal,
+command/LED activation and external qualification remain incomplete.
+
 **Deploy Go applications and existing registry images to a Linux VPS with rootless Podman and Quadlet.**
 
 This tool replaces fragile Makefiles and complex Bash scripts with a single, declarative CLI. It uses **Podman**, **Quadlet**, and **systemd** for controlled service restarts, health checks, automatic rollback, and infrastructure management.

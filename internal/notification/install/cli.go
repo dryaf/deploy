@@ -182,6 +182,9 @@ func decodeRuntime(data []byte) (c Runtime, err error) {
 }
 
 func RunCLI(args []string) error {
+	if len(args) > 0 && args[0] == "__managed-legacy-probe" {
+		return runManagedCLI(args)
+	}
 	if len(args) == 0 {
 		return fmt.Errorf("usage: notification-worker <init|serve|status|setup|update|migrate-schema|migrate-led|adopt-recovery|adopt-signal|supervise-signal|migrate-signal-profiles|signal-service-setup|signal-service-resume|signal-service-inspect|signal-service-uninstall|upgrade-helper|renew-telegram|rollback|resume|uninstall|installation-status|qualification-template|qualify|qualification-status|activation-review|activate-delivery|deactivate-delivery|queue-inspect|producer-retire|receipts-inspect|receipts-compact|message-review|message-decide|message-decision-status|snapshot|snapshot-verify|recovery-prepare|recovery-status|recovery-checkpoint|recovery-checkpoint-verify|recovery-publication-prepare|recovery-publication-verify|recovery-publish|recovery-signal-install|recovery-signal-handoff|recovery-signal-podman-handoff|signal-verification-prepare|signal-verification-serve|recovery-telegram-check|led-migrate|recovery-led-review|recovery-led-preserve|recovery-led-adopt|recovery-led-handoff|recovery-led-import-cleanup|recovery-fence-producer|recovery-review|recovery-decide|notify-test|signal-inbox-init|signal-link-status|signal-service-status|signal-recovery-status|signal-link-resolve|__signal-relay> --local [options]; Signal/recovery/command activation is not available")
 	}

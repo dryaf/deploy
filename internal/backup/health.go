@@ -114,12 +114,19 @@ func collectWorkerHealth(c WorkerInstallation, archivePath string, state *backup
 		if err != nil {
 			return err
 		}
+		if owner.Mode == "legacy" {
+			deliveryUnits = []string{"deploy-backup-legacy.timer", "deploy-backup-legacy.service"}
+			return nil
+		}
 		if owner.Mode != "shared" {
 			return fmt.Errorf("notification ownership handoff is pending")
 		}
 		shared = true
 		return nil
 	})
+	if ownerErr == nil && owner.Mode == "legacy" {
+		ownerErr = requireLegacyDeliveryOwner(state)
+	}
 	if ownerErr != nil {
 		delivery = true
 		fail("notification ownership is unavailable or pending")

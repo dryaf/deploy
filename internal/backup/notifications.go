@@ -13,6 +13,7 @@ import (
 	"github.com/dryaf/deploy/internal/backup/notification"
 	"github.com/dryaf/deploy/internal/backup/protocol"
 	"github.com/dryaf/deploy/internal/config"
+	notify "github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/safefs"
 )
 
@@ -225,7 +226,7 @@ func drainNotificationOutbox(ctx context.Context, state *backupState, c WorkerIn
 }
 
 func drainNotificationOutboxWith(ctx context.Context, state *backupState, c WorkerInstallation, send notification.Sender, now time.Time, fault func(string) error) (err error) {
-	if err = requireLegacyNotificationOwner(state); err != nil {
+	if err = requireLegacyDeliveryOwner(state); err != nil {
 		return err
 	}
 	check, unlock, err := lockLegacyDelivery(ctx, state)
@@ -233,6 +234,11 @@ func drainNotificationOutboxWith(ctx context.Context, state *backupState, c Work
 		return err
 	}
 	defer unlock()
+	authorityCheck, releaseAuthority, err := acquireBackupLegacyAuthority(state, &c)
+	if err != nil {
+		return err
+	}
+	defer releaseAuthority()
 	journal, err := openLegacyDeliveryJournal(ctx, state)
 	if err != nil {
 		return err
@@ -319,7 +325,7 @@ func drainNotificationOutboxWith(ctx context.Context, state *backupState, c Work
 			if err = check(); err != nil {
 				return err
 			}
-			if err = requireLegacyNotificationOwner(state); err != nil {
+			if err = authorityCheck(); err != nil {
 				return err
 			}
 			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < 11*time.Second {
@@ -338,7 +344,7 @@ func drainNotificationOutboxWith(ctx context.Context, state *backupState, c Work
 			if err = check(); err != nil {
 				return err
 			}
-			if err = requireLegacyNotificationOwner(state); err != nil {
+			if err = authorityCheck(); err != nil {
 				return err
 			}
 			if err = backupTransferTx(ctx, state, func(tx *sql.Tx) error {
@@ -489,7 +495,7 @@ func runNotifier(ctx context.Context, c WorkerInstallation, state *backupState) 
 		return err
 	}
 	defer lock.Close()
-	if err = requireLegacyNotificationOwner(state); err != nil {
+	if err = requireLegacyDeliveryOwner(state); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
@@ -505,7 +511,27 @@ func runNotifier(ctx context.Context, c WorkerInstallation, state *backupState) 
 	if err = enqueueDeliveryCatchup(state, now, summary); err != nil {
 		return err
 	}
-	if err = drainNotificationOutbox(ctx, state, c, notification.Send, now); err != nil {
+	sender := notification.Sender(notification.Send)
+	var restored string
+	if e := state.get("notification_legacy_rollback", &restored); e == nil {
+		d, e := safefs.Open(state.directory)
+		if e != nil {
+			return e
+		}
+		var intent backupLegacyRollbackIntent
+		e = d.ReadJSON(legacyRollbackFile, &intent)
+		d.Close()
+		if e != nil {
+			return e
+		}
+		if notify.Hash(intent) != restored {
+			return fmt.Errorf("legacy sender intent differs from its committed credential binding")
+		}
+		sender = notification.PinnedTelegramSender(intent.Spec.CredentialHash)
+	} else if e != sql.ErrNoRows {
+		return e
+	}
+	if err = drainNotificationOutbox(ctx, state, c, sender, now); err != nil {
 		return err
 	}
 	// Serialize pause/resume with the bounded coverage heartbeat.

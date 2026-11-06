@@ -155,7 +155,7 @@ func runSharedBackupReportWith(ctx context.Context, c WorkerInstallation, state 
 			return err
 		}
 		var held bool
-		if err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM backup_notification_legacy WHERE disposition='held')").Scan(&held); err != nil {
+		if err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM backup_notification_legacy l WHERE " + unresolvedLegacyPredicate + ")").Scan(&held); err != nil {
 			return err
 		}
 		failed = failed || held

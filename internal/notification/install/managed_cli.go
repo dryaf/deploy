@@ -18,6 +18,12 @@ import (
 )
 
 func runManagedCLI(args []string) error {
+	if args[0] == "__managed-legacy-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), LegacyOwnership: 1})
+	}
 	if args[0] == "__managed-delivery-probe" || args[0] == "__managed-signal-profiles-probe" || args[0] == "__managed-signal-supervision-probe" || args[0] == "__managed-signal-verification-probe" || args[0] == "__managed-probe" || args[0] == "__managed-migration-probe" || args[0] == "__managed-led-migration-probe" || args[0] == "__managed-recovery-probe" || args[0] == "__managed-telegram-renewal-probe" || args[0] == "__managed-helper-upgrade-probe" {
 		if len(args) != 1 {
 			return fmt.Errorf("probe takes no arguments")
@@ -323,11 +329,11 @@ func serveManaged(ctx context.Context, root, revision string) error {
 	if s.Identity() != m.Identity {
 		return fmt.Errorf("managed state identity changed")
 	}
-	if err = s.RequireInactiveProducers(); err != nil {
-		return err
-	}
 	if m.Mode == "delivery" {
 		return serveManagedDelivery(ctx, d, s, c, m, lease, nil)
+	}
+	if err = s.RequireInactiveProducers(); err != nil {
+		return err
 	}
 	c, err = managedEffectiveRuntime(d, m, c)
 	if err != nil {

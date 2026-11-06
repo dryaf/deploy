@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dryaf/deploy/internal/config"
 	"github.com/dryaf/deploy/internal/testutil"
 	"github.com/dryaf/deploy/internal/testutil/configfixture"
 )
@@ -39,6 +40,14 @@ func TestSharedReportUnitsVerifyWithSystemd(t *testing.T) {
 	testutil.Must(t, err)
 	units["deploy-backup-notifier.path"] = legacy["deploy-backup-notifier.path"]
 	units["deploy-backup-notifier.service"] = "[Service]\nType=oneshot\nExecStart=" + unitQuote(helper) + "\n"
+	restored, err := renderBackupLegacyUnits(paths, WorkerInstallation{Policy: policy})
+	testutil.Must(t, err)
+	if !strings.Contains(restored["deploy-backup-legacy.service"], "backup-worker __notify") || !strings.Contains(restored["deploy-backup-legacy.service"], reportUnitPathQuote("-"+paths.Keys)) {
+		t.Fatal("legacy unit lost command or source-key isolation")
+	}
+	for name, body := range restored {
+		units[name] = body
+	}
 	var files []string
 	for name, body := range units {
 		path := filepath.Join(root, name)
@@ -53,6 +62,23 @@ func TestSharedReportUnitsVerifyWithSystemd(t *testing.T) {
 	if _, err = renderBackupReportUnits(paths, policy, []string{home}); err == nil {
 		t.Fatal("credential denial hid required runtime paths")
 	}
+}
+
+func TestLegacyNativeUnitsRefuseInaccessibleRequiredPaths(t *testing.T) {
+	p := WorkerUnitPaths{Home: "/home/worker", Config: "/home/worker/runtime.json", State: "/home/worker/state", Keys: "/home/worker/keys", RelayState: "/home/worker/signal", Archive: "/archive"}
+	for _, denied := range []string{p.Keys, p.RelayState, p.Archive} {
+		for _, path := range []string{denied, denied + "/required"} {
+			c := WorkerInstallation{}
+			c.Policy.Notifications.Telegram = &config.WorkerTelegram{TokenFile: path, ChatIDFile: "/home/worker/chat"}
+			if _, err := renderBackupLegacyUnits(p, c); err == nil {
+				t.Fatal("rendered an unreadable credential", path)
+			}
+			if err := requireBackupLegacyReadablePaths(p, path); err == nil {
+				t.Fatal("accepted inaccessible canonical state", path)
+			}
+		}
+	}
+	testutil.Must(t, requireBackupLegacyReadablePaths(p, "/archive-other/gateway", "/home/worker/keys-other/token"))
 }
 
 func TestSharedReportHealthInspectsSelectedUnitsAndAPIFreshness(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 )
 
 type managedCapabilities struct {
+	LegacyOwnership      int `json:"legacy_ownership,omitempty"`
 	Delivery             int `json:"delivery,omitempty"`
 	SignalProfiles       int `json:"signal_profiles,omitempty"`
 	SignalService        int `json:"signal_service,omitempty"`
@@ -165,6 +166,7 @@ func probeManagedCapability(ctx context.Context, d *safefs.Directory, name, hash
 		return err
 	}
 	if c.Version != managedVersion || c.Schema != worker.StorageSchemaVersion() ||
+		(probe == "__managed-legacy-probe" && c.LegacyOwnership != 1) ||
 		(probe == "__managed-migration-probe" && c.SchemaMigration != 1) ||
 		(probe == "__managed-led-migration-probe" && c.LEDMappingMigration != 1) ||
 		(probe == "__managed-recovery-probe" && c.RecoveryVerification != 1) ||

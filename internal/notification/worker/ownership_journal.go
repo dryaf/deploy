@@ -81,7 +81,7 @@ func validOwnership(o ownership) bool {
 			return false
 		}
 		switch state {
-		case "active":
+		case "active", "legacy-active":
 			if o.Active != generation {
 				return false
 			}
@@ -94,7 +94,7 @@ func validOwnership(o ownership) bool {
 			return false
 		}
 	}
-	return o.Active == "" || o.Generations[o.Active] == "active" || o.Generations[o.Active] == "draining"
+	return o.Active == "" || o.Generations[o.Active] == "active" || o.Generations[o.Active] == "legacy-active" || o.Generations[o.Active] == "draining"
 }
 
 func sameOwnership(a, b ownership) bool {
@@ -111,13 +111,14 @@ func validOwnershipRecoveryBinding(b recoveryBinding) bool {
 }
 
 func applyOwnershipTransition(before ownership, event ownershipTransition) (ownership, error) {
-	if !validOwnership(before) || (event.Schema < 1 || event.Schema > 4) || event.Identity != before.Identity || event.Producer != before.Producer ||
+	if !validOwnership(before) || (event.Schema < 1 || event.Schema > 5) || event.Identity != before.Identity || event.Producer != before.Producer ||
 		before.Revision == math.MaxUint64 || event.Revision != before.Revision+1 || event.Previous != before.History || event.BeforeHash != protocol.Hash(before) {
 		return ownership{}, fmt.Errorf("invalid ownership transition identity or history")
 	}
 	recovery := event.Operation == "recover" || event.Operation == "recovery-fence"
 	retire := event.Operation == "retire"
 	if (event.Schema == 2 || event.Schema == 3) != recovery || (event.Recovery != nil) != recovery ||
+		(event.Schema == 5) != (event.Operation == "legacy-activate" || event.Operation == "legacy-revoke") ||
 		(event.Schema == 4) != retire || (event.Retirement != nil) != retire ||
 		(before.Retirement != nil && !recovery) ||
 		(event.Operation == "recovery-fence" && event.Schema != 3) ||
@@ -187,6 +188,21 @@ func applyOwnershipTransition(before ownership, event ownershipTransition) (owne
 			return ownership{}, fmt.Errorf("generation cannot activate")
 		}
 		after.Active, after.Generations[g] = g, "active"
+	case "legacy-activate":
+		if before.Active != "" || before.Generations[g] != "" {
+			return ownership{}, fmt.Errorf("legacy restoration requires a new inactive generation")
+		}
+		for _, state := range before.Generations {
+			if state != "revoked" {
+				return ownership{}, fmt.Errorf("legacy restoration requires all shared generations revoked")
+			}
+		}
+		after.Active, after.Generations[g] = g, "legacy-active"
+	case "legacy-revoke":
+		if before.Active != g || before.Generations[g] != "legacy-active" {
+			return ownership{}, fmt.Errorf("legacy generation is not active")
+		}
+		after.Active, after.Generations[g] = "", "revoked"
 	case "drain":
 		if before.Generations[g] != "active" && before.Generations[g] != "staged" {
 			return ownership{}, fmt.Errorf("generation cannot drain")
@@ -299,6 +315,9 @@ func (s *Store) checkOwnershipHistoryTail(p protocol.Producer, maximum uint64) e
 func (s *Store) commitOwnership(current *ownership, operation, generation string) error {
 	event := ownershipTransition{Schema: 1, Identity: current.Identity, Producer: current.Producer,
 		Revision: current.Revision + 1, Previous: current.History, BeforeHash: protocol.Hash(current), Operation: operation, Generation: generation}
+	if operation == "legacy-activate" || operation == "legacy-revoke" {
+		event.Schema = 5
+	}
 	if operation == "adopt" {
 		baseline := *current
 		baseline.Generations = maps.Clone(current.Generations)

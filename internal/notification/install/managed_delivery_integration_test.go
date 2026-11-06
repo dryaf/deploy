@@ -125,6 +125,37 @@ func TestManagedDeliveryNativeExecutable(t *testing.T) {
 		t.Fatal("active resume", err)
 	}
 	c := mustRuntime(t, active.Paths.Config)
+	// Exercise the real immutable binary/helper probes and runtime restart after
+	// schema-5 ownership publication. Managers remain simulated; no provider I/O.
+	legacy := ManagedProducerRequest{Root: spec.Root, ManifestHash: protocol.Hash(active), Producer: c.Worker.Producers[0].Producer, Route: c.Worker.Producers[0].Routes[0], Generation: "one"}
+	if err := i.withManagedProducer(ctx, legacy, func(s ManagedProducerSession) error { return s.Activate() }); err != nil {
+		t.Fatal("native active producer restart", err)
+	}
+	legacy.Revoke = true
+	if err := i.withManagedProducer(ctx, legacy, func(s ManagedProducerSession) error { return s.Revoke(ctx) }); err != nil {
+		t.Fatal("native producer revocation", err)
+	}
+	legacy.LegacyGeneration = "native-legacy-one"
+	var legacySession ManagedProducerSession
+	if err := i.withManagedProducer(ctx, legacy, func(s ManagedProducerSession) error { legacySession = s; return s.RestoreLegacy() }); err != nil {
+		log, _ := os.ReadFile(spec.Root + "/../runtime-output")
+		t.Fatal("native legacy activation", err, string(log))
+	}
+	if err := legacySession.RestoreLegacy(); err == nil {
+		t.Fatal("closed session retained legacy authority")
+	}
+	check, release, err := worker.AcquireLegacyAuthority(active.Paths.State, active.Identity, legacy.Producer, legacy.LegacyGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := check(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	legacy.LegacyRevoke = true
+	if err := i.withManagedProducer(ctx, legacy, func(s ManagedProducerSession) error { return s.RevokeLegacy() }); err != nil {
+		t.Fatal("native legacy revocation", err)
+	}
 	if err := os.Remove(c.Providers["telegram"].TokenFile); err != nil {
 		t.Fatal(err)
 	}

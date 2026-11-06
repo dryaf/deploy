@@ -21,6 +21,9 @@ func recordSharedBackupHealthProbe(state *backupState, c WorkerInstallation, pro
 		if err != nil {
 			return err
 		}
+		if owner.Mode == "legacy" {
+			return nil
+		}
 		if owner.Mode != "shared" {
 			return fmt.Errorf("notification ownership handoff is pending")
 		}

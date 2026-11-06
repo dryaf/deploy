@@ -114,6 +114,12 @@ func runBackupCutover(ctx context.Context, home string, c WorkerInstallation, sp
 		return err
 	}
 	defer dir.Close()
+	if f, e := dir.Open(legacyRollbackFile, os.O_RDONLY, 0); e == nil {
+		f.Close()
+		return fmt.Errorf("legacy restoration has its own retained lifecycle; use notification-rollback --revoke")
+	} else if !os.IsNotExist(e) {
+		return e
+	}
 	boundary := func(at string) error {
 		if err := attemptCheck(); err != nil {
 			return err

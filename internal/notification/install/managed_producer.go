@@ -14,17 +14,25 @@ import (
 // ManagedProducerRequest pins one producer, without changing any other gate or
 // the installation revision. Revocation deliberately needs no live credentials.
 type ManagedProducerRequest struct {
-	Root         string            `json:"root"`
-	ManifestHash string            `json:"manifest_hash"`
-	Producer     protocol.Producer `json:"producer"`
-	Generation   string            `json:"generation"`
-	Route        string            `json:"route"`
-	Revoke       bool              `json:"revoke,omitempty"`
+	Root             string            `json:"root"`
+	ManifestHash     string            `json:"manifest_hash"`
+	Producer         protocol.Producer `json:"producer"`
+	Generation       string            `json:"generation"`
+	Route            string            `json:"route"`
+	Revoke           bool              `json:"revoke,omitempty"`
+	LegacyGeneration string            `json:"legacy_generation,omitempty"`
+	LegacyRevoke     bool              `json:"legacy_revoke,omitempty"`
 }
 
 func (r ManagedProducerRequest) Validate() error {
 	if !managedPath(r.Root) || !safefs.DigestPattern.MatchString(r.ManifestHash) || !r.Producer.Valid() || !protocol.ValidToken(r.Generation) || !protocol.ValidToken(r.Route) {
 		return fmt.Errorf("producer cutover requires exact manifest, producer, generation and route")
+	}
+	if r.LegacyGeneration != "" && (!r.Revoke || !protocol.ValidToken(r.LegacyGeneration) || r.LegacyGeneration == r.Generation) {
+		return fmt.Errorf("legacy restoration requires a distinct generation and revoked shared owner")
+	}
+	if r.LegacyRevoke && r.LegacyGeneration == "" {
+		return fmt.Errorf("legacy revocation requires its exact generation")
 	}
 	return nil
 }
@@ -40,6 +48,10 @@ type ManagedProducerSession interface {
 	Activate() error
 	Revoke(context.Context) error
 	Receipts(context.Context, protocol.Cursor) (worker.ReceiptPage, error)
+	RequireLegacyUnsent(context.Context, protocol.Message) error
+	RequireLegacyAccepted(context.Context, protocol.Message) error
+	RestoreLegacy() error
+	RevokeLegacy() error
 }
 
 type managedProducerSession struct {
@@ -117,6 +129,45 @@ func (s *managedProducerSession) Receipts(ctx context.Context, cursor protocol.C
 	return s.store.Receipts(ctx, cursor, 128)
 }
 
+func (s *managedProducerSession) RequireLegacyUnsent(ctx context.Context, m protocol.Message) error {
+	if err := s.check(); err != nil {
+		return err
+	}
+	if s.request.LegacyGeneration == "" || m.Producer != s.request.Producer || m.Generation != s.request.Generation {
+		return fmt.Errorf("message is outside the legacy restoration scope")
+	}
+	return s.store.RequireLegacyUnsent(ctx, m)
+}
+
+func (s *managedProducerSession) RestoreLegacy() error {
+	if err := s.check(); err != nil {
+		return err
+	}
+	if s.request.LegacyGeneration == "" || s.request.LegacyRevoke {
+		return fmt.Errorf("no reviewed legacy generation")
+	}
+	return s.store.RestoreLegacy(s.request.Producer, s.request.Generation, s.request.LegacyGeneration)
+}
+func (s *managedProducerSession) RequireLegacyAccepted(ctx context.Context, m protocol.Message) error {
+	if err := s.check(); err != nil {
+		return err
+	}
+	if s.request.LegacyGeneration == "" || m.Producer != s.request.Producer || m.Generation != s.request.Generation {
+		return fmt.Errorf("message outside legacy scope")
+	}
+	return s.store.RequireLegacyAccepted(ctx, m)
+}
+
+func (s *managedProducerSession) RevokeLegacy() error {
+	if err := s.check(); err != nil {
+		return err
+	}
+	if !s.request.LegacyRevoke {
+		return fmt.Errorf("no explicit legacy revocation")
+	}
+	return s.store.RevokeLegacy(s.request.Producer, s.request.LegacyGeneration)
+}
+
 func WithManagedProducer(ctx context.Context, r ManagedProducerRequest, fn func(ManagedProducerSession) error) error {
 	return newManagedInstaller().withManagedProducer(ctx, r, fn)
 }
@@ -185,6 +236,18 @@ func (i managedInstaller) withManagedProducer(ctx context.Context, r ManagedProd
 	if err = i.probeDelivery(ctx, d, m); err != nil {
 		return err
 	}
+	if r.LegacyGeneration != "" {
+		for _, artifact := range []struct{ name, hash string }{{"releases/" + m.Revision + "/deploy", m.BinaryHash}, {managedHelperName(m), m.HelperHash}} {
+			if err = probeManagedCapability(ctx, d, artifact.name, artifact.hash, "__managed-legacy-probe"); err != nil {
+				return err
+			}
+		}
+		if !r.LegacyRevoke {
+			if err = checkDeliveryAdmission(d, m, c, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
+	}
 	if err = i.inspectDelivery(ctx, m, r.Revoke); err != nil {
 		return err
 	}
@@ -240,7 +303,7 @@ func (i managedInstaller) withManagedProducer(ctx context.Context, r ManagedProd
 		if err := s.RequireManagedDeliveryOwner(deliveryOwner(m, c), m.DeliveryOwnerHash); err != nil {
 			return err
 		}
-		if !r.Revoke {
+		if !r.Revoke || r.LegacyGeneration != "" && !r.LegacyRevoke {
 			return checkDeliveryAdmission(d, m, c, time.Now().UTC())
 		}
 		return nil

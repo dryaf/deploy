@@ -52,7 +52,7 @@ func (s *Store) OwnershipStatus(p protocol.Producer, g string) (status protocol.
 		if state := o.Generations[g]; state != "" {
 			status.State = state
 		}
-		status.Active = o.Active == g && status.State == "active"
+		status.Active = o.Active == g && (status.State == "active" || status.State == "legacy-active")
 		return nil
 	})
 	return

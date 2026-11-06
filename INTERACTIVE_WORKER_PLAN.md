@@ -1,5 +1,28 @@
 # Implementation plan for interactive worker commands
 
+Reconciliation/rollback update (2026-11-06): the consolidated current work list is
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md); it is not a measured 90%
+completion claim. `backup-worker notification-resolve` now records exact,
+audited unsent/retry decisions for held legacy sources. Duplicate-risk
+acknowledgement is required for uncertain retries; original rows, attempts and
+dispositions remain retained. Independent file/SQL evidence, stale-review checks
+and canonical acceptance protect release and coverage.
+`notification-rollback` can restore initialized Telegram delivery after shared
+revocation and outcome reconciliation, using a new canonical `legacy-active`
+generation and separate native sender units. Shared dispatch cannot use that
+generation; retained canonical leases protect legacy I/O. Explicit revocation
+tombstones it. Capable pinned binaries are required before cutover; uncertain
+shared outcomes, missing/compacted required evidence and later generation/helper
+migrations remain explicit limitations. The managed startup guard now applies
+inactive-producer enforcement to verification mode, allowing admitted delivery
+mode to restart with active producer generations. Native restoration pins the
+reviewed Telegram credentials and fails closed on canonical identity/recovery
+changes. The per-criterion evidence map is [ACCEPTANCE_MATRIX.md](ACCEPTANCE_MATRIX.md).
+See [the operational guide](examples/notification-worker/BACKUP_CUTOVER.md).
+Recovered Telegram/Signal, command/LED production admission, later recovery epochs
+and external qualification remain open. Earlier dated checkpoints below describe
+the state before this update.
+
 Managed backup cutover update (2026-11-06): the initialized outbound-only
 Telegram profile now has an executable per-producer handoff and report-service
 migration. `backup-worker notification-cutover --local --review` prints pinned

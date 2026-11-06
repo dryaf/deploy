@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dryaf/deploy/internal/config"
+	notify "github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/safefs"
 )
 
@@ -65,6 +66,44 @@ func notificationHTTPClient() *http.Client {
 }
 
 func Send(ctx context.Context, provider string, policy config.WorkerNotifications, event NotificationEvent) (DeliveryAttempt, error) {
+	return sendWithTelegramPin(ctx, provider, policy, event, "")
+}
+
+// PinnedTelegramSender checks the exact values used to construct the request,
+// so replacing a credential between admission and Send cannot change its target.
+func PinnedTelegramSender(hash string) Sender {
+	return func(ctx context.Context, provider string, policy config.WorkerNotifications, event NotificationEvent) (DeliveryAttempt, error) {
+		if hash == "" || provider != "telegram" {
+			return DeliveryAttempt{}, fmt.Errorf("pinned Telegram delivery required")
+		}
+		return sendWithTelegramPin(ctx, provider, policy, event, hash)
+	}
+}
+
+func telegramCredentialHash(policy config.WorkerNotifications, token, chat string) string {
+	return notify.Hash(struct {
+		Policy      config.WorkerNotifications
+		Token, Chat string
+	}{policy, token, chat})
+}
+
+// TelegramCredentialHash returns a combined fingerprint, never secret values.
+func TelegramCredentialHash(policy config.WorkerNotifications) (string, error) {
+	if policy.Telegram == nil || policy.Primary != "telegram" || policy.Fallback != "" || policy.Signal != nil {
+		return "", fmt.Errorf("legacy restoration requires Telegram without fallback")
+	}
+	token, err := ReadWorkerSecret(policy.Telegram.TokenFile)
+	if err != nil {
+		return "", err
+	}
+	chat, err := ReadWorkerSecret(policy.Telegram.ChatIDFile)
+	if err != nil {
+		return "", err
+	}
+	return telegramCredentialHash(policy, token, chat), nil
+}
+
+func sendWithTelegramPin(ctx context.Context, provider string, policy config.WorkerNotifications, event NotificationEvent, pin string) (DeliveryAttempt, error) {
 	event = boundedNotificationEvent(event)
 	attempt := DeliveryAttempt{Provider: provider, At: time.Now().UTC()}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -84,6 +123,9 @@ func Send(ctx context.Context, provider string, policy config.WorkerNotification
 		chat, err := ReadWorkerSecret(policy.Telegram.ChatIDFile)
 		if err != nil {
 			return attempt, err
+		}
+		if pin != "" && telegramCredentialHash(policy, token, chat) != pin {
+			return attempt, fmt.Errorf("reviewed Telegram credentials changed")
 		}
 		for _, r := range token {
 			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == ':' || r == '_' || r == '-') {

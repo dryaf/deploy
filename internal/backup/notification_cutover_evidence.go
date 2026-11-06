@@ -115,7 +115,10 @@ func backupSourceHeld(tx *sql.Tx, event notification.NotificationEvent) (bool, e
 			return false, err
 		}
 		if held {
-			return true, nil
+			_, released, err := readBackupLegacyResolution(tx, id)
+			if err != nil || !released {
+				return true, err
+			}
 		}
 	}
 	return false, nil

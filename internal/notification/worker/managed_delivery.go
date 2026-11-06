@@ -100,6 +100,10 @@ func (s *Store) EnrollManagedDelivery(o ManagedDeliveryOwner) error {
 }
 
 func (s *Store) RequireManagedDeliveryOwner(o ManagedDeliveryOwner, hash string) error {
+	return s.requireManagedDeliveryOwner(o, hash, s.identity)
+}
+
+func (s *Store) requireManagedDeliveryOwner(o ManagedDeliveryOwner, hash string, identity protocol.Identity) error {
 	if err := s.checkRetirementLease(); err != nil {
 		return err
 	}
@@ -115,7 +119,7 @@ func (s *Store) RequireManagedDeliveryOwner(o ManagedDeliveryOwner, hash string)
 		return fmt.Errorf("managed delivery state directory changed")
 	}
 
-	if o.validate() != nil || protocol.Hash(o) != hash || o.Identity != s.identity || o.ConfigHash != protocol.Hash(s.config) {
+	if o.validate() != nil || protocol.Hash(o) != hash || o.Identity != identity || o.ConfigHash != protocol.Hash(s.config) {
 		return fmt.Errorf("managed delivery owner does not bind this instance")
 	}
 	var current ManagedDeliveryOwner

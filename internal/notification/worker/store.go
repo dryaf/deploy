@@ -24,6 +24,8 @@ type Store struct {
 	verificationOnly       bool // Immutable for this open instance; set before exposing any runtime API.
 	installationRevision   string
 	recoveryCommitHash     string
+	recoveryProof          RecoveryCheckpointProof
+	recoveryPublication    RecoveryPublicationCommit
 	telegramRenewalID      string
 	signalVerificationHash string
 	ledMu                  sync.Mutex         // Serializes LED attempts, independent of database state lock.
@@ -179,13 +181,14 @@ func openStore(path string, c Config, create bool, fault func(string) error, req
 	if recoveryCommit != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
-		_, recoveryProof, err = verifyCompletedPublication(ctx, d, s.lease, c, recoveryCommit)
+		s.recoveryPublication, recoveryProof, err = verifyCompletedPublication(ctx, d, s.lease, c, recoveryCommit)
 		if err != nil {
 			return nil, err
 		}
 		if recoveryProof.After != expected {
 			return nil, fmt.Errorf("managed recovery identity mismatch")
 		}
+		s.recoveryProof = recoveryProof
 		want := RecoveryVerification{1, recoveryCommit, protocol.Hash(c), recoveryProof.Before, recoveryProof.After, true}
 		for _, name := range []string{recoveryVerificationIntent, recoveryVerificationComplete} {
 			ok, e := verificationRecord(d, name, want)

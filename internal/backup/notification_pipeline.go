@@ -150,8 +150,8 @@ func freezeBackupNotificationPass(tx *sql.Tx, e backupNotificationEvaluation) ([
 		return nil, err
 	}
 	rows, err := tx.Query("SELECT record,created FROM outbox b WHERE "+backupPendingSourcePredicate+` AND due<=?
- AND NOT EXISTS (SELECT 1 FROM backup_notification_legacy l WHERE l.source=b.id AND l.disposition='held')
- AND NOT EXISTS (SELECT 1 FROM json_each(b.record,'$.members') member JOIN backup_notification_legacy l ON l.source=member.value WHERE l.disposition='held')
+ AND NOT EXISTS (SELECT 1 FROM backup_notification_legacy l WHERE l.source=b.id AND `+unresolvedLegacyPredicate+`)
+ AND NOT EXISTS (SELECT 1 FROM json_each(b.record,'$.members') member JOIN backup_notification_legacy l ON l.source=member.value WHERE `+unresolvedLegacyPredicate+`)
  AND NOT EXISTS (SELECT 1 FROM backup_notification_sources s JOIN notification_exports e ON e.id=s.event WHERE s.source=b.id AND e.state NOT IN ('expired','superseded','cancelled','provider_accepted'))
  ORDER BY created,id LIMIT 32`, snap.EvaluatedAt.UTC().Format(eventTimeLayout))
 	if err != nil {

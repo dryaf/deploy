@@ -6,13 +6,15 @@ cd "$(dirname "$0")/.."
 # slower under the race detector than ordinary tests. Bound the complete suite
 # explicitly instead of relying on Go's ten-minute package default.
 go test -race -timeout=90m ./internal/notification/...
-go test -race ./internal/backup -run '^TestBackup(Shared|LEDRecovery|ReconciliationCLI|RecoveryHandoff)'
+go test -race ./internal/backup -run '^Test(Backup(Shared|LEDRecovery|ReconciliationCLI|RecoveryHandoff|Cutover|LegacyResolution|LegacyRollback)|SharedReport)'
 go test -race -tags=notificationintegration -count=1 -timeout=90s \
   -run '^TestBackup(LEDRecovery|Reconciliation|RecoveryHandoff)NativeWorkflow$' ./internal/backup
 go test -race -tags=notificationintegration -count=1 -timeout=60s \
   -run '^Test(PinnedMockDaemon|InheritedLEDOwnershipPinnedDaemon|ProducerRetirementPinnedDaemon|LEDFaultClearPinnedDaemon|RecoveryLEDCleanupPinnedDaemon|RecoveryLEDPreservationAndAdoptionPinnedDaemon|VerificationModePinnedDaemon)$' \
   ./internal/notification/led ./internal/notification/worker
-go test -race -tags=notificationintegration -count=1 -timeout=120s \
+# This group builds/runs native helpers and audits retained recovery proofs.
+# The aggregate exceeds two minutes under -race even without live providers.
+go test -race -tags=notificationintegration -count=1 -timeout=15m \
   -run '^Test(ManagedNativeExecutableLifecycle|ManagedDeliveryNativeExecutable|ActivationReviewNativeExecutable|ManagedRecoveryNativeExecutable|ManagedSignalNativeExecutable|SignalServiceNativeExecutable|ManagedTelegramNativeExecutable|ManagedSchemaNativeExecutable|ManagedLEDMappingNativeExecutable|SignalLinkNativeExecutable|SignalRuntimeInstallNativeExecutable|SignalRecoveryFenceNativeExecutable|SignalVerificationNativeExecutable|NativeSignalHandoffNativeExecutable|NativeSignalExecPrivateBus|PodmanSignalQuadletContract|TelegramHandoffCheckNativeExecutable|TelegramRenewalCheckNativeExecutable|ProducerRetirementNativeExecutable|RecoveryFenceNativeExecutable|RecoveryQuarantineNativeExecutable|RecoveryStatusNativeExecutable|RecoveryCheckpointNativeExecutable|RecoveryCheckpointVerifyNativeExecutable|RecoveryPublicationNativeExecutable|RecoveryPublicationVerifyNativeExecutable|RecoveryPublishNativeExecutable|RecoveryLEDPreservationAndAdoptionNativeExecutable)$' ./internal/notification/install
 
 # The opt-in test owns a separate VFS store and builds only a local scratch

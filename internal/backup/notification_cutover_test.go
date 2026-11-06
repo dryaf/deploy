@@ -28,7 +28,17 @@ import (
 
 type cutoverFixtureServices struct {
 	stopped, started bool
+	legacyStarted    bool
 	units            map[string]string
+}
+
+func (s *cutoverFixtureServices) PrepareLegacy(context.Context, WorkerInstallation, WorkerUnitPaths, string) error {
+	s.legacyStarted = false
+	return nil
+}
+func (s *cutoverFixtureServices) StartLegacy(context.Context) error {
+	s.legacyStarted = true
+	return nil
 }
 
 func (s *cutoverFixtureServices) Prepare(context.Context, WorkerInstallation, WorkerUnitPaths, string) error {
@@ -54,6 +64,7 @@ type cutoverFixtureSession struct {
 	p      notify.Producer
 	g      string
 	config worker.Config
+	legacy string
 }
 
 func (s *cutoverFixtureSession) Manifest() install.ManagedManifest { return s.m }
@@ -89,6 +100,16 @@ func (s *cutoverFixtureSession) Revoke(ctx context.Context) error {
 func (s *cutoverFixtureSession) Receipts(ctx context.Context, c notify.Cursor) (worker.ReceiptPage, error) {
 	return s.store.Receipts(ctx, c, 128)
 }
+func (s *cutoverFixtureSession) RequireLegacyUnsent(ctx context.Context, m notify.Message) error {
+	return s.store.RequireLegacyUnsent(ctx, m)
+}
+func (s *cutoverFixtureSession) RequireLegacyAccepted(ctx context.Context, m notify.Message) error {
+	return s.store.RequireLegacyAccepted(ctx, m)
+}
+func (s *cutoverFixtureSession) RestoreLegacy() error {
+	return s.store.RestoreLegacy(s.p, s.g, s.legacy)
+}
+func (s *cutoverFixtureSession) RevokeLegacy() error { return s.store.RevokeLegacy(s.p, s.legacy) }
 func backupCutoverFixture(t *testing.T) (string, WorkerInstallation, backupCutoverSpec, backupCutoverDependencies, *cutoverFixtureSession) {
 	t.Helper()
 	state, c, _ := legacyAttemptFixture(t)
@@ -101,6 +122,11 @@ func backupCutoverFixture(t *testing.T) (string, WorkerInstallation, backupCutov
 	c.Policy.Notifications.Signal = nil
 	c.Policy.Notifications.Primary = "telegram"
 	home := t.TempDir()
+	c.Policy.Notifications.Telegram = &config.WorkerTelegram{}
+	c.Policy.Notifications.Telegram.TokenFile = filepath.Join(home, "telegram-token")
+	c.Policy.Notifications.Telegram.ChatIDFile = filepath.Join(home, "telegram-chat")
+	testutil.Must(t, os.WriteFile(c.Policy.Notifications.Telegram.TokenFile, []byte("123:fixture-token"), 0600))
+	testutil.Must(t, os.WriteFile(c.Policy.Notifications.Telegram.ChatIDFile, []byte("456"), 0600))
 	paths := backupCutoverPaths(home, c)
 	testutil.Must(t, os.MkdirAll(filepath.Dir(paths.State), 0700))
 	testutil.Must(t, os.MkdirAll(filepath.Join(home, ".local/state/deploy/locks"), 0700))
@@ -127,13 +153,14 @@ func backupCutoverFixture(t *testing.T) (string, WorkerInstallation, backupCutov
 	gateway, err := worker.Open(gatewayPath, cfg, true)
 	testutil.Must(t, err)
 	t.Cleanup(func() { gateway.Close() })
-	session := &cutoverFixtureSession{m: install.ManagedManifest{Root: gatewayPath, Identity: gateway.Identity(), UnitDirectory: filepath.Join(home, ".config/systemd/user"), Paths: install.ServicePaths{Socket: filepath.Join(home, "api.sock")}}, store: gateway, p: p, g: "cutover-one", config: cfg}
+	session := &cutoverFixtureSession{m: install.ManagedManifest{Root: gatewayPath, Identity: gateway.Identity(), UnitDirectory: filepath.Join(home, ".config/systemd/user"), Paths: install.ServicePaths{State: gatewayPath, Socket: filepath.Join(home, "api.sock")}}, store: gateway, p: p, g: "cutover-one", config: cfg}
 	spec := backupCutoverSpec{Version: 1, Managed: install.ManagedProducerRequest{Root: gatewayPath, ManifestHash: notify.Hash("manifest"), Producer: p, Generation: session.g, Route: "ops"}, HelperHash: strings.Repeat("a", 64), ConfigHash: notify.Hash(c), EvidenceHash: notify.Hash(evidence), Decisions: map[string]backupCutoverDecision{}}
 	for _, row := range evidence.Rows {
 		spec.Decisions[row.ID] = backupCutoverDecision{notify.Hash(row), "unsent", "fixture independent old-history evidence"}
 	}
 	services := &cutoverFixtureServices{}
 	deps := backupCutoverDependencies{Services: services, Managed: func(ctx context.Context, r install.ManagedProducerRequest, fn func(install.ManagedProducerSession) error) error {
+		session.legacy = r.LegacyGeneration
 		if !services.stopped {
 			return errors.New("legacy sender not stopped")
 		}

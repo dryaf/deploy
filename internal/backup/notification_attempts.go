@@ -27,6 +27,7 @@ type legacyDeliveryHead struct {
 // The exact envelope and authority survive changes to the outbox's current
 // report text, batching, retirement and its bounded provider-attempt summary.
 type legacyDeliveryIntent struct {
+	Generation string                         `json:"generation,omitempty"`
 	ID         string                         `json:"id"`
 	Archive    string                         `json:"archive"`
 	Writer     string                         `json:"writer"`
@@ -235,8 +236,13 @@ func (j *legacyDeliveryJournal) reserve(ctx context.Context, s *backupState, c W
 		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM meta WHERE key='notification_owner')").Scan(&fenced); err != nil {
 			return err
 		}
+		generation := ""
 		if fenced {
-			return fmt.Errorf("legacy notification delivery is fenced")
+			owner, err := readBackupNotificationOwner(tx)
+			if err != nil || owner.Mode != "legacy" {
+				return fmt.Errorf("legacy notification delivery is fenced")
+			}
+			generation = owner.LegacyGeneration
 		}
 		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM outbox WHERE id=? AND accepted IS NULL AND covered_by IS NULL)", event.ID).Scan(&eligible); err != nil || !eligible {
 			return err
@@ -254,6 +260,7 @@ func (j *legacyDeliveryJournal) reserve(ctx context.Context, s *backupState, c W
 		}
 		event.Message = notification.NotificationEnvelope(event.Message)
 		in = legacyDeliveryIntent{ID: id, Archive: control.ArchiveID, Writer: control.WriterID, Epoch: control.Epoch, ConfigHash: control.ConfigHash, PolicyHash: notify.Hash(c.Policy.Notifications), Provider: provider, PreparedAt: time.Now().UTC(), Event: event}
+		in.Generation = generation
 		next, err = appendLegacyDeliveryRecord(tx, j.head, legacyDeliveryRecord{Intent: &in})
 		return err
 	})
@@ -354,7 +361,20 @@ func requireBackupUnsentSource(tx *sql.Tx, event notification.NotificationEvent)
 	if held {
 		return fmt.Errorf("backup source %s is held by legacy outcome reconciliation", event.ID)
 	}
+	exists, err := notificationTable(tx, "backup_notification_legacy")
+	if err != nil {
+		return err
+	}
+	if exists {
+		released, err := requireBackupLegacyRetry(tx, event)
+		if err != nil || released {
+			return err
+		}
+	}
+	return requireBackupUnattemptedSource(tx, event)
+}
 
+func requireBackupUnattemptedSource(tx *sql.Tx, event notification.NotificationEvent) error {
 	if len(event.Attempts) != 0 {
 		return fmt.Errorf("backup source %s has legacy attempts; explicit delivery reconciliation required", event.ID)
 	}

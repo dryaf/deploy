@@ -17,9 +17,10 @@ import (
 )
 
 type backupCutoverManager struct {
-	home   string
-	legacy map[string]string
-	run    func(context.Context, string, ...string) ([]byte, error)
+	home         string
+	legacy       map[string]string
+	legacyNative map[string]string
+	run          func(context.Context, string, ...string) ([]byte, error)
 }
 
 func cutoverCommand(ctx context.Context, name string, args ...string) ([]byte, error) {

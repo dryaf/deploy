@@ -1,10 +1,217 @@
 # Implementation handoff — 2026-11-06
 
-Work resumed through 2026-11-06 at the user's request. The latest checkpoint below
-supersedes the original pause and its immediate next-step list. Preserve the
-working tree; no implementation commit has been created.
+Work paused on 2026-11-06 at the user's explicit request to go to bed. Preserve
+the working tree; no implementation commit has been created. Resume only when
+the user asks. The pause checkpoint below supersedes earlier next-step lists.
 
-## Latest checkpoint: managed per-producer cutover and backup report migration
+## Pause checkpoint — 2026-11-06
+
+The requested 90% target has **not** been reached or measured as achieved.
+`IMPLEMENTATION_STATUS.md` and `ACCEPTANCE_MATRIX.md` retain the consolidated
+inventory and 84 original acceptance criteria. Implementation and manual live
+qualification are separate. The user has no live messenger credentials and will
+perform live testing manually after implementation; do not request credentials
+again or block software implementation on them.
+
+Completed tranche: held legacy-source reconciliation (`notification-resolve`),
+restricted canonical Telegram legacy rollback/revocation (`notification-rollback`),
+credential and ownership-history fencing, native service path preflight, and the
+managed delivery restart fix. Details and completed test evidence follow below.
+
+**Unfinished draft at pause:** recovered managed delivery ownership (N8).
+Three files contain newly started work that has **not been compiled, formatted,
+tested, or integrated into the installer**:
+
+- `internal/notification/worker/managed_delivery_recovery.go` (new): draft
+  `ManagedDeliveryRecovery`, verification-only enrollment with independent
+  intent/SQL/completion anchors, original-source ownership import, retained
+  recovery-anchor checks, and `OpenManagedRecoveredDelivery`.
+- `internal/notification/worker/store.go`: retain the publication and checkpoint
+  proof already audited by managed recovery startup for the draft's checks.
+- `internal/notification/worker/managed_delivery.go`: factor the owner check into
+  an internal helper accepting an explicit identity, preserving the existing
+  public check's original behavior.
+
+Design intent: preserve the permanent original delivery owner, link it explicitly
+to the recovered identity and publication commit, and prove it from both the
+independent owner file and retained original database. This should permit a
+snapshot older than enrollment without inventing ownership. Recovery adoption
+must remain verification-only; fresh qualification and explicit producer
+activation remain separate. No installer guards were relaxed and no production
+recovered activation path is wired yet. This draft is not accepted implementation.
+
+On resume:
+
+1. Review and compile the three draft files first. Audit retained lease/directory
+   identity, crash boundaries, source-proof freshness, missing/conflicting anchors,
+   and original SQL owner import. Add focused tests before exposing the API.
+2. Integrate an explicit recovery binding into the managed manifest, adoption
+   journal, artifact checks, capability probes, store opening and runtime admission.
+   Preserve the original owner hash. Do not simply remove existing recovery fences.
+3. Prove adoption/retry/deactivation/restart with old snapshots, independent anchor
+   loss, revoked/staged producers and changed recovery evidence. Start with outbound
+   Telegram; interactive handoff, Signal, later recovery epochs and LED/command
+   admission remain separate unfinished work in the inventory.
+4. Finish the remaining implementation and rerun applicable automated gates on
+   the final tree. The prior code fingerprint below predates this new draft.
+
+The long full-repository race run (exec session 44102) was explicitly interrupted
+for this pause with Ctrl-C and exited 1; it did **not** complete. Its partial output
+is `/tmp/deploy-90-final-race.log`. Completed package lines are useful evidence
+only for those packages; unfinished installer/worker packages are not a pass.
+That run also predates the newest ownership/path guards and the N8 draft.
+No background implementation work is intentionally left running.
+
+All changes remain local and uncommitted. No real provider messages, production
+deployment, real user service installation or physical LED changes were performed.
+
+## Completed tranche: acceptance inventory, held-source reconciliation and canonical legacy rollback
+
+Continued on 2026-11-06 after the user authorized the proposed path toward 90%.
+No percentage or production-readiness claim is made. The consolidated inventory
+and execution order are in `IMPLEMENTATION_STATUS.md`; it supersedes duplicated
+old remaining-work lists while the plans retain their normative contracts.
+`ACCEPTANCE_MATRIX.md` maps the 84 existing acceptance/completion entries to
+implementation evidence and remaining subcases. It defines a stable review
+denominator without counting deferred checks, local fixtures or partial workflows
+as full acceptance.
+No real provider, user service installation, remote host or LED was touched.
+No commit was created.
+
+User clarification (2026-11-06): live messenger credentials are unavailable. The
+user will perform live tests manually after implementation. Continue implementation
+and automated fixtures; do not request live credentials again or treat their
+absence as a blocker for software work. Keep manual qualification separate.
+
+Implemented:
+
+- `backup-worker notification-resolve --local --review --source ID` and
+  `--apply --spec ABS`: a five-minute exact review, original/current row and
+  journal/owner pins, immutable intent and SQL decision. `unsent` cannot override
+  attempts/reservations; `retry` requires duplicate-risk acknowledgement. Known
+  acceptance refuses retry. Original held rows, payload/attempt evidence and
+  dispositions remain unchanged; old helpers still hold them. Fresh report
+  evaluation and canonical eligible receipt import establish subsequent coverage.
+- Exact decision retries preserve committed results. Missing independent files,
+  stale reviews, contradictory evidence and replaced leases refuse progress.
+  Domain report-text/due refreshes after intent publication can resume without
+  weakening attempt or batch-membership pins. No historical acceptance assertion
+  or policy waiver is invented.
+- `backup-worker notification-rollback --local --apply --spec ABS`: after exact
+  shared revocation/receipt reconciliation, restore the initialized Telegram-only
+  profile under a new canonical `legacy-active` generation. Every shared export
+  needs canonical no-attempt proof or retained eligible acceptance. Unresolved held
+  rows, uncertain attempts, missing history and missing required compacted receipt
+  evidence block restoration. The rollback retains setup/notifier/attempt and
+  gateway operation/installation/worker leases through publication.
+- Separate native `deploy-backup-legacy` service/timer/path run the legacy notifier
+  with messenger/monitor credentials, but without source keys, Signal account
+  storage or archive access. Old sender containers and shared report triggers stay
+  stopped. Generation-bound legacy reservations retain a shared canonical ownership
+  lease across bounded I/O; revocation needs its exclusive counterpart. Shared
+  dispatch cannot grant a legacy generation. Another producer's queue/gate survives.
+- `notification-rollback --revoke --spec ABS` stops the native sender and durably
+  tombstones the new generation, including cancellation after an interrupted
+  prepared restoration. Exact resumes preserve evidence; revoked generations are
+  not reused. Incompatible old helpers remain fenced. The retained gateway runtime
+  and helper must advertise ownership support; restoration requires fresh delivery
+  admission, whereas revocation does not require credentials/current qualification.
+- `notification-rollback --review --spec ABS` binds the exact native Telegram
+  policy and combined credential fingerprint without printing secret values.
+  Restoration, restarted native senders and the actual HTTP request constructor
+  reject changed credentials/destinations. Missing credentials still permit revoke.
+  Native authority checks also reject changed/missing canonical identity and
+  recovery/publication/schema-migration gates before the producer owner has moved.
+  Each native pass audits the complete canonical ownership prefix and directory
+  tail, refusing rolled-back heads even when a missing adjacent record hides a
+  later retained revocation.
+- Native service preflight rejects credentials or canonical state beneath its
+  inaccessible source-key, Signal-state or archive roots. Canonical-state conflicts
+  fail before durable rollback intent or generation activation.
+- A native executable test exposed a pre-existing startup bug: `__managed-serve`
+  required inactive producers before selecting delivery mode. The guard now stays
+  on verification startup; admitted delivery can restart with active shared or
+  legacy generations. The native fixture exercises both, real binary/helper probes,
+  closed-session refusal, legacy revocation and subsequent verification lifecycle.
+- Updated runbook, README, three worker plans and the notification integration
+  runner. The original image deployment plan is included in the acceptance inventory.
+
+Validation (local fixtures only):
+
+- Complete ordinary repository suite passed in
+  `/tmp/deploy-90-final-ordinary.log` (backup 37.397s, deployment 188.942s,
+  installer 335.032s, worker 205.476s). The complete race suite was interrupted
+  at the user's pause; partial output is in `/tmp/deploy-90-final-race.log`.
+  Do not count its unfinished packages as passed. Neither broad run covers the
+  new, untested recovered-delivery draft described above.
+- Final focused race checks passed in `/tmp/deploy-90-final-focused.log`
+  (backup 15.412s, sender 1.019s, worker 2.430s). These cover the two final guards
+  added after the broad suites started: canonical recovery/identity fencing and
+  the sender's exact committed credential binding. Resolution/cutover/rollback,
+  held-report behavior and credential-loss revocation are included. Real SIGKILL
+  covers two resolution and three rollback boundaries.
+- The final independent native ownership-history audit passed under race in
+  `/tmp/deploy-90-ownership-history.log` (worker 2.381s, backup 4.416s), including
+  missing-prefix and hidden-revocation regressions. This audit was added after
+  the broad suite and native integration group started.
+- Final native path preflight/unit rendering/rollback race checks passed in
+  `/tmp/deploy-90-native-paths.log` (4.454s), including proof that an inaccessible
+  canonical state cannot reach durable intent or acquire a generation.
+- The full offline native notification integration group passed under race in
+  `/tmp/deploy-90-native-integration.log` (454.810s). Its runner timeout is now
+  15 minutes instead of two minutes. Managers are simulated; real executable,
+  helper, socket, recovery and capability checks run. Native backup recovery
+  workflows passed in `/tmp/deploy-90-backup-native.log` (9.162s).
+- The opt-in offline rootless Podman Signal handoff passed under race in
+  `/tmp/deploy-90-podman-offline.log` (103.589s). It built a local scratch fixture
+  in private VFS storage, exercised real container/account-lease handoff, and
+  cleaned up its own image/container. It used no registry, live Signal account
+  or actual user service; it does not qualify messenger delivery.
+- Pinned offline LED mock integration passed in `/tmp/deploy-90-led-mock.log`
+  (LED 2.310s, worker 9.915s), using clean revision
+  `fbe71f9f6edd108beceb01d568a0b17b5a6eb85c`. These are not physical LED tests.
+- Final `go vet ./...` passed (`/tmp/deploy-90-final-vet.log`), the Linux ARM64
+  cross-build passed (`/tmp/deploy-90-arm64`), and shell syntax/`git diff --check`
+  passed. Cross-building does not qualify native ARM64 behavior.
+- The disposable image/Gotenberg gate was attempted and blocked before container
+  startup: its pinned base could not be fetched from `quay.io` (timeout, then DNS
+  failure), and the exact image was absent from local cache. Log:
+  `/tmp/deploy-90-image-isolated.log`, exit 125. Backup-rootless and VM harnesses
+  require that same base; they remain unqualified, not passed.
+  Later host `curl`/NSS checks reached the registry, but the harness retry and
+  a `GODEBUG=netdns=cgo` retry still failed at Podman's registry DNS lookup
+  (both exit 125). Logs: `/tmp/deploy-90-image-isolated-retry.log` and
+  `/tmp/deploy-90-image-system-resolver.log`. No image pin or host DNS setting
+  was changed to turn this into a pass.
+- Process/socket tests used the approved unrestricted test environment because
+  sandbox Unix-socket operations fail. No live-provider, actual user-manager,
+  external-monitor, native ARM64 or physical-LED qualification was performed.
+
+The completed tranche's evidence identifies base
+`67d3609a5bd1a86d5d7845e1aff57bc1d0976cb3` plus its then-current
+33 changed/new Go and script files. Its content fingerprint was
+`27826af904f0d959e8c691d73718c596f8237508baf213d08a43b26519bda5a5` (SHA-256
+of sorted path, NUL, eight-byte big-endian content length and bytes, including
+untracked files). Markdown changes are excluded from that code fingerprint.
+This fingerprint predates the three draft N8 files and does not identify the
+entire working tree at pause.
+
+Remaining work:
+
+1. These commands support exact decisions/restoration within the current initialized
+   Telegram profile. Historical acceptance assertions/waivers, unresolved shared
+   ambiguity, subsequent legacy/shared generations, old-helper upgrades across an
+   existing cutover and general backup setup/update while managed remain open.
+2. Continue recovered Telegram admission, managed Signal account/runtime handoff,
+   legacy conversation/relay adoption, verifier upgrades and later recovery epochs.
+3. Finish managed command/LED admission, worker-wide LED reconciliation and remaining
+   configuration/UID/socket/history transitions. Audit original deployment and backup
+   acceptance scenarios against implementation, not checkpoint count.
+4. Real disposable user-systemd/rootless, VM end-to-end recovery and configured
+   provider/monitor qualification still need final evidence. Native ARM64 and
+   physical LEDs remain user-deferred. Do not count those as passed or claim 90%.
+
+## Previous checkpoint: managed per-producer cutover and backup report migration
 
 Implemented on 2026-11-06 at the user's explicit request. All earlier uncommitted
 work is preserved. No production service, provider, remote host or LED was touched;
