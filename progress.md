@@ -80,6 +80,9 @@ Remaining work includes:
 - Public-field acceptance, release bundles, onboarding/prerequisites and guidance.
 - The separately requested application workflow for local image builds, direct SSH
   transfer, signing and remote verification; it remains planned, not implemented.
+- The planned uptime/telemetry feature: bounded probes and history with explicit
+  thresholds, then rolling anomaly baselines, then scoped OTLP ingestion. It
+  reuses notification/LED infrastructure and remains outside this milestone.
 - Final milestone regular tests, then race tests, applicable isolated host/VM
   checks and release automation.
 

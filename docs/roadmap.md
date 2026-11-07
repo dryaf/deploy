@@ -507,8 +507,76 @@ and run it with the existing `deploy release <environment>` command.
   Include signed deployment, archive/metadata tampering, missing signatures,
   wrong signing keys, key rotation and rollback verification.
 
+## Planned monitoring: uptime, embedded telemetry and anomaly detection
+
+Requested 2026-11-07; not implemented yet and outside the current worker usability
+milestone. Design this alongside the planned uptime worker so availability checks
+and optional telemetry share one monitoring model. A Raspberry Pi may monitor
+local services and remote VPS applications without requiring a cloud service or
+a separate observability stack. Final worker and YAML field names remain to be
+designed.
+
+### Phase 1: probes, bounded history and explicit thresholds
+
+- [ ] Configure monitoring through the existing version-3 `server.yaml` inventory
+  and short worker commands. Use home-directory defaults with optional path
+  overrides and private credential-file references.
+- [ ] Add HTTP availability and latency probes, plus narrowly authorized remote
+  observations for service/container memory, disk space and SQLite DB/WAL file
+  sizes. Reuse named SSH hosts and verified host keys, with bounded timeouts and
+  concurrency. Define an allowlisted helper protocol for remote observations.
+- [ ] Reuse notification-worker producer interfaces, routes, incident/recovery
+  handling and LED ownership. Keep provider credentials and LED arbitration in
+  the existing gateway; recovering one probe must not clear another fault or
+  another client's output.
+- [ ] Store samples in an embedded SQLite database with stable host/probe/series
+  identity, units, observation time and result status. Batch writes, impose hard
+  database/WAL and free-space limits, and prune retention in bounded batches.
+  Define acceptable sample loss separately from durable incident/delivery state;
+  consider WAL with `synchronous=NORMAL` only for loss-tolerant sample history.
+- [ ] Support explicit thresholds with consecutive-breach and recovery rules,
+  deduplicated alerts and reminders. Treat probe failure, stale/missing data and
+  confirmed recovery as distinct states. Monitor the telemetry worker's own
+  freshness and define behavior during network outages and restarts.
+- [ ] Treat WAL size as an observation, not proof of failed checkpointing: combine
+  size, sustained growth and disk-space thresholds. Do not checkpoint or modify
+  application databases as a side effect of monitoring.
+- [ ] Benchmark on Raspberry Pi/ARM64 and a small VPS using a declared probe
+  count, interval and retention. Treat under 25 MiB RAM as an initial target;
+  report worker RSS, SQLite cache, helper-process peaks, CPU and disk writes.
+  Document detection delay: three breaches at 60-second intervals take roughly
+  2–3 minutes to detect, plus notification delivery time.
+
+### Phase 2: rolling baselines and anomaly rules
+
+- [ ] Add rolling baselines with minimum sample count and baseline age, explicit
+  warm-up status, zero-variance handling and numerically stable calculations.
+  Score against prior eligible observations before incorporating the current
+  sample. Keep absolute thresholds active during warm-up and sustained incidents.
+- [ ] Offer Z-score and multiplier rules, and evaluate robust alternatives such
+  as median/MAD or percentile thresholds for suitable metrics. Define baseline
+  update rules so sustained degradation is not silently learned as healthy.
+- [ ] Account for deployment changes, maintenance windows, missing observations
+  and periodic workloads. Define separate trigger/recovery thresholds and
+  consecutive counts; emit recovery only after confirmed healthy observations.
+- [ ] Add bounded aggregates for longer history and explainable alerts showing
+  the observed value, units, baseline, applicable rule and observation period.
+  Test spikes, gradual degradation, outages, cold starts, zero baselines,
+  deployment changes, restart/resume, alert deduplication and recovery.
+
+### Phase 3: scoped OpenTelemetry ingestion
+
+- [ ] Define and document a supported OTLP/HTTP metrics subset before claiming
+  compatibility. Handle metric/resource identity, units, timestamps, counter
+  resets, cumulative/delta temporality and histogram buckets; do not reduce
+  histograms to averages when tail-latency rules need their distribution.
+- [ ] Provide explicit listener configuration, authentication/access controls,
+  request-size, rate and series-cardinality limits, and backpressure. Include
+  malformed payloads, unsupported metric types and resource-exhaustion tests.
+
 ## Later product work
 
 Real vulnerability and uptime workers remain outside the current implementation
 milestone. Existing synthetic producers exercise their shared interfaces; they
-are not production scanners or monitors.
+are not production scanners or monitors. The monitoring phases above define the
+planned uptime/telemetry work; the vulnerability worker remains separate.
