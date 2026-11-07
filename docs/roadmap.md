@@ -507,6 +507,76 @@ and run it with the existing `deploy release <environment>` command.
   Include signed deployment, archive/metadata tampering, missing signatures,
   wrong signing keys, key rotation and rollback verification.
 
+## Planned private networking: overlay endpoints and service binding
+
+Requested 2026-11-07; not implemented yet. Add optional overlay endpoint metadata
+to the existing version-3 `server.yaml` inventory and explicit policies for using
+it. Keep connection selection and listener exposure separate. Final field names,
+including whether to use `mesh_ip` or a broader endpoint declaration, remain to be
+designed.
+
+For a fresh installation today, `servers.<name>.host` can already contain a
+reachable WireGuard/Tailscale address. Explicit IP bindings can also be supplied
+through application `quadlet.ports`. The planned feature adds coordinated policy,
+validation and diagnostics when public and private endpoints coexist; it is not
+a prerequisite for the first Raspberry Pi setup.
+
+### Phase 1: explicit private endpoint selection
+
+- [ ] Add optional overlay addresses with documented IPv4/IPv6 behavior. Adding
+  an address alone must not silently change existing connection choices.
+- [ ] Define separate operator-to-server and worker-to-source transport choices.
+  A required-private policy fails when the selected overlay endpoint is
+  unavailable. Any public fallback, including bootstrap access, requires an
+  explicit policy and must be visible in plan/status output.
+- [ ] Check reachability from the actual initiator: operator computer to worker,
+  and worker to each source. Declared overlay addresses do not establish routes
+  or prove connectivity. Report missing routes, unavailable endpoints and trust
+  failures with actionable next steps.
+- [ ] Preserve strict SSH host-key verification and stable server/source identity
+  across public and overlay addresses. Evaluate explicit host-key aliases or
+  certificates; keep connection caches distinct for endpoint, port, account and
+  trust settings. Preserve restricted per-source worker keys and authorization.
+- [ ] Carry selected endpoints through CLI SSH, worker SSH and applicable file
+  transfers. Retain the existing SQLite snapshot, verification and transfer
+  protocols; private routing must not substitute raw copying of a live database.
+  Make the same endpoint policy available to future telemetry probes.
+- [ ] Treat endpoint and transport-policy changes on installed workers as reviewed
+  migrations. Integrate with source endpoint pins, exact retry declarations,
+  rollback and renewed qualification; do not silently choose a different server
+  or re-enroll source identity after a connection failure.
+- [ ] Test public/private selection, tunnel loss, explicitly permitted fallback,
+  different operator/worker reachability, host-key mismatch, IPv4/IPv6, endpoint
+  migration and interruption/resume.
+
+### Phase 2: managed private listener binding
+
+- [ ] Add explicit application/service binding policy using generated Quadlet
+  settings for supported network modes. Validate that the selected overlay bind
+  address belongs to the target, and define behavior across reboot, tunnel
+  startup, address changes and service restart.
+- [ ] Bind selected published ports only to the configured address. Reject
+  conflicting wildcard mappings, host-network/raw Podman options or other
+  configuration that bypasses required-private exposure. An unavailable address
+  must not cause fallback to `0.0.0.0`, `::` or another public listener.
+- [ ] Coordinate private application intent with Traefik/router configuration so
+  a private port binding does not leave the service publicly exposed through an
+  existing proxy route. Retain application authentication and overlay access
+  controls as independent requirements.
+- [ ] Keep current local worker APIs on Unix sockets. Apply this binding policy
+  to explicitly networked services, including future OTLP listeners, rather than
+  introducing TCP listeners for existing local-only protocols.
+- [ ] Verify generated settings and actual listener addresses in the supported
+  rootless Podman environments. Test intended private access, absence of wildcard
+  exposure, conflicting proxy routes, tunnel loss/recovery, IPv6 and rollback.
+
+VPN provisioning, keys, kernel interfaces, routing, firewall rules and SSH daemon
+listener configuration remain administrator-owned. Selecting an overlay address
+does not itself prove encryption or close an existing public SSH listener.
+Telegram/Signal provider requests retain their normal internet routing unless the
+administrator separately configures an egress route. Document these boundaries
+without promising zero public exposure from an address field alone.
+
 ## Planned monitoring: uptime, embedded telemetry and anomaly detection
 
 Requested 2026-11-07; not implemented yet and outside the current worker usability

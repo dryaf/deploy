@@ -80,6 +80,9 @@ Remaining work includes:
 - Public-field acceptance, release bundles, onboarding/prerequisites and guidance.
 - The separately requested application workflow for local image builds, direct SSH
   transfer, signing and remote verification; it remains planned, not implemented.
+- Explicit overlay endpoint selection and managed private listener binding,
+  including required-private transport, explicit fallback and preserved SSH/source
+  identity. Existing `host` addresses can already use the overlay for a fresh setup.
 - The planned uptime/telemetry feature: bounded probes and history with explicit
   thresholds, then rolling anomaly baselines, then scoped OTLP ingestion. It
   reuses notification/LED infrastructure and remains outside this milestone.
