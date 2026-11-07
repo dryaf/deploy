@@ -26,8 +26,13 @@ func stageWorkerTrust(home string, root, stateRoot *safefs.Directory, journal *W
 	if !safefs.ValidID(journal.ID, "n") || !deployconfig.ValidInventoryName(alias) {
 		return fmt.Errorf("invalid trust staging identity")
 	}
-	live := filepath.Join(workerTrustDirectory, alias+".known_hosts")
-	old, err := safefs.ReadFile(root, live, 16<<10)
+	layout, err := declarationPaths(home, journal.Declaration)
+	if err != nil {
+		return err
+	}
+	live := layout.OwnedPath(filepath.Join(layout.Keys(), alias+".known_hosts"))
+	runtimePath := layout.OwnedPath(layout.Runtime)
+	old, err := readBackupOwnedFile(root, live, 16<<10)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -41,8 +46,8 @@ func stageWorkerTrust(home string, root, stateRoot *safefs.Directory, journal *W
 			if !journal.Updating {
 				return fmt.Errorf("refusing to replace an unowned worker trust file")
 			}
-			config, err := safefs.ReadFile(root, workerRuntimeConfig, 8<<20)
-			if err != nil || journal.OwnedFiles[workerRuntimeConfig] != fmt.Sprintf("%x", sha256.Sum256(config)) {
+			config, err := readBackupOwnedFile(root, runtimePath, 8<<20)
+			if err != nil || journal.OwnedFiles[runtimePath] != fmt.Sprintf("%x", sha256.Sum256(config)) {
 				return fmt.Errorf("legacy trust ownership requires unchanged owned runtime configuration")
 			}
 			var installed WorkerInstallation
@@ -51,7 +56,7 @@ func stageWorkerTrust(home string, root, stateRoot *safefs.Directory, journal *W
 			}
 			referenced := false
 			for _, source := range installed.Sources {
-				referenced = referenced || source.Alias == alias && source.KnownHosts == filepath.Join(home, live)
+				referenced = referenced || source.Alias == alias && source.KnownHosts == filepath.Join(layout.Keys(), alias+".known_hosts")
 			}
 			if !referenced {
 				return fmt.Errorf("trust file is not referenced by the installed worker")
@@ -85,6 +90,10 @@ func installWorkerTrust(root, stateRoot *safefs.Directory, journal *WorkerSetupJ
 	if !journal.RecoveryNeeded {
 		return fmt.Errorf("trust publication requires armed setup recovery")
 	}
+	layout, err := declarationPaths(root.File().Name(), journal.Declaration)
+	if err != nil {
+		return err
+	}
 	for _, source := range sources {
 		staged, err := safefs.ReadFile(root, stagedWorkerTrustPath(journal.ID, source.Alias), 16<<10)
 		if err != nil {
@@ -93,7 +102,7 @@ func installWorkerTrust(root, stateRoot *safefs.Directory, journal *WorkerSetupJ
 		if !bytesEqual(staged, []byte(source.KnownHosts)) {
 			return fmt.Errorf("qualified source trust candidate changed before installation")
 		}
-		if err = installSetupFile(root, stateRoot, journal, filepath.Join(workerTrustDirectory, source.Alias+".known_hosts"), staged); err != nil {
+		if err = installSetupFile(root, stateRoot, journal, layout.OwnedPath(filepath.Join(layout.Keys(), source.Alias+".known_hosts")), staged); err != nil {
 			return err
 		}
 	}

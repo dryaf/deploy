@@ -54,6 +54,19 @@ func (r *LEDReconciler) Step(ctx context.Context) error {
 		return fmt.Errorf("LED reconciliation already running")
 	}
 	defer r.Store.ledMu.Unlock()
+	var disabled bool
+	outputErr := r.Store.transaction(ctx, func(tx *sql.Tx) error {
+		var err error
+		disabled, err = r.Store.ledOutputAdmission(ctx, tx)
+		return err
+	})
+	if disabled || outputErr != nil {
+		r.Store.recordLEDOutput(workerLEDBinding, LEDObservation{Condition: "unknown"})
+		for _, b := range r.Store.config.LEDBindings {
+			r.Store.recordLEDOutput(b.ID, LEDObservation{Condition: "unknown"})
+		}
+		return outputErr
+	}
 	if err := r.Store.transaction(ctx, func(tx *sql.Tx) error {
 		if _, err := r.Store.recoveredLEDFaults(ctx, tx); err != nil {
 			return err

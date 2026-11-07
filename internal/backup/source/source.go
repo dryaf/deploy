@@ -36,9 +36,10 @@ const sourceByteCap int64 = 10 << 30
 var sourceReleaseIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,256}$`)
 
 type SourceAuthorization struct {
-	Previous    string `json:"previous,omitempty"`
-	Enabled     bool   `json:"enabled"`
-	Fingerprint string `json:"fingerprint"`
+	RetirementReason string `json:"retirement_reason,omitempty"`
+	Previous         string `json:"previous,omitempty"`
+	Enabled          bool   `json:"enabled"`
+	Fingerprint      string `json:"fingerprint"`
 }
 
 type SourceIdentity struct {

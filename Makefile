@@ -23,7 +23,7 @@ clean:
 
 # Default implementation loop: regular tests and static checks, without -race.
 test:
-	go test -timeout=25m ./...
+	go test -timeout=35m ./...
 	go vet ./...
 
 # Opt-in qualification after implementation; intentionally slower than test.
@@ -31,6 +31,16 @@ test-all: test
 	# SQLite proof audits and crash/resume fixtures need more time under -race.
 	# Match the bounded suite timeout in test-notification-worker-isolated.sh.
 	go test -race -timeout=90m ./...
+
+.PHONY: worker-reference
+worker-reference:
+	go run ./scripts/generate-worker-reference.go
+
+.PHONY: docs-check
+# Fast, offline documentation checks; no full suite or race tests.
+docs-check:
+	python3 scripts/check-doc-links.py
+	go test ./internal/workerctl -run '^TestWorkerFieldInventoryMatchesPublicYAMLAndReference$$' -count=1
 
 .PHONY: test-backup-foundations
 
@@ -79,3 +89,8 @@ test-notification-worker-isolated:
 .PHONY: test-signal-cli-offline
 test-signal-cli-offline:
 	./scripts/test-signal-cli-offline.sh
+
+.PHONY: worker-bundle
+# Local catalog and static helpers; optional provider/LED artifacts are explicit.
+worker-bundle:
+	./scripts/build-worker-bundle.sh

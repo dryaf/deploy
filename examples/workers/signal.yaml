@@ -1,0 +1,13 @@
+# Fresh direct-alert Signal; configure prompts for private account references.
+version: 3
+servers:
+  manager:
+    host: raspberrypi.local
+    user: deploy
+    notification_worker:
+      providers: [signal]
+    backup_worker:
+      sources: [vps-main]
+  vps-main:
+    host: vps.example.com
+    user: deploy

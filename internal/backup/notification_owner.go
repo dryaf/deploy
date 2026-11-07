@@ -70,6 +70,16 @@ func readBackupNotificationOwner(tx *sql.Tx) (owner backupNotificationOwner, err
 }
 
 func requireLegacyNotificationOwner(state *backupState) error {
+	var control ArchiveControl
+	if err := state.get("control", &control); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if control.SharedRequired {
+		return fmt.Errorf("legacy delivery is permanently fenced by declared shared reporting")
+	}
+	return requireNoNotificationHandoff(state)
+}
+func requireNoNotificationHandoff(state *backupState) error {
 	dir, err := safefs.Open(state.directory)
 	if err != nil {
 		return err
@@ -107,7 +117,7 @@ func requireLegacyWorkerSetup(home string, journal *WorkerSetupJournal) error {
 	if !journal.StateInitialized && !journal.RecoveryNeeded && !journal.Updating && journal.Stage != "complete" {
 		return nil // Initial state creation is checked after opening the database.
 	}
-	state, err := openBackupStateWithLease(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false, false, true)
+	state, err := openInstalledBackupStateWithLease(home, false, false, true)
 	if err != nil {
 		return err
 	}

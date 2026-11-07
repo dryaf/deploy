@@ -243,6 +243,10 @@ func InspectMaintenance(path string) (MaintenanceStatus, error) {
 	if err != nil {
 		return MaintenanceStatus{}, err
 	}
-	s.RuntimeAllowed = s.RuntimeAllowed && links.runtimeAllowed() && !r.HasIntent
+	native, err := nativeServicePresent(d)
+	if err != nil {
+		return MaintenanceStatus{}, err
+	}
+	s.RuntimeAllowed = s.RuntimeAllowed && links.runtimeAllowed() && !r.HasIntent && !native
 	return s, nil
 }

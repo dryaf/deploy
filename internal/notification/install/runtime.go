@@ -116,7 +116,7 @@ func serveRuntime(ctx context.Context, s *worker.Store, c Runtime, socket string
 	}
 	if c.LEDSocket != "" {
 		services = append(services, func(ctx context.Context) error {
-			r := worker.LEDReconciler{Store: s, API: led.Client{Socket: c.LEDSocket, Budget: 2 * time.Second}, Budget: 2 * time.Second}
+			r := worker.LEDReconciler{Store: s, API: led.Client{Socket: c.LEDSocket, Budget: 2 * time.Second, Endpoint: c.LEDEndpoint}, Budget: 2 * time.Second}
 			ticker := time.NewTicker(time.Second)
 			defer ticker.Stop()
 			for {

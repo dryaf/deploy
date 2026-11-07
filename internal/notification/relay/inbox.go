@@ -20,6 +20,7 @@ import (
 type Inbox struct {
 	runtimeAdmission func(context.Context) error
 	releaseSource    func()
+	freshBootstrap   *FreshInboxBootstrap
 
 	installation *SignalRuntimeInstallation // Verification-only recovery installation; never a receiver.
 	db           *sql.DB
@@ -49,6 +50,15 @@ func openInbox(path, account string, create bool, installation *SignalRuntimeIns
 }
 
 func openInboxLeased(path, account string, create bool, installation *SignalRuntimeInstallation, adoptedDir *safefs.Directory, adoptedLease *safefs.Lock) (_ *Inbox, err error) {
+	return openInboxLeasedSeed(path, account, create, installation, adoptedDir, adoptedLease, nil)
+}
+
+// A fresh bootstrap reserves identity before creating any unpublished image.
+// Recovery installation never uses this path or changes its existing evidence.
+func openInboxLeasedSeed(path, account string, create bool, installation *SignalRuntimeInstallation, adoptedDir *safefs.Directory, adoptedLease *safefs.Lock, seed *protocol.Identity) (_ *Inbox, err error) {
+	if seed != nil && (!create || installation != nil || !seed.Valid()) {
+		return nil, fmt.Errorf("invalid fresh inbox identity reservation")
+	}
 	if !protocol.ValidToken(account) {
 		return nil, fmt.Errorf("invalid relay account")
 	}
@@ -133,13 +143,17 @@ func openInboxLeased(path, account string, create bool, installation *SignalRunt
 	}
 	s.db.SetMaxOpenConns(1)
 	if create {
-		s.identity.Worker, err = safefs.NewID("inbox")
-		if err != nil {
-			return nil, err
-		}
-		s.identity.Recovery, err = safefs.NewID("epoch")
-		if err != nil {
-			return nil, err
+		if seed != nil {
+			s.identity = *seed
+		} else {
+			s.identity.Worker, err = safefs.NewID("inbox")
+			if err != nil {
+				return nil, err
+			}
+			s.identity.Recovery, err = safefs.NewID("epoch")
+			if err != nil {
+				return nil, err
+			}
 		}
 		pin := inboxPin{Identity: s.identity, Account: account}
 		if err = dir.WriteJSON("identity.json", pin, false); err != nil {

@@ -1,0 +1,21 @@
+version: 3
+servers:
+  manager:
+    host: raspberrypi.local
+    user: deploy
+    notification_worker:
+      providers: [telegram]
+      producers:
+        backup-worker:
+          required: true
+          routes: [alerts]
+          max_messages: 1000
+          max_silence_seconds: 180
+          max_evidence_seconds: 100000
+          policy_health: true
+    backup_worker:
+      sources: [vps-main]
+      schedule: daily
+  vps-main:
+    host: vps.example.com
+    user: deploy

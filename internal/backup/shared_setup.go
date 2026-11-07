@@ -23,6 +23,9 @@ type sharedWorkerSetup struct {
 
 func requireWorkerSetupOwner(state *backupState, j *WorkerSetupJournal) error {
 	if j.Shared == nil {
+		if j.Declaration != nil && j.Declaration.NotificationRoot != "" {
+			return requirePendingSharedSetup(state, j)
+		}
 		return requireLegacyNotificationOwner(state)
 	}
 	p := j.Shared
@@ -41,10 +44,13 @@ func requireWorkerSetupOwner(state *backupState, j *WorkerSetupJournal) error {
 }
 
 func requireWorkerSetupOwnership(home string, j *WorkerSetupJournal) error {
-	if j.Shared == nil {
+	if j.Shared == nil && (j.Declaration == nil || j.Declaration.NotificationRoot == "") {
 		return requireLegacyWorkerSetup(home, j)
 	}
-	state, err := openBackupStateWithLease(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false, false, true)
+	if j.Shared == nil && !j.StateInitialized && !j.RecoveryNeeded && !j.Updating && j.Stage != "complete" {
+		return nil
+	}
+	state, err := openInstalledBackupStateWithLease(home, false, false, true)
 	if err != nil {
 		return err
 	}
@@ -62,7 +68,7 @@ func prepareSharedWorkerSetupUsing(home string, root, stateRoot *safefs.Director
 	if (operation != "update" && operation != "setup" && operation != "") || j.Stage != "complete" || j.RecoveryNeeded || j.Updating {
 		return nil
 	}
-	state, err := openBackupStateWithLease(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false, false, true)
+	state, err := openInstalledBackupStateWithLease(home, false, false, true)
 	if err != nil {
 		return err
 	}
@@ -98,12 +104,13 @@ func prepareSharedWorkerSetupUsing(home string, root, stateRoot *safefs.Director
 	if err != nil {
 		return err
 	}
-	if profile.UnitDirectory != filepath.Join(home, ".config/systemd/user") {
-		return fmt.Errorf("shared report manager differs from backup manager")
-	}
-	c, err := loadWorkerInstallation(filepath.Join(home, ".config/deploy/backup-worker/runtime.json"))
+	c, err := loadInstalledWorker(home)
 	if err != nil {
 		return err
+	}
+	paths := backupCutoverPaths(home, c)
+	if profile.UnitDirectory != paths.unitDirectory() {
+		return fmt.Errorf("shared report manager differs from backup manager")
 	}
 	var control ArchiveControl
 	if err = state.get("control", &control); err != nil {
@@ -118,15 +125,20 @@ func prepareSharedWorkerSetupUsing(home string, root, stateRoot *safefs.Director
 	}
 	owned := map[string]string{}
 	for path, hash := range j.OwnedFiles {
-		body, e := safefs.ReadFile(root, path, 8<<20)
+		body, e := readBackupOwnedFile(root, path, 8<<20)
 		if e != nil || sharedSetupDigest(body) != hash {
 			return fmt.Errorf("shared setup owned file changed: %s", path)
 		}
 		owned[path] = hash
 	}
 	for name, body := range units {
-		path := filepath.Join(".config/systemd/user", name)
-		actual, e := safefs.ReadFile(root, path, 1<<20)
+		path := filepath.Join(paths.unitDirectory(), name)
+		if c.Paths != nil {
+			path = c.Paths.OwnedPath(path)
+		} else {
+			path, _ = filepath.Rel(home, path)
+		}
+		actual, e := readBackupOwnedFile(root, path, 1<<20)
 		if e != nil || string(actual) != body {
 			return fmt.Errorf("shared report unit changed: %s", name)
 		}
@@ -138,6 +150,9 @@ func prepareSharedWorkerSetupUsing(home string, root, stateRoot *safefs.Director
 	next.OwnedFiles = owned
 	if err = requireWorkerSetupOwner(state, &next); err != nil {
 		return err
+	}
+	if notify.Hash(next) == notify.Hash(*j) {
+		return nil
 	}
 	if err = stateRoot.WriteJSON("setup.json", next, true); err != nil {
 		return err
@@ -154,7 +169,7 @@ func workerSetupUnits(c WorkerInstallation, paths WorkerUnitPaths, j *WorkerSetu
 	if j.Shared == nil {
 		return units, nil
 	}
-	if paths.State != filepath.Join(paths.Home, ".local/state/deploy/backup-worker/state") || j.Shared.Profile.UnitDirectory != filepath.Join(paths.Home, ".config/systemd/user") {
+	if paths.State != backupCutoverPaths(paths.Home, c).State || j.Shared.Profile.UnitDirectory != paths.unitDirectory() {
 		return nil, fmt.Errorf("shared setup paths changed")
 	}
 	reports, err := renderBackupReportUnits(paths, c.Policy, j.Shared.Profile.Credentials)
@@ -205,7 +220,7 @@ func requireSharedBackupReportUnits(home string, c WorkerInstallation, state *ba
 	if err != nil {
 		return err
 	}
-	if profile.UnitDirectory != filepath.Join(home, ".config/systemd/user") {
+	if profile.UnitDirectory != backupCutoverPaths(home, c).unitDirectory() {
 		return fmt.Errorf("report manager changed")
 	}
 	units, err := renderBackupReportUnits(backupCutoverPaths(home, c), c.Policy, profile.Credentials)
@@ -218,10 +233,31 @@ func requireSharedBackupReportUnits(home string, c WorkerInstallation, state *ba
 	}
 	defer root.Close()
 	for name, body := range units {
-		raw, err := safefs.ReadFile(root, filepath.Join(".config/systemd/user", name), 1<<20)
+		raw, err := readBackupOwnedFile(root, filepath.Join(backupCutoverPaths(home, c).unitDirectory(), name), 1<<20)
 		if err != nil || string(raw) != body {
 			return fmt.Errorf("report unit changed: %s", name)
 		}
+	}
+	return nil
+}
+
+func requirePendingSharedSetup(state *backupState, j *WorkerSetupJournal) error {
+	if j.Producer == nil || j.Producer.Validate(j.WorkerID) != nil {
+		return fmt.Errorf("fresh shared setup requires its reserved producer")
+	}
+	if err := requireNoNotificationHandoff(state); err != nil {
+		return err
+	}
+	var c ArchiveControl
+	err := state.get("control", &c)
+	if err == sql.ErrNoRows && j.Stage != "complete" {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !c.SharedRequired || c.ReportingDisabled || c.WriterID != j.WorkerID || c.ArchiveID != j.ArchiveID {
+		return fmt.Errorf("shared setup differs from retained reporting fence")
 	}
 	return nil
 }

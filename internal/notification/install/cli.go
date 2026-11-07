@@ -14,6 +14,7 @@ import (
 
 	"github.com/dryaf/deploy/internal/notification/client"
 	"github.com/dryaf/deploy/internal/notification/interaction"
+	"github.com/dryaf/deploy/internal/notification/led"
 	"github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/notification/provider"
 	"github.com/dryaf/deploy/internal/notification/relay"
@@ -24,12 +25,14 @@ import (
 )
 
 type Runtime struct {
-	Version   int                         `json:"version"`
-	Worker    worker.Config               `json:"worker"`
-	Providers map[string]provider.Profile `json:"providers"`
-	LEDSocket string                      `json:"led_socket,omitempty"`
-	Telegram  *provider.TelegramAccount   `json:"interactive_telegram,omitempty"`
-	Signal    *provider.SignalAccount     `json:"interactive_signal,omitempty"`
+	LEDEndpoint *led.Endpoint               `json:"led_endpoint,omitempty"`
+	Bootstrap   bool                        `json:"bootstrap,omitempty"`
+	Version     int                         `json:"version"`
+	Worker      worker.Config               `json:"worker"`
+	Providers   map[string]provider.Profile `json:"providers"`
+	LEDSocket   string                      `json:"led_socket,omitempty"`
+	Telegram    *provider.TelegramAccount   `json:"interactive_telegram,omitempty"`
+	Signal      *provider.SignalAccount     `json:"interactive_signal,omitempty"`
 }
 
 func ReadRuntime(path string) (c Runtime, err error) {
@@ -68,7 +71,12 @@ func decodeRuntime(data []byte) (c Runtime, err error) {
 	if c.Version != 1 {
 		return c, fmt.Errorf("unsupported runtime version")
 	}
-	if err = c.Worker.Validate(); err != nil {
+	if c.Bootstrap {
+		err = c.Worker.ValidateBootstrap()
+	} else {
+		err = c.Worker.Validate()
+	}
+	if err != nil {
 		return c, err
 	}
 	if c.Telegram != nil {
@@ -174,6 +182,9 @@ func decodeRuntime(data []byte) (c Runtime, err error) {
 		}
 		c.Worker.Routes[name] = route
 	}
+	if c.LEDEndpoint != nil && (c.LEDEndpoint.Validate() != nil || c.LEDEndpoint.Socket != c.LEDSocket) {
+		return c, fmt.Errorf("invalid retained LED endpoint")
+	}
 	if c.LEDSocket != "" && !filepath.IsAbs(c.LEDSocket) {
 		return c, fmt.Errorf("LED socket must be absolute")
 	}
@@ -211,6 +222,8 @@ func RunCLI(args []string) error {
 		return runRuntimeLEDRecoveryCLI(args, os.Stdout)
 	case "activation-review":
 		return runActivationReviewCLI(args[1:], os.Stdout)
+	case "__fresh-signal-restart-probe", "__fresh-signal-probe", "__fresh-signal-serve":
+		return runFreshSignalCLI(args, os.Stdout)
 	case "signal-service-setup", "signal-service-replace", "signal-service-resume", "signal-service-uninstall", "signal-service-inspect", "__signal-service-serve", "__signal-next-recovery-probe", "__signal-verification-service-probe", "__signal-verification-replacement-probe", "__signal-production-service-probe":
 		return runSignalServiceCLI(args, os.Stdout)
 	case "signal-verification-prepare":
@@ -283,9 +296,9 @@ func RunCLI(args []string) error {
 		return runManagedSnapshotCLI(args[1:], os.Stdout)
 	case "enable-commands", "disable-commands", "narrow-commands", "migrate-commands":
 		return runManagedCommandsCLI(args, os.Stdout)
-	case "__managed-commands-probe", "__managed-command-policy-probe", "__managed-command-enrollment-probe":
+	case "__managed-command-grants-probe", "__managed-commands-probe", "__managed-command-policy-probe", "__managed-command-enrollment-probe":
 		return runManagedCLI(args)
-	case "__managed-next-recovery-probe", "__managed-led-delivery-probe", "__managed-command-recovery-probe", "__managed-telegram-handoff-probe", "__managed-signal-production-probe", "__managed-signal-replacement-probe", "__managed-delivery-recovery-probe", "__managed-delivery-probe", "__managed-signal-conversations-probe", "__managed-signal-profiles-probe", "migrate-signal-profiles", "__managed-signal-supervision-probe", "supervise-signal", "adopt-signal", "__managed-signal-verification-probe", "setup", "update", "migrate-schema", "migrate-led", "adopt-recovery", "upgrade-helper", "__managed-helper-upgrade-probe", "renew-telegram", "__managed-telegram-renewal-probe", "rollback", "resume", "uninstall", "installation-status", "__managed-probe", "__managed-migration-probe", "__managed-led-migration-probe", "__managed-recovery-probe", "__managed-serve":
+	case "__managed-command-limits-probe", "__managed-command-pause-probe", "__managed-delivery-limits-probe", "__managed-delivery-providers-probe", "__managed-delivery-pause-probe", "__managed-enrolled-limits-probe", "__managed-delivery-led-output-probe", "__managed-bootstrap-enrollment-commands-probe", "__managed-bootstrap-providers-probe", "__managed-bootstrap-enrollment-led-probe", "__managed-bootstrap-limits-probe", "__managed-led-endpoint-probe", "__managed-led-output-probe", "__managed-fresh-signal-probe", "__managed-bootstrap-probe", "__managed-next-recovery-probe", "__managed-led-delivery-probe", "__managed-command-recovery-probe", "__managed-telegram-handoff-probe", "__managed-signal-production-probe", "__managed-signal-replacement-probe", "__managed-delivery-recovery-probe", "__managed-delivery-probe", "__managed-signal-conversations-probe", "__managed-signal-profiles-probe", "migrate-signal-profiles", "__managed-signal-supervision-probe", "supervise-signal", "adopt-signal", "__managed-signal-verification-probe", "setup", "update", "migrate-schema", "migrate-led", "adopt-recovery", "upgrade-helper", "__managed-helper-upgrade-probe", "renew-telegram", "__managed-telegram-renewal-probe", "rollback", "resume", "uninstall", "installation-status", "__managed-probe", "__managed-migration-probe", "__managed-led-migration-probe", "__managed-recovery-probe", "__managed-serve":
 		return runManagedCLI(args)
 	}
 	if args[0] == "recovery-led-review" || args[0] == "recovery-led-preserve" || args[0] == "recovery-led-adopt" {

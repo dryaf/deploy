@@ -73,8 +73,9 @@ func InspectManagedReportProfile(root string, identity protocol.Identity, produc
 	if !present || managedDigest(b) != m.UnitHash {
 		return out, fmt.Errorf("report gateway unit changed")
 	}
-	paths := (&managedProducerSession{runtime: c}).CredentialPaths()
-	slices.Sort(paths)
-	paths = slices.Compact(paths)
+	paths, err := retainedDeliveryCredentials(d, j, c)
+	if err != nil {
+		return out, err
+	}
 	return ManagedReportProfile{ManifestHash: protocol.Hash(m), Identity: m.Identity, UnitDirectory: m.UnitDirectory, Credentials: paths}, nil
 }

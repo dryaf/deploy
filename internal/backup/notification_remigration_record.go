@@ -29,7 +29,7 @@ type backupRemigration struct {
 
 func (r backupRemigration) validate() error {
 	s := r.Spec
-	if s.Version != 1 || !validCutoverVersion(s.Cutover) || s.Cutover.Version == 2 || s.Cutover.Managed.Validate() != nil || s.Cutover.Managed.Revoke || s.Cutover.Managed.LegacyGeneration != "" ||
+	if s.Cutover.Fresh != nil || s.Version != 1 || !validCutoverVersion(s.Cutover) || s.Cutover.Version == 2 || s.Cutover.Managed.Validate() != nil || s.Cutover.Managed.Revoke || s.Cutover.Managed.LegacyGeneration != "" ||
 		!safefs.DigestPattern.MatchString(s.Cutover.ConfigHash) || !safefs.DigestPattern.MatchString(s.Cutover.HelperHash) || s.RollbackHash != notify.Hash(r.Rollback) ||
 		s.Cutover.EvidenceHash != notify.Hash(r.Evidence) || r.Before.Mode != "fenced" || r.Before.LegacyHash != s.RollbackHash || r.Before.LegacyGeneration != r.Rollback.Spec.Generation ||
 		r.Before.Binding != r.Rollback.Owner.Binding || r.Before.CutoverHash != r.Rollback.Owner.CutoverHash || r.Before.Socket != r.Rollback.Owner.Socket ||

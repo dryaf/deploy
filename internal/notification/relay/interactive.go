@@ -20,29 +20,18 @@ import (
 	"github.com/dryaf/deploy/internal/notification/interaction"
 	"github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/notification/provider"
+	"github.com/dryaf/deploy/internal/notification/signalaccount"
 	"github.com/dryaf/deploy/internal/process"
 	"github.com/dryaf/deploy/internal/safefs"
 )
 
 func verifySignalAccount(raw []byte, selector, expected string) error {
-	var accounts []struct {
-		Number string `json:"number"`
-		ACI    string `json:"aci"`
+	identity, err := signalaccount.ResolveNativeAccountIdentity(raw, selector)
+	if err != nil {
+		return err
 	}
-	if err := safefs.ReadJSON(bytes.NewReader(raw), &accounts, 32<<10); err != nil {
-		return fmt.Errorf("invalid Signal account identity response")
-	}
-	matches := 0
-	for _, account := range accounts {
-		if account.Number == selector || account.ACI == selector {
-			if account.ACI != expected {
-				return fmt.Errorf("Signal account identity changed")
-			}
-			matches++
-		}
-	}
-	if matches != 1 {
-		return fmt.Errorf("Signal account identity unavailable or ambiguous")
+	if identity != expected {
+		return fmt.Errorf("Signal account identity changed")
 	}
 	return nil
 }

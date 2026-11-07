@@ -89,7 +89,16 @@ func (f *fakeManagedServices) Verify(ctx context.Context, m ManagedManifest) err
 	if s.Identity() != m.Identity {
 		return fmt.Errorf("wrong health identity")
 	}
-	return s.RequireInactiveProducers()
+	d, err := privateManagedDir(m.Root, true)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	j, err := readManagedJournal(d)
+	if err != nil {
+		return err
+	}
+	return requireManagedVerificationProducers(d, s, m, c, j)
 }
 
 func managedFixture(t *testing.T) (ManagedSpec, managedInstaller, *fakeManagedServices, protocol.Identity) {
@@ -131,7 +140,7 @@ func managedFixture(t *testing.T) (ManagedSpec, managedInstaller, *fakeManagedSe
 		t.Fatal(err)
 	}
 	f := &fakeManagedServices{t: t, units: spec.UnitDirectory, state: managedServiceState{Load: "not-found", Active: "inactive"}}
-	i := managedInstaller{services: f, probe: func(context.Context, *safefs.Directory, string, string, bool) error { return nil }}
+	i := managedInstaller{services: f, deliveryProvidersProbe: func(context.Context, *safefs.Directory, string, string) error { return nil }, deliveryPauseProbe: func(context.Context, *safefs.Directory, string, string) error { return nil }, probe: func(context.Context, *safefs.Directory, string, string, bool) error { return nil }}
 	return spec, i, f, id
 }
 

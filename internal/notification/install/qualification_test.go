@@ -18,10 +18,20 @@ import (
 	"github.com/dryaf/deploy/internal/ui"
 )
 
-func qualificationFixture(t *testing.T) (ManagedSpec, managedInstaller, Runtime, QualificationReport) {
+func qualificationFixture(t *testing.T, configure ...func(*Runtime)) (ManagedSpec, managedInstaller, Runtime, QualificationReport) {
 	t.Helper()
 	spec, installer, _, _ := managedFixture(t)
 	qualificationFixtureInputs(t, spec.RuntimeFile)
+	if len(configure) > 0 {
+		runtime, err := ReadRuntime(spec.RuntimeFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, apply := range configure {
+			apply(&runtime)
+		}
+		writeRuntime(t, spec.RuntimeFile, runtime)
+	}
 	if _, err := installer.prepare(context.Background(), "setup", spec); err != nil {
 		t.Fatal(err)
 	}

@@ -20,6 +20,7 @@ type managedPolicyCrashInput struct {
 	Config   Config
 	Boundary string
 	Policy   string
+	Grant    bool
 }
 
 func TestManagedCommandPolicyCrashChild(t *testing.T) {
@@ -45,13 +46,15 @@ func TestManagedCommandPolicyCrashChild(t *testing.T) {
 			return syscall.Kill(os.Getpid(), syscall.SIGKILL)
 		}
 		return nil
-	})
+	}, in.Grant)
 	t.Fatalf("crash boundary was not reached: %v", err)
 }
 
 func TestManagedCommandPolicySIGKILL(t *testing.T)     { testManagedCommandPolicySIGKILL(t, false) }
 func TestManagedCommandEnrollmentSIGKILL(t *testing.T) { testManagedCommandPolicySIGKILL(t, true) }
-func testManagedCommandPolicySIGKILL(t *testing.T, enrollment bool) {
+func TestManagedCommandGrantSIGKILL(t *testing.T)      { testManagedCommandPolicySIGKILL(t, true, true) }
+func testManagedCommandPolicySIGKILL(t *testing.T, enrollment bool, grants ...bool) {
+	grant := len(grants) == 1 && grants[0]
 	for _, point := range []string{"command-intent", "command-sql", "command-head", "command-complete"} {
 		t.Run(point, func(t *testing.T) {
 			s := managedCommandHistoryFixture(t)
@@ -61,7 +64,9 @@ func testManagedCommandPolicySIGKILL(t *testing.T, enrollment bool) {
 				next := *c.Interaction
 				next.Revision = "two"
 				next.Workers = append([]interaction.Worker(nil), next.Workers...)
-				next.Workers[0].Alias = "backup/renamed"
+				if !grant {
+					next.Workers[0].Alias = "backup/renamed"
+				}
 				policy = commandEnrollmentJSON(t, &next)
 				in := interaction.Inbound{Provider: "telegram", Account: "bot-1", NativeID: "update-1", Actor: "actor-1", Conversation: "private", DestinationFingerprint: c.Interaction.Destinations[0].Fingerprint(), SentAt: s.now(), Text: "backup/storage status"}
 				raw, err := json.Marshal(in)
@@ -69,9 +74,14 @@ func testManagedCommandPolicySIGKILL(t *testing.T, enrollment bool) {
 				_, err = s.db.Exec("INSERT INTO provider_inbox(account,id,hash,body,state) VALUES(?,?,?,?,?)", in.Account, 1, protocol.Hash(in), string(raw), "pending")
 				must(t, err)
 			}
-			must(t, s.CommitManagedCommandAdmission("drain", protocol.Hash("disabled"), ""))
+			if grant {
+				must(t, s.CommitManagedCommandAdmission("drain", protocol.Hash("initial"), ""))
+				must(t, s.CommitManagedCommandPolicy(protocol.Hash("disabled"), protocol.Hash("initial"), "[]"))
+			} else {
+				must(t, s.CommitManagedCommandAdmission("drain", protocol.Hash("disabled"), ""))
+			}
 			must(t, s.Close())
-			raw, err := json.Marshal(managedPolicyCrashInput{Path: path, Config: c, Boundary: point, Policy: policy})
+			raw, err := json.Marshal(managedPolicyCrashInput{Path: path, Config: c, Boundary: point, Policy: policy, Grant: grant})
 			must(t, err)
 			input := filepath.Join(t.TempDir(), "input.json")
 			must(t, os.WriteFile(input, raw, 0600))
@@ -90,11 +100,19 @@ func testManagedCommandPolicySIGKILL(t *testing.T, enrollment bool) {
 			if s.RequireManagedCommandHistory(protocol.Hash("disabled")) == nil {
 				t.Fatal("old authority accepted crashed narrowing")
 			}
-			must(t, s.CommitManagedCommandPolicy(protocol.Hash("narrow"), protocol.Hash("disabled"), policy))
+			if grant {
+				must(t, s.CommitManagedCommandGrant(protocol.Hash("narrow"), protocol.Hash("disabled"), policy))
+			} else {
+				must(t, s.CommitManagedCommandPolicy(protocol.Hash("narrow"), protocol.Hash("disabled"), policy))
+			}
 			must(t, s.CommitManagedCommandAdmission("all", protocol.Hash("reenable"), protocol.Hash("narrow")))
 			must(t, s.ConfigureManagedCommands("all", protocol.Hash("reenable")))
 			if enrollment {
-				if s.commandConfig().Workers[0].Alias != "backup/renamed" {
+				wantAlias := "backup/renamed"
+				if grant {
+					wantAlias = "backup/storage"
+				}
+				if s.commandConfig().Workers[0].Alias != wantAlias {
 					t.Fatal("migration lost")
 				}
 				var pending, mappings int

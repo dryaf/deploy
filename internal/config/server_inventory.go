@@ -26,6 +26,14 @@ func ReadInventory(file string) (ServerInventory, error) {
 	if err != nil {
 		return inv, err
 	}
+	return ParseInventory(file, data)
+}
+
+// ParseInventory validates an in-memory candidate using the same rules as reads.
+// file supplies the base directory for operator-local references and diagnostics.
+func ParseInventory(file string, data []byte) (ServerInventory, error) {
+	var inv ServerInventory
+	var err error
 	var doc yaml.Node
 	if err = yaml.Unmarshal(data, &doc); err != nil {
 		return inv, fmt.Errorf("%s: invalid inventory YAML", file)
@@ -35,7 +43,7 @@ func ReadInventory(file string) (ServerInventory, error) {
 		if _, servers := fields["servers"]; servers {
 			return inv, fmt.Errorf("%s: servers requires version: 2", file)
 		}
-		cfg, err := ReadServer(file)
+		cfg, err := parseServer(file, data)
 		if err != nil {
 			return inv, err
 		}
@@ -44,6 +52,9 @@ func ReadInventory(file string) (ServerInventory, error) {
 		}
 		inv.Legacy = &cfg
 		return inv, nil
+	}
+	if version := fields["version"]; version != nil && version.Value == "3" {
+		return readInventoryV3(file, data, &doc)
 	}
 	if err = DecodeConfig(file, data, &inv); err != nil {
 		return inv, err

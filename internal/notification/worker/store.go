@@ -35,6 +35,7 @@ type Store struct {
 	recoveryProof          RecoveryCheckpointProof
 	recoveryPublication    RecoveryPublicationCommit
 	telegramRenewalID      string
+	freshSignalServiceHash string
 	signalVerificationHash string
 	ledMu                  sync.Mutex         // Serializes LED attempts, independent of database state lock.
 	ledOperationFault      func(string) error // Private durable-boundary test hook.
@@ -121,8 +122,29 @@ func OpenManagedRuntime(path string, c Config, expected protocol.Identity, revis
 	return s, err
 }
 
-func openStore(path string, c Config, create bool, fault func(string) error, requireCurrent bool, expected protocol.Identity, recoveryCommit string) (_ *Store, err error) {
-	if err = c.Validate(); err != nil {
+func openStore(path string, c Config, create bool, fault func(string) error, requireCurrent bool, expected protocol.Identity, recoveryCommit string) (*Store, error) {
+	return openStoreWithBootstrap(path, c, create, fault, requireCurrent, expected, recoveryCommit, nil)
+}
+
+func openStoreWithBootstrap(path string, c Config, create bool, fault func(string) error, requireCurrent bool, expected protocol.Identity, recoveryCommit string, bootstrap *GatewayBootstrap) (*Store, error) {
+	return openStoreWithBootstrapEnrollment(path, c, create, fault, requireCurrent, expected, recoveryCommit, bootstrap, nil)
+}
+
+func openStoreWithBootstrapEnrollment(path string, c Config, create bool, fault func(string) error, requireCurrent bool, expected protocol.Identity, recoveryCommit string, bootstrap *GatewayBootstrap, enrollment *bootstrapEnrollment) (_ *Store, err error) {
+	return openStoreWithBootstrapTransitions(path, c, create, fault, requireCurrent, expected, recoveryCommit, bootstrap, enrollment, nil)
+}
+
+func openStoreWithBootstrapTransitions(path string, c Config, create bool, fault func(string) error, requireCurrent bool, expected protocol.Identity, recoveryCommit string, bootstrap *GatewayBootstrap, enrollment *bootstrapEnrollment, limits *bootstrapLimits) (_ *Store, err error) {
+	return openStoreWithPolicyTransitions(path, c, create, fault, requireCurrent, expected, recoveryCommit, bootstrap, enrollment, limits, nil)
+}
+
+func openStoreWithPolicyTransitions(path string, c Config, create bool, fault func(string) error, requireCurrent bool, expected protocol.Identity, recoveryCommit string, bootstrap *GatewayBootstrap, enrollment *bootstrapEnrollment, limits *bootstrapLimits, enrolledPolicy *enrolledLimits) (_ *Store, err error) {
+	if bootstrap != nil {
+		err = c.ValidateBootstrap()
+	} else {
+		err = c.Validate()
+	}
+	if err != nil {
 		return nil, err
 	}
 	d, err := safefs.Open(path)
@@ -142,6 +164,13 @@ func openStore(path string, c Config, create bool, fault func(string) error, req
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || st.Uid != uint32(os.Getuid()) || info.Mode().Perm() != 0700 {
 		return nil, fmt.Errorf("state directory must be owned and private")
+	}
+	if bootstrap != nil {
+		var retained GatewayBootstrap
+		if err = d.ReadJSON("bootstrap.json", &retained); err != nil || protocol.Hash(retained) != protocol.Hash(bootstrap) || bootstrap.validate() != nil {
+			return nil, fmt.Errorf("unbound gateway reservation changed or unavailable")
+		}
+		s.verificationOnly = true
 	}
 	if create {
 		// Exclusively claim the instance inode. Reopening or retrying a failed
@@ -176,7 +205,22 @@ func openStore(path string, c Config, create bool, fault func(string) error, req
 	if err != nil {
 		return nil, err
 	}
+	enrolledTransition, e := checkEnrolledLimitsAdmission(d, c, enrolledPolicy)
+	if e != nil {
+		return nil, e
+	}
+	limitsTransition, limitsErr := checkBootstrapLimitsAdmission(d, c, bootstrap, limits)
+	if limitsErr != nil {
+		return nil, limitsErr
+	}
+	bootstrapTransition, admissionErr := checkBootstrapEnrollmentAdmission(d, c, bootstrap, enrollment)
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
 	if !requireCurrent {
+		if bootstrapTransition != nil && bootstrapTransition.Receipt.Version == 3 || enrolledTransition != nil && c.Interaction != nil {
+			return nil, fmt.Errorf("enrolled command policy requires managed admission")
+		}
 		f, e := d.Open(managedDeliveryOwnerFile, os.O_RDONLY|unix.O_NONBLOCK, 0)
 		if e == nil {
 			f.Close()
@@ -293,13 +337,17 @@ func openStore(path string, c Config, create bool, fault func(string) error, req
 	}
 	legacyOwnership := false
 	if create {
-		s.identity.Worker, err = safefs.NewID("n")
-		if err != nil {
-			return nil, err
-		}
-		s.identity.Recovery, err = safefs.NewID("n")
-		if err != nil {
-			return nil, err
+		if bootstrap != nil {
+			s.identity = bootstrap.Identity
+		} else {
+			s.identity.Worker, err = safefs.NewID("n")
+			if err != nil {
+				return nil, err
+			}
+			s.identity.Recovery, err = safefs.NewID("n")
+			if err != nil {
+				return nil, err
+			}
 		}
 		// A partial initialization remains an explicit failed installation, never
 		// an invitation for the service to silently recreate state.
@@ -317,6 +365,11 @@ func openStore(path string, c Config, create bool, fault func(string) error, req
 		b, _ := json.Marshal(s.identity)
 		if _, err = tx.Exec("INSERT INTO metadata VALUES('identity',?)", string(b)); err != nil {
 			return nil, err
+		}
+		if bootstrap != nil {
+			if _, err = tx.Exec("INSERT INTO metadata VALUES('bootstrap',?)", protocol.Hash(bootstrap)); err != nil {
+				return nil, err
+			}
 		}
 		for _, p := range c.Producers {
 			if _, err = tx.Exec("INSERT INTO producers(id,epoch) VALUES(?,?)", p.Producer.ID, p.Producer.Epoch); err != nil {
@@ -366,7 +419,14 @@ func openStore(path string, c Config, create bool, fault func(string) error, req
 			return nil, fmt.Errorf("identity mismatch; recovery required")
 		}
 		var count int
-		if err = s.db.QueryRow("SELECT count(*) FROM producers").Scan(&count); err != nil || count != len(c.Producers) {
+		if err = s.db.QueryRow("SELECT count(*) FROM producers").Scan(&count); err != nil {
+			return nil, err
+		}
+		if enrollment != nil {
+			if err = checkBootstrapEnrollmentRows(s.db, *enrollment); err != nil {
+				return nil, err
+			}
+		} else if count != len(c.Producers) {
 			return nil, fmt.Errorf("enrollment change requires migration")
 		}
 		for _, p := range c.Producers {
@@ -374,6 +434,47 @@ func openStore(path string, c Config, create bool, fault func(string) error, req
 			if err = s.db.QueryRow("SELECT epoch FROM producers WHERE id=?", p.Producer.ID).Scan(&epoch); err != nil || epoch != p.Producer.Epoch {
 				return nil, fmt.Errorf("enrollment mismatch")
 			}
+		}
+	}
+	if bootstrap != nil {
+		var pin string
+		if err = s.db.QueryRow("SELECT value FROM metadata WHERE key='bootstrap'").Scan(&pin); err != nil || pin != protocol.Hash(bootstrap) || s.identity != bootstrap.Identity {
+			return nil, fmt.Errorf("unbound gateway database reservation mismatch")
+		}
+	}
+	if err = checkEnrolledLimitsSQL(context.Background(), d, s.db, enrolledTransition, enrolledPolicy); err != nil {
+		return nil, err
+	}
+	if enrolledTransition != nil && enrolledTransition.Receipt.Identity != s.identity {
+		return nil, fmt.Errorf("enrolled limits identity changed; recovery handoff required")
+	}
+	if err = checkBootstrapLimitsSQL(s.dir, s.db, limitsTransition, limits); err != nil {
+		return nil, err
+	}
+	if limitsTransition != nil && limitsTransition.Receipt.Identity != s.identity {
+		return nil, fmt.Errorf("bootstrap limits identity changed; explicit recovery handoff required")
+	}
+	if bootstrapTransition != nil {
+		if err = checkBootstrapEnrollmentLEDHistory(s.db, *bootstrapTransition); err != nil {
+			return nil, err
+		}
+	}
+	if bootstrapTransition != nil && bootstrapTransition.Complete {
+		if err = requireBootstrapCommandAliases(s.db, *bootstrapTransition); err != nil {
+			return nil, err
+		}
+		var anchor string
+		if err = s.db.QueryRow("SELECT value FROM metadata WHERE key='bootstrap-enrollment'").Scan(&anchor); err != nil || anchor != bootstrapTransition.digest() {
+			return nil, fmt.Errorf("bootstrap enrollment SQL authority mismatch")
+		}
+	}
+	if bootstrapTransition == nil {
+		var anchor string
+		if err = s.db.QueryRow("SELECT value FROM metadata WHERE key='bootstrap-enrollment'").Scan(&anchor); err != sql.ErrNoRows {
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("bootstrap enrollment receipt missing")
 		}
 	}
 	if recoveryCommit != "" {

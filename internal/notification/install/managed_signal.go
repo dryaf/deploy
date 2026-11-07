@@ -292,6 +292,19 @@ func readManagedSignalBindingRetained(d *safefs.Directory, m ManagedManifest, su
 	return
 }
 func (i managedInstaller) probeSignalVerification(ctx context.Context, d *safefs.Directory, m ManagedManifest) error {
+	if m.FreshSignal != nil {
+		probe := i.signalProbe
+		if probe == nil {
+			probe = func(ctx context.Context, d *safefs.Directory, name, hash string) error {
+				return probeManagedCapability(ctx, d, name, hash, "__managed-fresh-signal-probe")
+			}
+		}
+		if err := probe(ctx, d, "releases/"+m.Revision+"/deploy", m.BinaryHash); err != nil {
+			return err
+		}
+		return probe(ctx, d, managedHelperName(m), m.HelperHash)
+	}
+
 	if m.SignalVerification == nil {
 		return nil
 	}
@@ -324,7 +337,7 @@ func (i managedInstaller) probeSignalVerification(ctx context.Context, d *safefs
 	return probe(ctx, d, managedHelperName(m), m.HelperHash)
 }
 func (i managedInstaller) checkSignalVerification(ctx context.Context, m ManagedManifest) error {
-	if m.SignalVerification == nil {
+	if m.SignalVerification == nil && m.FreshSignal == nil {
 		return nil
 	}
 	check := i.signalCheck

@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/dryaf/deploy/internal/backup"
 	"github.com/dryaf/deploy/internal/backup/source"
@@ -13,12 +17,15 @@ import (
 	"github.com/dryaf/deploy/internal/inventory"
 	notificationinstall "github.com/dryaf/deploy/internal/notification/install"
 	"github.com/dryaf/deploy/internal/ui"
+	"github.com/dryaf/deploy/internal/workerctl"
 )
 
 func Main() {
 	flag.BoolVar(&ui.DryRun, "dry-run", false, "Print commands without executing")
 	flag.BoolVar(&ui.Verbose, "v", false, "Verbose output")
 	flag.StringVar(&ui.ServersFile, "servers", "", "Server inventory path (default: server.yaml beside deploy.yaml)")
+	flag.BoolVar(&ui.NonInteractive, "non-interactive", false, "Never prompt for worker configuration")
+	flag.BoolVar(&ui.JSON, "json", false, "Versioned structured worker output")
 	flag.Parse()
 
 	args := flag.Args()
@@ -28,6 +35,32 @@ func Main() {
 	}
 
 	switch args[0] {
+	case "led-host":
+		if ui.DryRun {
+			backupFatal("use led-host review for read-only prerequisite inspection")
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		if err := workerctl.RunLEDHostCLI(ctx, args[1:], os.Stdout); err != nil {
+			backupFatal("LED host prerequisite: %v", err)
+		}
+	case "__worker_control", "__worker_control_stream":
+		if len(args) != 1 || ui.DryRun {
+			backupFatal("invalid worker control invocation")
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		ctx, deadline := context.WithTimeout(ctx, 15*time.Minute)
+		defer deadline()
+		watchdog := time.AfterFunc(15*time.Minute, func() { os.Stdin.Close() })
+		defer watchdog.Stop()
+		handler := workerctl.ControlMain
+		if args[0] == "__worker_control_stream" {
+			handler = workerctl.ControlMainStream
+		}
+		if err := handler(ctx, os.Stdin, os.Stdout); err != nil {
+			backupFatal("Worker control response failed")
+		}
 	case "__worker_setup":
 		if err := backup.WorkerSetupCoordinator(); err != nil {
 			_ = backup.SendSetupFrame(backup.WorkerSetupResponse{Schema: 1, Error: err.Error()})
@@ -74,10 +107,16 @@ func Main() {
 			backupFatal("Capture: %v", err)
 		}
 	case "backup-worker":
+		if runDeclarativeWorker(args[0], args[1:]) {
+			return
+		}
 		if err := backup.RunCLI(args[1:]); err != nil {
 			backupFatal("Backup worker: %v", err)
 		}
 	case "notification-worker":
+		if runDeclarativeWorker(args[0], args[1:]) {
+			return
+		}
 		if err := notificationinstall.RunCLI(args[1:]); err != nil {
 			backupFatal("Notification worker: %v", err)
 		}
@@ -194,6 +233,12 @@ func Main() {
 			}
 			ui.LogSuccess("Server provisioning complete.")
 		case "migrate":
+			if len(args) == 4 && args[2] == "--to-version" && args[3] == "3" || len(args) == 3 && args[2] == "--to-version=3" {
+				if err := config.Version3Candidate(ui.InventoryPath(""), os.Stdout); err != nil {
+					ui.LogFatal("Server migration: %v", err)
+				}
+				return
+			}
 			if len(args) != 3 {
 				ui.LogFatal("Usage: deploy server migrate <name> (writes v2 YAML to stdout)")
 			}
@@ -332,8 +377,20 @@ func Main() {
 func printUsage() {
 	fmt.Println("Usage: deploy [--servers <path>] [--dry-run] <command> [args]")
 	fmt.Println("Commands:")
+	fmt.Println("  <backup-worker|notification-worker> <plan|status|configure|import|adopt> SERVER  Version-3 policy tools")
+	fmt.Println("  --dry-run <backup-worker|notification-worker> SERVER              Offline preview")
+	fmt.Println("  server migrate --to-version 3                                    Print a migration candidate")
+	fmt.Println("  notification-worker [apply|resume] SERVER                        Install/resume Telegram gateway; admit delivery after qualification")
+	fmt.Println("  notification-worker qualify SERVER                             Record actual qualification observations through a resumable wizard")
+	fmt.Println("  backup-worker qualify SERVER                                   Record actual backup qualification observations")
+	fmt.Println("  backup-worker activate SERVER                                  Enable schedules after qualification and a successful manual backup")
+	fmt.Println("  backup-worker run SERVER                                       Request one manual backup; inspect status/logs for completion")
+	fmt.Println("  notification-worker test SERVER [--provider NAME]               Test one YAML-configured destination without automatic fallback")
+	fmt.Println("  backup-worker [apply|resume|uninstall] SERVER                    Stage backup/dependency or remove standalone services")
+	fmt.Println("  notification-worker <test|uninstall> SERVER                       Explicit diagnostic / unbound service removal")
+	fmt.Println("  Signal/LED setup and general migrations remain in development.")
 	fmt.Println("  backup-worker <setup|update|status|run|list|pull|recover|verify|prune|restore-check|recovery-notifications|recovery-handoff|recovery-led-evidence|recovery-led-clear> …")
-	fmt.Println("  notification-worker <init|serve|status|notify-test> --local … (staging only)")
+	fmt.Println("  notification-worker <init|serve|status|notify-test> --local …")
 	fmt.Println("  notification-worker <snapshot|snapshot-verify|recovery-prepare|recovery-status|recovery-checkpoint|recovery-checkpoint-verify|recovery-publication-prepare|recovery-publication-verify|recovery-publish|recovery-review|recovery-decide> --local …")
 	fmt.Println("  notification-worker <setup|update> --local --spec <file> (native verification only)")
 	fmt.Println("  notification-worker <resume|uninstall|installation-status> --local --root <path>")
@@ -371,4 +428,25 @@ func printUsage() {
 func backupFatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
+}
+
+func runDeclarativeWorker(kind string, args []string) bool {
+	if !workerctl.Matches(args) {
+		return false
+	}
+	options := workerctl.Options{Inventory: ui.InventoryPath(""), DryRun: ui.DryRun, JSON: ui.JSON, NonInteractive: ui.NonInteractive}
+	// Version-2 named status/uninstall retain their original worker lifecycle.
+	// New operations require an explicit version-3 declaration.
+	if call, err := workerctl.Parse(args, options); err == nil && (call.Operation == "status" || call.Operation == "uninstall" || call.Operation == "resume" || call.Operation == "activate" || call.Operation == "run") {
+		if inv, err := config.ReadInventory(call.Options.Inventory); err == nil && inv.Version != 3 {
+			return false
+		}
+	}
+	controller := workerctl.CLI{Out: os.Stdout, Err: os.Stderr}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := controller.Run(ctx, kind, args, options); err != nil {
+		backupFatal("Worker: %v", err)
+	}
+	return true
 }

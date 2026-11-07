@@ -14,14 +14,19 @@ import (
 )
 
 type admittedSignalTransport struct {
-	check func(context.Context) error
-	fail  func(error)
-	next  http.RoundTripper
+	direct bool
+	check  func(context.Context) error
+	fail   func(error)
+	next   http.RoundTripper
 }
 
 func (t admittedSignalTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	err := t.check(r.Context())
-	if err == nil && (r.Method != http.MethodPost || r.URL.Scheme != "http" || r.URL.Host != "relay" || r.URL.RawQuery != "" || (r.URL.Path != "/reply" && r.URL.Path != "/inbound/list" && r.URL.Path != "/inbound/ack")) {
+	allowed := r.URL.Path == "/reply" || r.URL.Path == "/inbound/list" || r.URL.Path == "/inbound/ack"
+	if t.direct {
+		allowed = r.URL.Path == "/send"
+	}
+	if err == nil && (r.Method != http.MethodPost || r.URL.Scheme != "http" || r.URL.Host != "relay" || r.URL.RawQuery != "" || !allowed) {
 		err = fmt.Errorf("Signal request is outside admitted endpoint")
 	}
 	if err != nil {
@@ -32,6 +37,16 @@ func (t admittedSignalTransport) RoundTrip(r *http.Request) (*http.Response, err
 }
 
 func managedSignalTransport(m ManagedManifest, check func(context.Context) error, fail func(error)) (http.RoundTripper, func(), error) {
+	if m.FreshSignal != nil {
+		service, err := InspectFreshSignal(context.Background(), *m.FreshSignal, false)
+		if err != nil {
+			return nil, func() {}, err
+		}
+		return nativeSignalTransport(service.Spec.socket(), func(pid uint32) error {
+			return checkManagedNativeProcess(pid, service.executable(), service.commandArgs())
+		}, check, fail, true)
+	}
+
 	if m.SignalVerification == nil {
 		return nil, func() {}, fmt.Errorf("Signal service binding required")
 	}
@@ -42,7 +57,9 @@ func managedSignalTransport(m ManagedManifest, check func(context.Context) error
 	if service.Spec.Runtime == nil {
 		return nil, func() {}, fmt.Errorf("Signal transport requires production service")
 	}
-	socket := filepath.Join(service.Spec.Endpoint.Root, "api.sock")
+	return nativeSignalTransport(filepath.Join(service.Spec.Endpoint.Root, "api.sock"), func(pid uint32) error { return checkSignalServiceProcess(pid, service) }, check, fail, false)
+}
+func nativeSignalTransport(socket string, processCheck func(uint32) error, check func(context.Context) error, fail func(error), direct bool) (http.RoundTripper, func(), error) {
 	t := &http.Transport{DisableKeepAlives: true, ResponseHeaderTimeout: 9 * time.Second, MaxResponseHeaderBytes: 4096, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		info, err := os.Lstat(socket)
 		if err != nil {
@@ -69,11 +86,11 @@ func managedSignalTransport(m ManagedManifest, check func(context.Context) error
 			conn.Close()
 			return nil, fmt.Errorf("admitted Signal peer changed")
 		}
-		if err = checkSignalServiceProcess(uint32(credential.Pid), service); err != nil {
+		if err = processCheck(uint32(credential.Pid)); err != nil {
 			conn.Close()
 			return nil, err
 		}
 		return conn, nil
 	}}
-	return admittedSignalTransport{check: check, fail: fail, next: t}, t.CloseIdleConnections, nil
+	return admittedSignalTransport{direct: direct, check: check, fail: fail, next: t}, t.CloseIdleConnections, nil
 }

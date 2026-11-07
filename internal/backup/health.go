@@ -13,16 +13,17 @@ import (
 )
 
 type WorkerHealthProbe struct {
-	Schema          int                          `json:"schema"`
-	ObservedAt      time.Time                    `json:"observed_at"`
-	BootID          string                       `json:"boot_id"`
-	Uptime          float64                      `json:"uptime"`
-	ConfigHash      string                       `json:"config_hash"`
-	BackupHealthy   bool                         `json:"backup_healthy"`
-	DeliveryHealthy bool                         `json:"delivery_healthy"`
-	Healthy         bool                         `json:"healthy"`
-	Diagnostics     []string                     `json:"diagnostics"`
-	Units           map[string]map[string]string `json:"units"`
+	ReportingDisabled bool                         `json:"reporting_disabled,omitempty"`
+	Schema            int                          `json:"schema"`
+	ObservedAt        time.Time                    `json:"observed_at"`
+	BootID            string                       `json:"boot_id"`
+	Uptime            float64                      `json:"uptime"`
+	ConfigHash        string                       `json:"config_hash"`
+	BackupHealthy     bool                         `json:"backup_healthy"`
+	DeliveryHealthy   bool                         `json:"delivery_healthy"`
+	Healthy           bool                         `json:"healthy"`
+	Diagnostics       []string                     `json:"diagnostics"`
+	Units             map[string]map[string]string `json:"units"`
 }
 
 func (p WorkerHealthProbe) Fresh(now time.Time) bool {
@@ -43,6 +44,10 @@ func absFloat(n float64) float64 {
 
 func collectWorkerHealth(c WorkerInstallation, archivePath string, state *backupState) WorkerHealthProbe {
 	p := WorkerHealthProbe{Schema: 1, ObservedAt: time.Now().UTC(), ConfigHash: c.ConfigHash, Healthy: true, BackupHealthy: true, DeliveryHealthy: true, Diagnostics: []string{}, Units: map[string]map[string]string{}}
+	p.ReportingDisabled = c.Policy.Notifications.Mode == "disabled"
+	if p.ReportingDisabled {
+		p.DeliveryHealthy = false
+	}
 	delivery := false
 	fail := func(message string) {
 		p.Healthy = false
@@ -54,23 +59,19 @@ func collectWorkerHealth(c WorkerInstallation, archivePath string, state *backup
 		p.Diagnostics = append(p.Diagnostics, message)
 	}
 	var err error
+	var control ArchiveControl
+	if e := state.get("control", &control); e != nil || control.ReportingDisabled != p.ReportingDisabled {
+		fail("reporting policy differs from retained archive control")
+	}
 	p.BootID, p.Uptime, err = process.HostClock()
 	if err != nil {
 		fail("host monotonic clock unavailable")
 	}
-	mountInfo, mountErr := os.ReadFile("/proc/self/mountinfo")
-	mounted := false
-	if mountErr == nil {
-		for _, line := range strings.Split(string(mountInfo), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) > 6 && fields[4] == c.Policy.Storage.RequireMount {
-				mounted = true
-				break
-			}
+	if c.Policy.Storage.Mode != "home" {
+		mountInfo, mountErr := os.ReadFile("/proc/self/mountinfo")
+		if mountErr != nil || !workerMountPresent(mountInfo, c.Policy.Storage.RequireMount) {
+			fail("required backup mount is absent")
 		}
-	}
-	if !mounted {
-		fail("required backup mount is absent")
 	}
 	a, err := openBackupArchive(archivePath)
 	if err != nil {
@@ -133,6 +134,13 @@ func collectWorkerHealth(c WorkerInstallation, archivePath string, state *backup
 	}
 	if shared {
 		deliveryUnits = []string{"deploy-backup-report.timer", "deploy-backup-report.service"}
+	}
+	if p.ReportingDisabled {
+		if owner.Mode != "" {
+			delivery = true
+			fail("disabled reporting conflicts with notification ownership")
+		}
+		deliveryUnits = nil
 	}
 	units := append([]string{"deploy-backup.timer", "deploy-backup-health.timer", "deploy-backup-maintenance.timer", "deploy-backup.service", "deploy-backup-maintenance.service"}, deliveryUnits...)
 	for _, unit := range units {

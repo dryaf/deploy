@@ -42,12 +42,19 @@ func runBackupSignalAdoptionCLIWith(args []string, out io.Writer, prepare func(b
 		if !backupRecoveryPath(*home) || *path != "" {
 			return fmt.Errorf("Signal adoption review requires --home ABS and no specification")
 		}
-		c, err := readBackupRecoveryInstallation(filepath.Join(*home, ".config/deploy/backup-worker/runtime.json"))
+		layout, err := lookupInstalledBackupPaths(*home)
+		if err != nil {
+			return err
+		}
+		c, err := readBackupRecoveryInstallation(layout.Runtime)
 		if err != nil {
 			return err
 		}
 		// Review uses placeholders only for fields that do not select installed state.
 		spec = backupSignalAdoptionSpec{Version: 1, Home: *home, Operation: "n-00000000000000000000000000000000", ConfigHash: notify.Hash(c), ServiceBinding: notify.Hash("review"), Account: "11111111-1111-4111-8111-111111111111", Inbox: filepath.Join(*home, ".local/share/deploy/signal-adoption-review-inbox")}
+		if c.Paths != nil {
+			spec.Version, spec.Paths = 2, c.Paths
+		}
 	} else {
 		if !backupRecoveryPath(*path) || *home != "" {
 			return fmt.Errorf("Signal adoption requires --spec ABS; home is pinned in the specification")
@@ -98,7 +105,7 @@ func runBackupSignalAdoptionCLIWith(args []string, out io.Writer, prepare func(b
 	if current.Binding != spec.ServiceBinding {
 		return fmt.Errorf("legacy Signal service changed since review")
 	}
-	state, err := openBackupState(filepath.Join(spec.Home, ".local/state/deploy/backup-worker/state"), false)
+	state, err := openInstalledBackupState(spec.Home, false)
 	if err != nil {
 		return err
 	}

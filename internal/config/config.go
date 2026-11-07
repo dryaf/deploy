@@ -21,6 +21,7 @@ type Config struct {
 }
 
 type ServerConfig struct {
+	Desired        *DesiredWorkers     `yaml:"-" json:"-"`
 	Host           string              `yaml:"host"`
 	User           string              `yaml:"user"`
 	SSHPort        int                 `yaml:"ssh_port"`
@@ -207,6 +208,11 @@ func ReadServer(file string) (ServerConfig, error) {
 	if err != nil {
 		return cfg, err
 	}
+	return parseServer(file, data)
+}
+
+func parseServer(file string, data []byte) (ServerConfig, error) {
+	var cfg ServerConfig
 	if err := DecodeConfig(file, data, &cfg); err != nil {
 		return cfg, err
 	}

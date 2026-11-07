@@ -24,7 +24,10 @@ func TestManagedCommandRecoveryCannotRepeatCommittedEffect(t *testing.T) {
 func TestManagedCommandRecoveryBeforeConversionAndAliasMigration(t *testing.T) {
 	testManagedCommandRecoveryEffect(t, true)
 }
-func testManagedCommandRecoveryEffect(t *testing.T, migrate bool) {
+func TestManagedCommandRecoveryAfterPermissionRestore(t *testing.T) {
+	testManagedCommandRecoveryEffect(t, true, true)
+}
+func testManagedCommandRecoveryEffect(t *testing.T, migrate bool, restores ...bool) {
 	ctx := context.Background()
 	spec, i, c, active, record := managedCommandsFixture(t)
 	check := func(err error) {
@@ -107,6 +110,23 @@ func testManagedCommandRecoveryEffect(t *testing.T, migrate bool) {
 		drained, err = i.prepareCommands(ctx, "migrate-commands", spec.Root, protocol.Hash(drained), "", "", false, string(raw))
 		check(err)
 	}
+	if len(restores) == 1 && restores[0] {
+		current, e := InspectManagedCommandPolicy(ctx, spec.Root, protocol.Hash(drained), p)
+		check(e)
+		next := current
+		next.Revision = "reduced-before-restore"
+		next.Permissions = []interaction.Permission{}
+		raw, e := json.Marshal(next)
+		check(e)
+		drained, err = i.prepareCommands(ctx, "migrate-commands", spec.Root, protocol.Hash(drained), "", "", false, string(raw))
+		check(err)
+		current.Revision = "restored-before-recovery"
+		raw, e = json.Marshal(current)
+		check(e)
+		drained, err = i.prepareCommands(ctx, "restore-command-permissions", spec.Root, protocol.Hash(drained), "", "", false, string(raw))
+		check(err)
+	}
+
 	_, err = i.prepareDelivery(ctx, "deactivate-delivery", spec.Root, protocol.Hash(drained), "", false)
 	check(err)
 	check(i.services.Stop(ctx))

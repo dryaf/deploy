@@ -24,6 +24,7 @@ type managedCommandTransition struct {
 	Before   *managedCommandHead
 	After    managedCommandHead
 	Recovery *ManagedCommandRecovery `json:"recovery,omitempty"`
+	Grant    bool                    `json:"grant,omitempty"`
 }
 
 func (h managedCommandHead) valid() bool {
@@ -115,6 +116,12 @@ func (s *Store) RequireManagedCommandHistory(hash string) error {
 	if err := s.checkRetirementLease(); err != nil {
 		return err
 	}
+	return s.checkManagedCommandHistory(hash)
+}
+
+// Read-only snapshot preflight compares both authorities without acquiring a
+// runtime lease. Publication repeats this check under the exclusive lease.
+func (s *Store) checkManagedCommandHistory(hash string) error {
 	if hash != "" && !safefs.DigestPattern.MatchString(hash) {
 		return fmt.Errorf("invalid command history pin")
 	}
@@ -154,7 +161,11 @@ func (s *Store) commitManagedCommandAdmission(mode, hash, previous string, fault
 	return s.commitManagedCommandPolicy(mode, hash, previous, "", fault)
 }
 
-func (s *Store) commitManagedCommandPolicy(mode, hash, previous, policy string, fault func(string) error) error {
+func (s *Store) commitManagedCommandPolicy(mode, hash, previous, policy string, fault func(string) error, grants ...bool) error {
+	grant := len(grants) == 1 && grants[0]
+	if len(grants) > 1 || grant && policy == "" {
+		return fmt.Errorf("invalid explicit command grant")
+	}
 	after := managedCommandHead{Version: 1, Identity: s.identity, Hash: hash, Mode: mode, ActivationHash: s.deliveryActivationHash}
 	if s.verificationOnly || s.installationRevision == "" || s.config.Interaction == nil || !after.valid() || previous != "" && !safefs.DigestPattern.MatchString(previous) || previous == hash {
 		return fmt.Errorf("invalid command admission transition")
@@ -197,7 +208,7 @@ func (s *Store) commitManagedCommandPolicy(mode, hash, previous, policy string, 
 			if fileHead == nil || fileHead.Mode != "drain" || mode != "drain" {
 				return fmt.Errorf("narrowing requires disabled commands")
 			}
-			if err = validateCommandEnrollmentHistory(d, fileHead, s.config.Interaction, policy); err != nil {
+			if err = validateCommandEnrollmentHistory(d, fileHead, s.config.Interaction, policy, grant); err != nil {
 				return err
 			}
 			after.Policy = policy
@@ -205,7 +216,7 @@ func (s *Store) commitManagedCommandPolicy(mode, hash, previous, policy string, 
 		if after.Policy != "" {
 			after.Version = commandPolicyVersion(after.Policy)
 		}
-		intent = managedCommandTransition{Before: fileHead, After: after}
+		intent = managedCommandTransition{Before: fileHead, After: after, Grant: grant}
 		if err = d.WriteJSON(hash+".json", intent, false); err != nil {
 			return err
 		}
@@ -226,11 +237,11 @@ func (s *Store) commitManagedCommandPolicy(mode, hash, previous, policy string, 
 		if intent.Before == nil || intent.Before.Mode != "drain" || mode != "drain" {
 			return fmt.Errorf("narrowing requires disabled commands")
 		}
-		if _, err = narrowedCommandConfig(s.config.Interaction, intent.Before.Policy, policy); err != nil {
+		if _, err = changedCommandConfig(s.config.Interaction, intent.Before.Policy, policy, grant); err != nil {
 			return err
 		}
 	}
-	if !validCommandTransition(intent) || intent.After != after || (intent.Before == nil) != (previous == "") || intent.Before != nil && (!intent.Before.valid() || intent.Before.Hash != previous || intent.Before.Identity != s.identity) {
+	if intent.Grant != grant || !validCommandTransition(intent) || intent.After != after || (intent.Before == nil) != (previous == "") || intent.Before != nil && (!intent.Before.valid() || intent.Before.Hash != previous || intent.Before.Identity != s.identity) {
 		return fmt.Errorf("command transition intent changed")
 	}
 	audit, err := s.dir.Sub("managed-commands")
@@ -262,7 +273,7 @@ func (s *Store) commitManagedCommandPolicy(mode, hash, previous, policy string, 
 		raw, _ := json.Marshal(after)
 		if err = s.transaction(context.Background(), func(tx *sql.Tx) error {
 			if policy != "" && commandPolicyVersion(policy) == 3 {
-				next, e := narrowedCommandConfig(s.config.Interaction, intent.Before.Policy, policy)
+				next, e := changedCommandConfig(s.config.Interaction, intent.Before.Policy, policy, grant)
 				if e != nil {
 					return e
 				}

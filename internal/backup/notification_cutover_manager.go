@@ -17,7 +17,9 @@ import (
 )
 
 type backupCutoverManager struct {
+	freshShared  bool
 	home         string
+	paths        WorkerUnitPaths
 	legacy       map[string]string
 	legacyNative map[string]string
 	run          func(context.Context, string, ...string) ([]byte, error)
@@ -31,6 +33,12 @@ func cutoverSystemctl(ctx context.Context, args ...string) error {
 	return err
 }
 func (u *backupCutoverManager) inspect(ctx context.Context, name, source string, stopped, enabled bool) error {
+	return u.inspectReload(ctx, name, source, stopped, enabled, false)
+}
+
+// A retained report-unit replacement may have reached disk just before a crash.
+// Only that caller may inspect its exact fragment while a reload is still due.
+func (u *backupCutoverManager) inspectReload(ctx context.Context, name, source string, stopped, enabled, pendingReload bool) error {
 	properties := "LoadState,ActiveState,FragmentPath,SourcePath,DropInPaths,Names,MainPID,ControlPID,NeedDaemonReload,UnitFileState"
 	service := strings.HasSuffix(name, ".service")
 	if service {
@@ -55,7 +63,8 @@ func (u *backupCutoverManager) inspect(ctx context.Context, name, source string,
 		}
 		values[key] = value
 	}
-	if len(values) != len(strings.Split(properties, ",")) || values["LoadState"] != "loaded" || values["DropInPaths"] != "" || values["Names"] != name || values["NeedDaemonReload"] != "no" {
+	reloadOK := values["NeedDaemonReload"] == "no" || pendingReload && values["NeedDaemonReload"] == "yes"
+	if len(values) != len(strings.Split(properties, ",")) || values["LoadState"] != "loaded" || values["DropInPaths"] != "" || values["Names"] != name || !reloadOK {
 		return fmt.Errorf("service %s is not an exact loaded unit", name)
 	}
 	if service && (values["KillMode"] != "control-group" || values["SendSIGKILL"] != "yes") {
@@ -78,7 +87,13 @@ func (u *backupCutoverManager) inspect(ctx context.Context, name, source string,
 	return nil
 }
 func (u *backupCutoverManager) Prepare(ctx context.Context, c WorkerInstallation, p WorkerUnitPaths, helperHash string) error {
-	u.home = p.Home
+	u.home, u.paths = p.Home, p
+	u.freshShared = c.Policy.Notifications.Mode == "shared"
+	if u.freshShared {
+		if err := u.requireNoDirectSenders(ctx); err != nil {
+			return err
+		}
+	}
 	for _, name := range []string{"deploy-backup-report.service", "deploy-backup-report.timer", "deploy-backup-report.path"} {
 		if err := u.reportSlot(ctx, name); err != nil {
 			return err
@@ -103,12 +118,15 @@ func (u *backupCutoverManager) Prepare(ctx context.Context, c WorkerInstallation
 	if c.Policy.Notifications.Signal != nil {
 		names = append(names, "deploy-backup-signal.container")
 	}
+	if u.freshShared {
+		names = nil
+	}
 	for _, name := range names {
-		base := ".config/systemd/user/"
+		base := p.unitDirectory()
 		if strings.HasSuffix(name, ".container") {
-			base = ".config/containers/systemd/"
+			base = p.quadletDirectory()
 		}
-		raw, err := safefs.ReadFile(root, base+name, 1<<20)
+		raw, err := readBackupOwnedFile(root, filepath.Join(base, name), 1<<20)
 		if err != nil {
 			return err
 		}
@@ -119,13 +137,13 @@ func (u *backupCutoverManager) Prepare(ctx context.Context, c WorkerInstallation
 		if strings.HasSuffix(name, ".container") {
 			service += ".service"
 		}
-		source := filepath.Join(p.Home, base, name)
+		source := filepath.Join(base, name)
 		if err = u.inspect(ctx, service, source, false, false); err != nil {
 			return err
 		}
 		u.legacy[service] = source
 	}
-	helper, err := root.Open(".local/lib/deploy/backup-worker/deploy", os.O_RDONLY, 0)
+	helper, err := openBackupOwnedFile(root, p.helperFile(), os.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
@@ -145,14 +163,21 @@ func (u *backupCutoverManager) Prepare(ctx context.Context, c WorkerInstallation
 		return fmt.Errorf("backup helper hash changed")
 	}
 	// Probe the already opened file, not a PATH-selected or replaceable pathname.
-	cmd := exec.CommandContext(ctx, "/proc/self/fd/3", "backup-worker", "__notification-cutover-probe")
+	probe, expected := "__notification-cutover-probe", "backup-notification-cutover-v1"
+	if u.freshShared {
+		probe, expected = "__shared-reporting-probe", "backup-shared-reporting-v1"
+	}
+	cmd := exec.CommandContext(ctx, "/proc/self/fd/3", "backup-worker", probe)
 	cmd.ExtraFiles = []*os.File{helper}
 	output, err := process.LimitedOutput(cmd, 15*time.Second, 1024)
-	if err != nil || strings.TrimSpace(string(output)) != "backup-notification-cutover-v1" {
+	if err != nil || strings.TrimSpace(string(output)) != expected {
 		return fmt.Errorf("installed backup helper lacks ownership fencing/report support")
 	}
-	output, err = cutoverCommand(ctx, "podman", "run", "--rm", "--pull=never", "--network=none", "--read-only", c.Image, "backup-worker", "__notification-cutover-probe")
-	if err != nil || strings.TrimSpace(string(output)) != "backup-notification-cutover-v1" {
+	output, err = cutoverCommand(ctx, "podman", "run", "--rm", "--pull=never", "--network=none", "--read-only", c.Image, "backup-worker", probe)
+	if err != nil || strings.TrimSpace(string(output)) != expected {
+		if u.freshShared {
+			return fmt.Errorf("backup image lacks fresh shared reporting support; rebuild the matching image/helper bundle")
+		}
 		return fmt.Errorf("legacy image lacks notification cutover fencing")
 	}
 	if c.Policy.Notifications.Signal != nil {
@@ -166,6 +191,9 @@ func (u *backupCutoverManager) Prepare(ctx context.Context, c WorkerInstallation
 	return nil
 }
 func (u *backupCutoverManager) StopLegacy(ctx context.Context) error {
+	if u.freshShared {
+		return u.requireNoDirectSenders(ctx)
+	}
 	if err := cutoverSystemctl(ctx, "disable", "--now", "deploy-backup-notifier.timer", "deploy-backup-notifier.path"); err != nil {
 		return err
 	}
@@ -198,7 +226,7 @@ func (u *backupCutoverManager) StopLegacy(ctx context.Context) error {
 	return nil
 }
 func (u *backupCutoverManager) InstallReports(ctx context.Context, units map[string]string) error {
-	d, err := safefs.Open(filepath.Join(u.home, ".config/systemd/user"))
+	d, err := safefs.Open(u.unitDirectory())
 	if err != nil {
 		return err
 	}
@@ -239,11 +267,11 @@ func (u *backupCutoverManager) StartReports(ctx context.Context, units map[strin
 		return err
 	}
 	for _, name := range []string{"deploy-backup-report.timer", "deploy-backup-report.path"} {
-		if err := u.inspect(ctx, name, filepath.Join(u.home, ".config/systemd/user", name), false, true); err != nil {
+		if err := u.inspect(ctx, name, filepath.Join(u.unitDirectory(), name), false, true); err != nil {
 			return err
 		}
 	}
-	if err := u.inspect(ctx, "deploy-backup-report.service", filepath.Join(u.home, ".config/systemd/user/deploy-backup-report.service"), false, false); err != nil {
+	if err := u.inspect(ctx, "deploy-backup-report.service", filepath.Join(u.unitDirectory(), "deploy-backup-report.service"), false, false); err != nil {
 		return err
 	}
 	return cutoverSystemctl(ctx, "start", "deploy-backup-report.service")
@@ -259,7 +287,7 @@ func (u *backupCutoverManager) StopReports(ctx context.Context, units map[string
 		return err
 	}
 	for name := range units {
-		if err := u.inspect(ctx, name, filepath.Join(u.home, ".config/systemd/user", name), true, false); err != nil {
+		if err := u.inspect(ctx, name, filepath.Join(u.unitDirectory(), name), true, false); err != nil {
 			return err
 		}
 	}
@@ -303,8 +331,20 @@ func (u *backupCutoverManager) reportSlot(ctx context.Context, name string) erro
 	if commandErr != nil {
 		return commandErr
 	}
-	if values["LoadState"] != "loaded" || values["FragmentPath"] != filepath.Join(u.home, ".config/systemd/user", name) {
+	if values["LoadState"] != "loaded" || values["FragmentPath"] != filepath.Join(u.unitDirectory(), name) {
 		return fmt.Errorf("report unit name is owned by another fragment")
 	}
 	return nil
+}
+
+func (u *backupCutoverManager) unitDirectory() string {
+	p := u.paths
+	p.Home = u.home
+	return p.unitDirectory()
+}
+
+func (u *backupCutoverManager) quadletDirectory() string {
+	p := u.paths
+	p.Home = u.home
+	return p.quadletDirectory()
 }

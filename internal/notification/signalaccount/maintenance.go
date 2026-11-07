@@ -50,6 +50,9 @@ func (c serviceCoordinator) run(ctx context.Context, path string, request Servic
 		return MaintenanceStatus{}, err
 	}
 	defer d.Close()
+	if err = requireNoNativeService(d); err != nil {
+		return MaintenanceStatus{}, err
+	}
 
 	lease, err := d.Lock("deploy-service-link.lock", true, true)
 	if err != nil {

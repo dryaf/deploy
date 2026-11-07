@@ -40,6 +40,9 @@ func validCommandTransition(t managedCommandTransition) bool {
 	if !t.After.valid() || t.Before != nil && !t.Before.valid() {
 		return false
 	}
+	if t.Grant {
+		return t.Recovery == nil && t.Before != nil && t.Before.Identity == t.After.Identity && t.Before.Mode == "drain" && t.After.Mode == "drain" && commandPolicyVersion(t.After.Policy) == 3 && t.Before.Policy != t.After.Policy
+	}
 	if t.Recovery == nil {
 		if t.Before == nil {
 			return t.After.Policy == ""

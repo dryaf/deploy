@@ -23,6 +23,7 @@ type linkIntent struct {
 	Version, Sequence  int
 	ID, Name, Previous string
 	CreatedAt          time.Time
+	Native             *NativeCLI `json:",omitempty"`
 }
 type linkStart struct {
 	Intent string
@@ -151,7 +152,8 @@ func readHistory(d *safefs.Directory) (h linkHistory, err error) {
 		}
 		delete(files, name)
 		v := r.Intent
-		if v.Version != 1 || v.Sequence != i+1 || !safefs.ValidID(v.ID, "n") || ids[v.ID] || !protocol.ValidToken(v.Name) || v.Previous != previous || v.CreatedAt.IsZero() || v.CreatedAt.Before(lastTime) {
+		validVersion := v.Version == 1 && v.Native == nil || v.Version == 2 && v.Native != nil && v.Native.validate() == nil
+		if !validVersion || v.Sequence != i+1 || !safefs.ValidID(v.ID, "n") || ids[v.ID] || !protocol.ValidToken(v.Name) || v.Previous != previous || v.CreatedAt.IsZero() || v.CreatedAt.Before(lastTime) {
 			return h, fmt.Errorf("invalid Signal link intent")
 		}
 		ids[v.ID] = true
@@ -279,6 +281,11 @@ func Inspect(path string) (Status, error) {
 }
 
 func applyMaintenanceStatus(d *safefs.Directory, s *Status) error {
+	if present, err := nativeServicePresent(d); err != nil {
+		return err
+	} else if present {
+		s.RuntimeAllowed = false
+	}
 	r, err := readRecovery(d)
 	if err != nil {
 		s.RuntimeAllowed = false

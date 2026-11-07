@@ -62,12 +62,13 @@ func requireBackupLegacyReadablePaths(p WorkerUnitPaths, required ...string) err
 }
 
 func (u *backupCutoverManager) PrepareLegacy(ctx context.Context, c WorkerInstallation, p WorkerUnitPaths, hash string) error {
+	u.home, u.paths = p.Home, p
 	d, err := safefs.Open(p.Home)
 	if err != nil {
 		return err
 	}
 	defer d.Close()
-	f, err := d.Open(".local/lib/deploy/backup-worker/deploy", os.O_RDONLY, 0)
+	f, err := openBackupOwnedFile(d, p.helperFile(), os.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
@@ -107,7 +108,7 @@ func (u *backupCutoverManager) PrepareLegacy(ctx context.Context, c WorkerInstal
 		return err
 	}
 	for name := range units {
-		if err = u.inspect(ctx, name, filepath.Join(u.home, ".config/systemd/user", name), true, false); err != nil {
+		if err = u.inspect(ctx, name, filepath.Join(u.unitDirectory(), name), true, false); err != nil {
 			return err
 		}
 	}
@@ -121,14 +122,14 @@ func (u *backupCutoverManager) StartLegacy(ctx context.Context) error {
 	if err := u.InstallReports(ctx, u.legacyNative); err != nil {
 		return err
 	}
-	if err := u.inspect(ctx, "deploy-backup-legacy.service", filepath.Join(u.home, ".config/systemd/user/deploy-backup-legacy.service"), false, false); err != nil {
+	if err := u.inspect(ctx, "deploy-backup-legacy.service", filepath.Join(u.unitDirectory(), "deploy-backup-legacy.service"), false, false); err != nil {
 		return err
 	}
 	if err := cutoverSystemctl(ctx, "enable", "--now", "deploy-backup-legacy.timer", "deploy-backup-legacy.path"); err != nil {
 		return err
 	}
 	for _, name := range []string{"deploy-backup-legacy.timer", "deploy-backup-legacy.path"} {
-		if err := u.inspect(ctx, name, filepath.Join(u.home, ".config/systemd/user", name), false, true); err != nil {
+		if err := u.inspect(ctx, name, filepath.Join(u.unitDirectory(), name), false, true); err != nil {
 			return err
 		}
 	}

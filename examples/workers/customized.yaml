@@ -1,0 +1,50 @@
+# Version 3 desired worker policy.
+version: 3
+servers:
+  manager:
+    host: raspberrypi.local
+    user: deploy
+    notification_worker:
+      providers:
+        telegram:
+          token_file: ~/.config/deploy/secrets/telegram-token
+          chat_id_file: ~/.config/deploy/secrets/telegram-chat
+        signal:
+          account_file: ~/.config/deploy/secrets/signal-account
+          recipient_file: ~/.config/deploy/secrets/signal-recipient
+      routes:
+        alerts:
+          primary: telegram
+          fallback: signal
+      status_leds:
+        enabled: true
+        daemon:
+          mode: managed
+        bindings:
+          backups:
+            producer: backup-worker
+            subjects: [backup]
+            led: green
+      commands:
+        enabled: false
+      limits:
+        max_database_bytes: 536870912
+        receipt_audit_days: 90
+    backup_worker:
+      sources: [vps-main]
+      storage:
+        path: /mnt/backup/deploy
+        require_mount: /mnt/backup
+      schedule: hourly
+      timezone: Europe/Vienna
+      retention:
+        keep_last: 48
+        max_age: 720h
+      notifications:
+        worker: manager
+        route: alerts
+        repeat_after: 6h
+        daily_at: "09:00"
+  vps-main:
+    host: vps.example.com
+    user: deploy

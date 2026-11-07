@@ -50,7 +50,7 @@ func runBackupCutoverCLI(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	c, err := loadWorkerInstallation(filepath.Join(home, ".config/deploy/backup-worker/runtime.json"))
+	c, err := loadInstalledWorker(home)
 	if err != nil {
 		return err
 	}

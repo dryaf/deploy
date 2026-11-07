@@ -214,10 +214,12 @@ func (s *Store) eligibility(tx *sql.Tx, m protocol.Message, budget time.Duration
 }
 
 type Health struct {
+	LEDOutputDisposition   *LEDOutputStatus              `json:"led_output_disposition,omitempty"`
 	CommandAdmissionHash   string                        `json:"command_admission_hash,omitempty"`
 	CommandMode            string                        `json:"command_mode,omitempty"`
 	DeliveryActivationHash string                        `json:"delivery_activation_hash,omitempty"`
 	SignalProfilesHash     string                        `json:"signal_profiles_hash,omitempty"`
+	FreshSignalServiceHash string                        `json:"fresh_signal_service_hash,omitempty"`
 	SignalVerificationHash string                        `json:"signal_verification_hash,omitempty"`
 	TelegramRenewalID      string                        `json:"telegram_renewal_id,omitempty"`
 	RecoveryCommitHash     string                        `json:"recovery_commit_hash,omitempty"`
@@ -270,7 +272,11 @@ func (s *Store) clockSafe() bool {
 func (s *Store) Health(ctx context.Context) (Health, error) { return s.health(ctx, false) }
 
 func (s *Store) health(ctx context.Context, resolveInheritedWorker bool) (h Health, err error) {
-	h = Health{DeliveryActivationHash: s.deliveryActivationHash, SignalProfilesHash: s.signalProfilesHash, SignalVerificationHash: s.signalVerificationHash, Identity: s.identity, Condition: "ok", Subjects: map[string][]protocol.Subject{}, VerificationOnly: s.verificationOnly, InstallationRevision: s.installationRevision, RecoveryCommitHash: s.recoveryCommitHash, TelegramRenewalID: s.telegramRenewalID}
+	h = Health{FreshSignalServiceHash: s.freshSignalServiceHash, DeliveryActivationHash: s.deliveryActivationHash, SignalProfilesHash: s.signalProfilesHash, SignalVerificationHash: s.signalVerificationHash, Identity: s.identity, Condition: "ok", Subjects: map[string][]protocol.Subject{}, VerificationOnly: s.verificationOnly, InstallationRevision: s.installationRevision, RecoveryCommitHash: s.recoveryCommitHash, TelegramRenewalID: s.telegramRenewalID}
+	if len(s.config.Producers) == 0 {
+		// An unbound gateway has no production liveness evidence.
+		h.Condition = "unknown"
+	}
 	h.CommandMode, h.CommandAdmissionHash = s.managedCommandMode, s.managedCommandHash
 	active := map[string]bool{}
 	retired := map[string]*ProducerRetirement{}
@@ -284,6 +290,14 @@ func (s *Store) health(ctx context.Context, resolveInheritedWorker bool) (h Heal
 		}
 	}
 	err = s.transaction(ctx, func(tx *sql.Tx) error {
+		output, present, recorded, outputErr := s.readLEDOutput(ctx, tx)
+		if outputErr != nil {
+			return outputErr
+		}
+		if present {
+			status := ledOutputStatus(output, recorded)
+			h.LEDOutputDisposition = &status
+		}
 		clockOK := s.clockSafe()
 		inherited, e := s.recoveredLEDFaults(ctx, tx)
 		if e != nil {

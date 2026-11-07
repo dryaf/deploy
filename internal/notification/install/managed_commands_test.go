@@ -42,7 +42,8 @@ func managedCommandsFixtureUsing(t *testing.T, configure func(*Runtime)) (Manage
 	}
 	i.services = &fakeDeliveryServices{f}
 	nop := func(context.Context, *safefs.Directory, string, string) error { return nil }
-	i.commandProbe, i.deliveryProbe = nop, nop
+	// The fixture uses /bin/true; capability execution is covered separately.
+	i.commandProbe, i.deliveryProbe, i.commandPauseProbe = nop, nop, nop
 	i.deliveryInspect = func(ctx context.Context, m ManagedManifest, _ bool) error {
 		_, err := inspectManagedService(ctx, i.services, m, false)
 		return err

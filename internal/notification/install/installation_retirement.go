@@ -188,7 +188,7 @@ func (i managedInstaller) retireInstallation(ctx context.Context, root, manifest
 	defer s.Close()
 	var api worker.LEDAPI
 	if c.LEDSocket != "" {
-		api = led.Client{Socket: c.LEDSocket, Budget: 2 * time.Second}
+		api = led.Client{Socket: c.LEDSocket, Budget: 2 * time.Second, Endpoint: c.LEDEndpoint}
 		if i.ledAPI != nil {
 			api = i.ledAPI(c.LEDSocket)
 		}

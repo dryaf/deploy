@@ -159,6 +159,13 @@ func readRecovery(d *safefs.Directory) (r recoveryRecords, err error) {
 	return
 }
 func requireNoRecovery(d *safefs.Directory) error {
+	if err := requireNoNativeService(d); err != nil {
+		return err
+	}
+	return requireNoAccountRecovery(d)
+}
+
+func requireNoAccountRecovery(d *safefs.Directory) error {
 	r, err := readRecovery(d)
 	if err != nil {
 		return err
@@ -194,6 +201,10 @@ func InspectRecovery(path string) (RecoveryStatus, error) {
 	if err = maintenanceLinkEvidence(maintenance, links); err != nil {
 		return RecoveryStatus{}, err
 	}
-	s.RuntimeAllowed = s.RuntimeAllowed && links.runtimeAllowed() && maintenance.runtimeAllowed()
+	native, err := nativeServicePresent(d)
+	if err != nil {
+		return RecoveryStatus{}, err
+	}
+	s.RuntimeAllowed = s.RuntimeAllowed && links.runtimeAllowed() && maintenance.runtimeAllowed() && !native
 	return s, nil
 }

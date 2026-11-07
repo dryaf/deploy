@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -26,9 +27,10 @@ import (
 )
 
 type workerLifecycleRequest struct {
-	Operation string                                `json:"operation"`
-	Source    string                                `json:"source,omitempty"`
-	Results   []deploysource.SourceEnrollmentResult `json:"results,omitempty"`
+	DesiredHash string                                `json:"desired_hash,omitempty"`
+	Operation   string                                `json:"operation"`
+	Source      string                                `json:"source,omitempty"`
+	Results     []deploysource.SourceEnrollmentResult `json:"results,omitempty"`
 }
 
 type workerLifecycleJournal struct {
@@ -169,6 +171,35 @@ func workerLifecycleUsing(home string, request workerLifecycleRequest, qualify f
 		return err
 	}
 	defer dir.Close()
+	var setupExpansion WorkerSetupJournal
+	if err = dir.ReadJSON("setup.json", &setupExpansion); err != nil {
+		return err
+	}
+	if setupExpansion.SourceExpansion != nil || setupExpansion.SourceRetirement != nil || setupExpansion.NotificationScope != nil {
+		return fmt.Errorf("finish the retained source expansion before changing source access or uninstalling")
+	}
+	if request.DesiredHash != "" {
+		var setup WorkerSetupJournal
+		if !safefs.DigestPattern.MatchString(request.DesiredHash) {
+			return fmt.Errorf("invalid declared removal pin")
+		}
+		if err = dir.ReadJSON("setup.json", &setup); err != nil {
+			return err
+		}
+		desired := ""
+		if setup.Declaration != nil {
+			desired = setup.Declaration.DesiredHash
+		}
+		if setup.Activity != nil && setup.Activity.Setup == setup.RequestHash {
+			if setup.Activity.validate() != nil || !setup.Activity.Complete {
+				return fmt.Errorf("finish backup activity before removal")
+			}
+			desired = setup.Activity.DesiredHash
+		}
+		if operation != "uninstall" || setup.Declaration == nil || desired != request.DesiredHash || setup.Declaration.Home != home || setup.Declaration.UID != os.Getuid() || setup.Updating || setup.RecoveryNeeded || (setup.Stage != "complete" && setup.Stage != "uninstalled") {
+			return fmt.Errorf("uninstall requires the unchanged completed declaration")
+		}
+	}
 	var journal workerLifecycleJournal
 	readErr := dir.ReadJSON("lifecycle.json", &journal)
 	if readErr != nil && !os.IsNotExist(readErr) {
@@ -178,11 +209,27 @@ func workerLifecycleUsing(home string, request workerLifecycleRequest, qualify f
 		return fmt.Errorf("another lifecycle operation requires completion")
 	}
 	if stage == "prepare" && (os.IsNotExist(readErr) || journal.Stage == "complete" && (operation == "rotate-key" || journal.Operation != operation)) {
-		c, e := loadWorkerInstallation(filepath.Join(home, ".config/deploy/backup-worker/runtime.json"))
+		var setup WorkerSetupJournal
+		if e := dir.ReadJSON("setup.json", &setup); e != nil {
+			return e
+		}
+		if setup.Activity != nil {
+			observed, e := inspectSetupLocked(context.Background(), root, home)
+			if e != nil {
+				return e
+			}
+			if observed.Stage != "complete" || !setup.Activity.Complete || setup.Activity.Disabled && operation != "uninstall" {
+				return fmt.Errorf("finish or re-enable backup activity before this lifecycle")
+			}
+		}
+		c, e := loadInstalledWorker(home)
 		if e != nil {
 			return e
 		}
-		ownerState, e := openBackupState(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false)
+		if e = requireSettledDeclaredActivation(home); e != nil {
+			return e
+		}
+		ownerState, e := openInstalledBackupState(home, false)
 		if e != nil {
 			return e
 		}
@@ -193,6 +240,9 @@ func workerLifecycleUsing(home string, request workerLifecycleRequest, qualify f
 		}
 		if owner != nil && (owner.Binding.Producer.ID != c.WorkerID || owner.Binding.Archive != c.ArchiveID) {
 			return fmt.Errorf("lifecycle configuration differs from shared notification owner")
+		}
+		if request.DesiredHash != "" && operation == "uninstall" && (owner != nil || c.Policy.Notifications.Mode == "shared") {
+			return fmt.Errorf("shared backup removal requires producer retirement through the domain workflow before removing services")
 		}
 		journal = workerLifecycleJournal{Schema: 1, Operation: operation, Stage: "preparing", Installation: c, EnabledUnits: enabledWorkerUnitsFor(owner != nil), NotificationOwner: owner}
 		if owner != nil {
@@ -232,7 +282,10 @@ func workerLifecycleUsing(home string, request workerLifecycleRequest, qualify f
 	if journal.Stage == "complete" {
 		return json.NewEncoder(os.Stdout).Encode(journal)
 	}
-	state, err := openBackupState(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false)
+	if request.DesiredHash != "" && operation == "uninstall" && (journal.NotificationOwner != nil || journal.Installation.Policy.Notifications.Mode == "shared") {
+		return fmt.Errorf("shared backup removal requires producer retirement through the domain workflow")
+	}
+	state, err := openInstalledBackupState(home, false)
 	if err != nil {
 		return err
 	}
@@ -249,7 +302,11 @@ func workerLifecycleUsing(home string, request workerLifecycleRequest, qualify f
 	}
 	if operation == "uninstall" {
 		// A retry may follow removal of the already-disabled supervisor unit.
-		if _, e := safefs.ReadFile(root, ".config/systemd/user/"+recoveryTimer, 8<<20); e == nil {
+		layout, _, e := installedBackupPaths(root)
+		if e != nil {
+			return e
+		}
+		if _, e := readBackupOwnedFile(root, layout.OwnedPath(filepath.Join(layout.UnitDirectory, recoveryTimer)), 8<<20); e == nil {
 			if _, err = process.LimitedOutput(exec.Command("systemctl", "--user", "disable", "--now", recoveryTimer), 15*time.Second, 4096); err != nil {
 				return err
 			}
@@ -356,13 +413,23 @@ func workerLifecycleUsing(home string, request workerLifecycleRequest, qualify f
 			return fmt.Errorf("setup source enrollment history is missing")
 		}
 		setup.SourceEnrollments[journal.Source.Alias] = request.Results[0]
+		if setup.Declaration != nil {
+			if setup.SourceKeys == nil {
+				setup.SourceKeys = map[string]string{}
+			}
+			setup.SourceKeys[journal.Source.Alias] = fingerprint
+		}
 		if setup.OwnedFiles == nil {
 			setup.OwnedFiles = map[string]string{}
 		}
-		relative, e := filepath.Rel(home, journal.Source.KeyFile)
-		if e != nil || strings.HasPrefix(relative, "../") || filepath.IsAbs(relative) {
-			return fmt.Errorf("rotated key is outside the installation")
+		layout, e := declarationPaths(home, setup.Declaration)
+		if e != nil {
+			return e
 		}
+		if journal.Source.KeyFile != filepath.Join(layout.Keys(), journal.Source.Alias+".key") {
+			return fmt.Errorf("rotated key differs from the installed source path")
+		}
+		relative := layout.OwnedPath(journal.Source.KeyFile)
 		keyBytes, e := safefs.ReadFile(keys, name, 8192)
 		if e != nil {
 			return e
@@ -398,7 +465,7 @@ func workerLifecycleUsing(home string, request workerLifecycleRequest, qualify f
 		// Validate the complete ownership set before deleting anything. Interrupted
 		// removals may be absent, but a changed or foreign file is always preserved.
 		for name, hash := range setup.OwnedFiles {
-			body, e := safefs.ReadFile(root, name, 8<<20)
+			body, e := readBackupOwnedFile(root, name, 8<<20)
 			if os.IsNotExist(e) {
 				continue
 			}
@@ -412,7 +479,7 @@ func workerLifecycleUsing(home string, request workerLifecycleRequest, qualify f
 			}
 		}
 		for name := range setup.OwnedFiles {
-			parent, e := root.Sub(filepath.Dir(name))
+			parent, e := openBackupOwnedParent(root, name)
 			if e != nil {
 				return e
 			}

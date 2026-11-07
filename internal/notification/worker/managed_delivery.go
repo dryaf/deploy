@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -116,18 +117,24 @@ func (s *Store) requireManagedDeliveryOwner(o ManagedDeliveryOwner, hash string,
 		return fmt.Errorf("managed delivery state directory changed")
 	}
 
-	if o.validate() != nil || protocol.Hash(o) != hash || o.Identity != identity || o.ConfigHash != protocol.Hash(s.config) {
+	return checkManagedDeliveryOwnerRecord(s.dir, s.db, s.config, o, hash, identity)
+}
+func checkManagedDeliveryOwnerRecord(d *safefs.Directory, db ledRowReader, c Config, o ManagedDeliveryOwner, hash string, identity protocol.Identity) error {
+	if o.validate() != nil || protocol.Hash(o) != hash || o.Identity != identity {
 		return fmt.Errorf("managed delivery owner does not bind this instance")
 	}
+	if err := validateDeliveryOwnerConfig(d, db, c, o); err != nil {
+		return err
+	}
 	var current ManagedDeliveryOwner
-	if err := s.dir.ReadJSON(managedDeliveryOwnerFile, &current); err != nil {
+	if err := d.ReadJSON(managedDeliveryOwnerFile, &current); err != nil {
 		return err
 	}
 	if current != o {
 		return fmt.Errorf("retained delivery ownership changed")
 	}
 	var raw string
-	if err := s.db.QueryRow("SELECT value FROM metadata WHERE key=?", managedDeliveryOwnerKey).Scan(&raw); err != nil {
+	if err := db.QueryRowContext(context.Background(), "SELECT value FROM metadata WHERE key=?", managedDeliveryOwnerKey).Scan(&raw); err != nil {
 		return err
 	}
 	var anchored ManagedDeliveryOwner

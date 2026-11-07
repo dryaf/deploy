@@ -116,6 +116,11 @@ func readLEDEntry(ctx context.Context, q ledRowReader, binding string, revision 
 func (r *LEDReconciler) beginLEDOperation(ctx context.Context, kind, id string, state *led.State, evidence *Health) (entry ledOperationEntry, err error) {
 	s := r.Store
 	err = s.transaction(ctx, func(tx *sql.Tx) error {
+		if disabled, err := s.ledOutputAdmission(ctx, tx); err != nil {
+			return err
+		} else if disabled {
+			return fmt.Errorf("LED output is explicitly disabled")
+		}
 		if err := checkLEDLayout(ctx, tx, s.config, s.identity, true); err != nil {
 			return err
 		}

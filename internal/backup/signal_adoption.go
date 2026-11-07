@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/dryaf/deploy/internal/config"
@@ -17,13 +18,14 @@ import (
 )
 
 type backupSignalAdoptionSpec struct {
-	Version        int    `json:"version"`
-	Operation      string `json:"operation"`
-	Home           string `json:"home"`
-	ConfigHash     string `json:"config_hash"`
-	ServiceBinding string `json:"service_binding"`
-	Account        string `json:"account"`
-	Inbox          string `json:"inbox"`
+	Paths          *InstallationPaths `json:"paths,omitempty"`
+	Version        int                `json:"version"`
+	Operation      string             `json:"operation"`
+	Home           string             `json:"home"`
+	ConfigHash     string             `json:"config_hash"`
+	ServiceBinding string             `json:"service_binding"`
+	Account        string             `json:"account"`
+	Inbox          string             `json:"inbox"`
 }
 type backupSignalAdoption struct {
 	Spec     backupSignalAdoptionSpec     `json:"spec"`
@@ -32,13 +34,20 @@ type backupSignalAdoption struct {
 }
 
 func (s backupSignalAdoptionSpec) accountState() string {
+	if s.Paths != nil {
+		return s.Paths.RelayState()
+	}
 	return filepath.Join(s.Home, ".local/share/deploy/backup-worker/signal")
 }
 func (s backupSignalAdoptionSpec) validate() error {
-	if s.Version != 1 || !safefs.ValidID(s.Operation, "n") || !backupRecoveryPath(s.Home) || !backupRecoveryPath(s.Inbox) || !provider.ValidSignalAccount(s.Account) || !safefs.DigestPattern.MatchString(s.ConfigHash) || !safefs.DigestPattern.MatchString(s.ServiceBinding) {
+	if (s.Version != 1 && s.Version != 2) || (s.Version == 1 && s.Paths != nil) || (s.Version == 2 && (s.Paths == nil || s.Paths.Home != s.Home || s.Paths.Validate() != nil)) || !safefs.ValidID(s.Operation, "n") || !backupRecoveryPath(s.Home) || !backupRecoveryPath(s.Inbox) || !provider.ValidSignalAccount(s.Account) || !safefs.DigestPattern.MatchString(s.ConfigHash) || !safefs.DigestPattern.MatchString(s.ServiceBinding) {
 		return fmt.Errorf("invalid legacy Signal adoption pins")
 	}
-	for _, root := range []string{s.accountState(), filepath.Join(s.Home, ".local/state/deploy/backup-worker"), filepath.Join(s.Home, ".config/deploy/backup-worker")} {
+	roots := []string{s.accountState(), filepath.Join(s.Home, ".local/state/deploy/backup-worker"), filepath.Join(s.Home, ".config/deploy/backup-worker")}
+	if s.Paths != nil {
+		roots = append(roots, s.Paths.Config, s.Paths.State, s.Paths.Runtime, s.Paths.Installation, s.Paths.UnitDirectory, s.Paths.QuadletDirectory, s.Paths.RelaySocket())
+	}
+	for _, root := range roots {
 		if s.Inbox == root || strings.HasPrefix(s.Inbox, root+"/") || strings.HasPrefix(root, s.Inbox+"/") {
 			return fmt.Errorf("legacy Signal inbox overlaps installed backup state")
 		}
@@ -125,15 +134,19 @@ func prepareBackupSignalAdoption(s backupSignalAdoptionSpec) (*signalService, er
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
-	configuration := filepath.Join(s.Home, ".config/deploy/backup-worker/runtime.json")
+	layout, err := lookupInstalledBackupPaths(s.Home)
+	if err != nil {
+		return nil, err
+	}
+	configuration := layout.Runtime
 	c, err := readBackupRecoveryInstallation(configuration)
 	if err != nil {
 		return nil, err
 	}
-	if notify.Hash(c) != s.ConfigHash || c.Policy.Notifications.Signal == nil {
+	if notify.Hash(c) != s.ConfigHash || c.Policy.Notifications.Signal == nil || !reflect.DeepEqual(c.Paths, s.Paths) {
 		return nil, fmt.Errorf("legacy Signal installation changed")
 	}
-	raw, err := signalFile(filepath.Join(s.Home, ".config/deploy/backup-worker/images.json"), 8192)
+	raw, err := signalFile(filepath.Join(layout.Config, "images.json"), 8192)
 	if err != nil {
 		return nil, err
 	}
@@ -145,8 +158,6 @@ func prepareBackupSignalAdoption(s backupSignalAdoptionSpec) (*signalService, er
 		return nil, err
 	}
 	paths := backupCutoverPaths(s.Home, c)
-	paths.RelayState = s.accountState()
-	paths.RelaySocket = filepath.Join(s.Home, ".local/state/deploy/backup-worker/relay")
 	units, err := renderWorkerUnits(c, paths, images["worker"], images["relay"])
 	if err != nil {
 		return nil, err

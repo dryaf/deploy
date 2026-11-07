@@ -11,6 +11,38 @@ import (
 	"github.com/dryaf/deploy/internal/safefs"
 )
 
+// MigrateVerificationLEDBindings changes only the mapping of an installed,
+// inactive verification gateway. The exact predecessor receipt also identifies
+// a pending domain operation after an interrupted response.
+func MigrateVerificationLEDBindings(ctx context.Context, spec ManagedSpec, expected string) (ManagedManifest, error) {
+	return newManagedInstaller().migrateVerificationLEDBindings(ctx, spec, expected)
+}
+
+func (i managedInstaller) migrateVerificationLEDBindings(ctx context.Context, spec ManagedSpec, expected string) (ManagedManifest, error) {
+	if !safefs.DigestPattern.MatchString(expected) {
+		return ManagedManifest{}, fmt.Errorf("exact prior installation receipt required")
+	}
+	d, err := privateManagedDir(spec.Root, true)
+	if err != nil {
+		return ManagedManifest{}, err
+	}
+	lock, err := d.Lock("operation.lock", false, false)
+	if err != nil {
+		d.Close()
+		return ManagedManifest{}, err
+	}
+	j, err := readManagedJournal(d)
+	lock.Close()
+	d.Close()
+	if err != nil {
+		return ManagedManifest{}, err
+	}
+	if j.Intent.Operation == "migrate-led" && j.Intent.Before != nil && protocol.Hash(*j.Intent.Before) == expected {
+		return i.ensureVerification(ctx, spec)
+	}
+	return i.prepareExpected(ctx, "migrate-led", spec, expected)
+}
+
 func validateManagedLEDChange(before, after Runtime) error {
 	old, next := before, after
 	old.Worker.LEDBindings, next.Worker.LEDBindings = nil, nil
@@ -50,7 +82,7 @@ func (i managedInstaller) migrateLEDMapping(ctx context.Context, d *safefs.Direc
 	if err = i.probeLEDMapping(ctx, d, j.Intent.After); err != nil {
 		return err
 	}
-	var api worker.LEDAPI = led.Client{Socket: before.LEDSocket, Budget: 2 * time.Second}
+	var api worker.LEDAPI = led.Client{Socket: before.LEDSocket, Budget: 2 * time.Second, Endpoint: before.LEDEndpoint}
 	if i.ledAPI != nil {
 		api = i.ledAPI(before.LEDSocket)
 	}
@@ -68,4 +100,15 @@ func verifyManagedLEDCompletion(ctx context.Context, d *safefs.Directory, j mana
 	}
 	m := j.Intent.After
 	return worker.VerifyManagedLEDMapping(ctx, m.Paths.State, before.Worker, after.Worker, before.LEDSocket, m.Identity, j.Intent.ID)
+}
+
+func (i managedInstaller) requireLEDMappingOutputCapability(ctx context.Context, d *safefs.Directory, m ManagedManifest) error {
+	required, err := worker.MappingOutputRequired(m.Paths.State)
+	if err != nil {
+		return err
+	}
+	if !required {
+		return nil
+	}
+	return i.probeLEDMapping(ctx, d, m)
 }

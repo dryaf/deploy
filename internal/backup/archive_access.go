@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dryaf/deploy/internal/backup/protocol"
@@ -133,7 +135,17 @@ func readArchiveTransferBody(r io.Reader, w io.Writer, receipt SnapshotReceipt, 
 }
 
 func workerAdminCommand(server config.ServerConfig, args []string) *exec.Cmd {
-	command := "exec \"$HOME/.local/lib/deploy/backup-worker/deploy\" backup-worker"
+	helper := `"$HOME/.local/lib/deploy/backup-worker/deploy"`
+	if server.Desired != nil && server.Desired.Backup != nil {
+		if directory := server.Desired.Backup.Paths.Installation; directory != "" {
+			if strings.HasPrefix(directory, "~/") {
+				helper = `"$HOME"/` + transport.ShellQuote(filepath.Join(strings.TrimPrefix(directory, "~/"), "deploy"))
+			} else {
+				helper = transport.ShellQuote(filepath.Join(directory, "deploy"))
+			}
+		}
+	}
+	command := "exec " + helper + " backup-worker"
 	for _, arg := range args {
 		command += " " + transport.ShellQuote(arg)
 	}

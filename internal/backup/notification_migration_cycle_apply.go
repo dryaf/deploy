@@ -31,7 +31,7 @@ func runBackupMigrationCycle(ctx context.Context, home string, c WorkerInstallat
 	defer setup.Close()
 	paths := backupCutoverPaths(home, c)
 	var current WorkerInstallation
-	if err = root.ReadJSON(".config/deploy/backup-worker/runtime.json", &current); err != nil {
+	if err = readInstalledWorkerJSON(root, &current); err != nil {
 		return record, err
 	}
 	var journal WorkerSetupJournal
@@ -90,7 +90,7 @@ func runBackupMigrationCycle(ctx context.Context, home string, c WorkerInstallat
 	request.Revoke = true
 	err = deps.Managed(ctx, request, func(session install.ManagedProducerSession) error {
 		m := session.Manifest()
-		if m.UnitDirectory != filepath.Join(home, ".config/systemd/user") {
+		if m.UnitDirectory != backupCutoverPaths(home, c).unitDirectory() {
 			return fmt.Errorf("migration cycle manager changed")
 		}
 		units, err := renderBackupReportUnits(paths, c.Policy, session.CredentialPaths())

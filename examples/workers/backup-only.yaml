@@ -1,0 +1,20 @@
+# A standalone worker records local incidents without sending notifications.
+# A release bundle must supply matching digest-pinned images and helpers.
+version: 3
+servers:
+  manager:
+    host: raspberrypi.local
+    user: deploy
+    backup_worker:
+      sources: [vps-main]
+      notifications:
+        enabled: false
+      # Optional archive override (the default is under ~/.local/share/deploy).
+      # storage:
+      #   path: ~/backups
+      # Optional operator-local release catalog, relative to this inventory.
+      # artifacts:
+      #   catalog: ./workers/catalog.json
+  vps-main:
+    host: vps.example.com
+    user: app

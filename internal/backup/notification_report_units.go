@@ -23,8 +23,9 @@ func renderBackupReportUnits(paths WorkerUnitPaths, policy config.BackupWorkerCo
 			return nil, fmt.Errorf("report unit paths must be clean absolute paths")
 		}
 	}
-	helper := filepath.Join(paths.Home, ".local/lib/deploy/backup-worker/deploy")
+	helper := paths.helperFile()
 	denied := append([]string{}, extraCredentials...)
+	denied = append(denied, paths.DeniedPaths...)
 	policyWithoutMonitors := policy
 	policyWithoutMonitors.Monitoring = config.WorkerMonitoring{}
 	for path := range notificationMounts(policyWithoutMonitors) {

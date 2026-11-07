@@ -45,7 +45,7 @@ func runBackupRecoveryActivationCLI(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	c, err := loadWorkerInstallation(filepath.Join(home, ".config/deploy/backup-worker/runtime.json"))
+	c, err := loadInstalledWorker(home)
 	if err != nil {
 		return err
 	}
@@ -116,12 +116,13 @@ func (u *backupCutoverManager) PrepareMigrationCycle(ctx context.Context, p Work
 	return u.prepareNotificationCapability(ctx, p, hash, "__notification-cycle-probe", "backup-notification-cycle-v1")
 }
 func (u *backupCutoverManager) prepareNotificationCapability(ctx context.Context, p WorkerUnitPaths, hash, probe, response string) error {
+	u.home, u.paths = p.Home, p
 	d, err := safefs.Open(p.Home)
 	if err != nil {
 		return err
 	}
 	defer d.Close()
-	f, err := d.Open(".local/lib/deploy/backup-worker/deploy", os.O_RDONLY, 0)
+	f, err := openBackupOwnedFile(d, p.helperFile(), os.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}

@@ -6,9 +6,11 @@ import (
 
 // --- Global Flags ---
 var (
-	DryRun      bool
-	Verbose     bool
-	ServersFile string
+	DryRun         bool
+	NonInteractive bool
+	JSON           bool
+	Verbose        bool
+	ServersFile    string
 )
 
 func InventoryPath(application string) string {

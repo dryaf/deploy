@@ -57,7 +57,7 @@ func runLEDMigrationCLI(args []string, out io.Writer) error {
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	result, err := worker.MigrateLEDBindings(ctx, *state, before.Worker, after.Worker, before.LEDSocket, led.Client{Socket: before.LEDSocket, Budget: 2 * time.Second})
+	result, err := worker.MigrateLEDBindings(ctx, *state, before.Worker, after.Worker, before.LEDSocket, led.Client{Socket: before.LEDSocket, Budget: 2 * time.Second, Endpoint: before.LEDEndpoint})
 	if err != nil {
 		return err
 	}

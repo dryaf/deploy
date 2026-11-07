@@ -37,18 +37,20 @@ type ExpectedInstance struct {
 }
 
 type ArchiveControl struct {
-	RetentionPasses map[string]AutomaticRetentionPass `json:"retention_passes,omitempty"`
-	LatestSnapshots map[string]LatestSnapshot         `json:"latest_snapshots,omitempty"`
-	Schema          int                               `json:"schema"`
-	ArchiveID       string                            `json:"archive_id"`
-	WriterID        string                            `json:"writer_id"`
-	Epoch           uint64                            `json:"epoch"`
-	Revision        uint64                            `json:"revision"`
-	ConfigHash      string                            `json:"config_hash"`
-	Instances       map[string]ExpectedInstance       `json:"instances"`
-	RetiredSources  map[string]string                 `json:"retired_sources"`
-	Pins            map[string]string                 `json:"pins"`
-	Retention       *config.RetentionConfig           `json:"retention"`
+	SharedRequired    bool                              `json:"shared_required,omitempty"`
+	ReportingDisabled bool                              `json:"reporting_disabled,omitempty"`
+	RetentionPasses   map[string]AutomaticRetentionPass `json:"retention_passes,omitempty"`
+	LatestSnapshots   map[string]LatestSnapshot         `json:"latest_snapshots,omitempty"`
+	Schema            int                               `json:"schema"`
+	ArchiveID         string                            `json:"archive_id"`
+	WriterID          string                            `json:"writer_id"`
+	Epoch             uint64                            `json:"epoch"`
+	Revision          uint64                            `json:"revision"`
+	ConfigHash        string                            `json:"config_hash"`
+	Instances         map[string]ExpectedInstance       `json:"instances"`
+	RetiredSources    map[string]string                 `json:"retired_sources"`
+	Pins              map[string]string                 `json:"pins"`
+	Retention         *config.RetentionConfig           `json:"retention"`
 }
 
 func instanceKey(source, service string) string { return source + "/" + safefs.LockName(service) }

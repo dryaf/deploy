@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"encoding/json"
 	"github.com/dryaf/deploy/internal/backup/helper"
+	"github.com/dryaf/deploy/internal/config"
 	"github.com/dryaf/deploy/internal/process"
 	"github.com/dryaf/deploy/internal/safefs"
 	"github.com/dryaf/deploy/internal/testutil"
@@ -80,7 +82,9 @@ func TestBackupSetupInterruptedChild(t *testing.T) {
 	defer stateRoot.Close()
 	var journal WorkerSetupJournal
 	testutil.Must(t, stateRoot.ReadJSON("setup.json", &journal))
-	state, err := openBackupStateWithLease(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false, false, true)
+	layout, err := declarationPaths(home, journal.Declaration)
+	testutil.Must(t, err)
+	state, err := openBackupStateWithLease(layout.State, false, false, true)
 	testutil.Must(t, err)
 	defer state.Close()
 	a, err := openBackupArchive(journal.ArchivePath)
@@ -97,11 +101,11 @@ func TestBackupSetupInterruptedChild(t *testing.T) {
 	testutil.Must(t, err)
 	defer release()
 	testutil.Must(t, installWorkerTrust(root, stateRoot, &journal, []SetupSource{{Alias: "source", KnownHosts: "new host key"}}))
-	testutil.Must(t, installSetupFile(root, stateRoot, &journal, recoveryFixtureConfig, []byte("new configuration")))
+	testutil.Must(t, installSetupFile(root, stateRoot, &journal, layout.OwnedPath(layout.Runtime), []byte("new configuration")))
 	testutil.Must(t, a.updateControl(state, func(c *ArchiveControl) error { c.ConfigHash = strings.Repeat("b", 64); return nil }))
 	testutil.Must(t, state.put("min_free_bytes", int64(999)))
 	testutil.Must(t, state.put("installation", "staged"))
-	testutil.Must(t, helper.InstallSelf(home, "backup-worker"))
+	testutil.Must(t, helper.InstallSelfAt(home, "backup-worker", layout.Installation))
 	fmt.Fprintln(os.Stdout, "READY")
 	for {
 		time.Sleep(time.Second)
@@ -147,22 +151,24 @@ func assertSetupRecovered(t *testing.T, home string) {
 	if journal.RecoveryNeeded || journal.Updating || journal.Stage != "complete" || journal.RequestHash != "old-request" {
 		t.Fatalf("incomplete recovery: %+v", journal)
 	}
-	trust, err := os.ReadFile(filepath.Join(home, recoveryFixtureTrust))
+	layout, err := declarationPaths(home, journal.Declaration)
+	testutil.Must(t, err)
+	trust, err := os.ReadFile(filepath.Join(layout.Keys(), "source.known_hosts"))
 	testutil.Must(t, err)
 	if string(trust) != "old host key" {
 		t.Fatal("source trust not restored")
 	}
-	body, err := os.ReadFile(filepath.Join(home, recoveryFixtureConfig))
+	body, err := os.ReadFile(layout.Runtime)
 	testutil.Must(t, err)
 	if string(body) != "old configuration" {
 		t.Fatal("configuration not restored")
 	}
-	body, err = os.ReadFile(filepath.Join(home, ".local/lib/deploy/backup-worker/deploy"))
+	body, err = os.ReadFile(layout.Helper())
 	testutil.Must(t, err)
 	if string(body) != recoveryFixtureHelper {
 		t.Fatal("helper not restored")
 	}
-	state, err := openBackupState(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false)
+	state, err := openBackupState(layout.State, false)
 	testutil.Must(t, err)
 	defer state.Close()
 	var control ArchiveControl
@@ -183,8 +189,40 @@ func assertSetupRecovered(t *testing.T, home string) {
 }
 
 func TestBackupSetupSIGKILLRecovery(t *testing.T) {
+	for _, custom := range []bool{false, true} {
+		t.Run(fmt.Sprint("custom=", custom), func(t *testing.T) { testBackupSetupSIGKILLRecovery(t, custom) })
+	}
+}
+
+func testBackupSetupSIGKILLRecovery(t *testing.T, custom bool) {
 	home := t.TempDir()
 	setupRecoveryFixture(t, home)
+	// Carry declarative authority through the real interrupted update, including
+	// a failed service restart before rollback completion can be acknowledged.
+	root, err := safefs.Open(home)
+	testutil.Must(t, err)
+	var before WorkerSetupJournal
+	testutil.Must(t, root.ReadJSON(".local/state/deploy/backup-worker/setup.json", &before))
+	before.PreviousDeclaration = &SetupDeclaration{Version: 1, DesiredHash: strings.Repeat("c", 64), Home: home}
+	before.Declaration = &SetupDeclaration{Version: 1, DesiredHash: strings.Repeat("d", 64), Home: home}
+	if custom {
+		base := t.TempDir()
+		overrides := config.WorkerPaths{Config: filepath.Join(base, "config"), State: filepath.Join(base, "state"), Installation: filepath.Join(base, "artifacts"), UnitDirectory: filepath.Join(base, "units")}
+		p, e := ResolveInstallationPaths(home, "", "", "", overrides)
+		testutil.Must(t, e)
+		for old, next := range map[string]string{filepath.Join(home, ".config/deploy/backup-worker"): p.Config, filepath.Join(home, ".local/state/deploy/backup-worker/state"): p.State, filepath.Join(home, ".local/lib/deploy/backup-worker"): p.Installation, filepath.Join(home, ".config/systemd/user"): p.UnitDirectory} {
+			testutil.Must(t, os.Rename(old, next))
+		}
+		before.OwnedFiles = map[string]string{p.Runtime: fmtDigest([]byte("old configuration")), filepath.Join(p.Keys(), "source.known_hosts"): fmtDigest([]byte("old host key"))}
+		for i, d := range []*SetupDeclaration{before.PreviousDeclaration, before.Declaration} {
+			d.Version, d.Paths = 2, &p
+			d.Desired = &config.DesiredWorkers{Backup: &config.BackupDeclaration{Paths: overrides, Schedule: []string{"daily", "hourly"}[i]}}
+			d.DesiredHash, e = d.Desired.Fingerprint()
+			testutil.Must(t, e)
+		}
+	}
+	testutil.Must(t, root.WriteJSON(".local/state/deploy/backup-worker/setup.json", before, true))
+	root.Close()
 	bin := t.TempDir()
 	log := filepath.Join(bin, "calls")
 	script := `#!/bin/sh
@@ -198,10 +236,23 @@ case "$*" in
 esac
 `
 	testutil.Must(t, os.WriteFile(filepath.Join(bin, "systemctl"), []byte(script), 0700))
+	if custom {
+		p := before.Declaration.Paths
+		unitJSON, e := json.Marshal(map[string]any{"type": "as", "data": []string{p.UnitDirectory}})
+		testutil.Must(t, e)
+		envJSON, e := json.Marshal(map[string]any{"type": "as", "data": []string{"XDG_CONFIG_HOME=" + p.ConfigHome}})
+		testutil.Must(t, e)
+		script := "#!/bin/sh\ncase \"$*\" in\n *UnitPath) cat \"$BACKUP_UNIT_FACTS\";;\n *Environment) cat \"$BACKUP_ENV_FACTS\";;\n *) exit 1;;\nesac\n"
+		testutil.Must(t, os.WriteFile(filepath.Join(bin, "busctl"), []byte(script), 0700))
+		testutil.Must(t, os.WriteFile(filepath.Join(bin, "units.json"), unitJSON, 0600))
+		testutil.Must(t, os.WriteFile(filepath.Join(bin, "env.json"), envJSON, 0600))
+		t.Setenv("BACKUP_UNIT_FACTS", filepath.Join(bin, "units.json"))
+		t.Setenv("BACKUP_ENV_FACTS", filepath.Join(bin, "env.json"))
+	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	t.Setenv("BACKUP_RECOVERY_CALLS", log)
 	cmd := startInterruptedSetup(t, home)
-	if state, err := openBackupState(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false); err == nil {
+	if state, err := openInstalledBackupState(home, false); err == nil {
 		state.Close()
 		t.Fatal("state admitted during installation")
 	}
@@ -218,6 +269,14 @@ esac
 	t.Setenv("BACKUP_RECOVERY_FAIL_START", "0")
 	testutil.Must(t, recoverWorkerSetup(home))
 	assertSetupRecovered(t, home)
+	root, err = safefs.Open(home)
+	testutil.Must(t, err)
+	var restored WorkerSetupJournal
+	testutil.Must(t, root.ReadJSON(".local/state/deploy/backup-worker/setup.json", &restored))
+	root.Close()
+	if restored.Declaration == nil || restored.Declaration.DesiredHash != before.PreviousDeclaration.DesiredHash || restored.PreviousDeclaration != nil {
+		t.Fatal("rollback lost or replaced YAML authority")
+	}
 	calls, err := os.ReadFile(log)
 	testutil.Must(t, err)
 	if !strings.Contains(string(calls), "enable --now deploy-backup.timer") {

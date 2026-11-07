@@ -44,7 +44,12 @@ func control(path string, exclusive bool) (*safefs.Directory, *safefs.Lock, erro
 	if err != nil {
 		return nil, nil, err
 	}
-	l, err := d.Lock("deploy-account-control.lock", exclusive, true)
+	native, err := nativeServicePresent(d)
+	if err != nil {
+		d.Close()
+		return nil, nil, err
+	}
+	l, err := d.Lock("deploy-account-control.lock", exclusive, !native)
 	if err != nil {
 		d.Close()
 		return nil, nil, err

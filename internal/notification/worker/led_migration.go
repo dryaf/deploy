@@ -183,7 +183,10 @@ func prepareLEDMappingFor(ctx context.Context, s *Store, after Config, socket, o
 		}
 		m.Intent.Version, m.Intent.Position, m.Intent.ID, m.Intent.Identity, m.Intent.Socket = 1, count+1, id, s.identity, socket
 		m.Intent.BaseConfigHash, m.Intent.BeforeConfigHash, m.Intent.AfterConfigHash = ledBaseConfigHash(s.config), protocol.Hash(s.config), protocol.Hash(after)
-		m.Intent.Steps = ledMappingSteps(m.Intent.Before, m.Intent.After)
+		if e = pinLEDMappingOutput(ctx, s, tx, &m.Intent); e != nil {
+			return e
+		}
+		m.Intent.Steps = ledMappingIntentSteps(m.Intent)
 		if m.Intent.HistoryHash, e = ledHistoryHash(ctx, tx, ""); e != nil {
 			return e
 		}
@@ -197,6 +200,13 @@ func prepareLEDMappingFor(ctx context.Context, s *Store, after Config, socket, o
 }
 
 func checkLEDMappingPrerequisites(ctx context.Context, s *Store, tx *sql.Tx, v ledMappingIntent) error {
+	var expected = ledMappingIntent{Version: 1}
+	if err := pinLEDMappingOutput(ctx, s, tx, &expected); err != nil {
+		return err
+	}
+	if expected.LEDOutputOperation != v.LEDOutputOperation || expected.LEDOutputHash != v.LEDOutputHash || expected.LEDOutputDisabled != v.LEDOutputDisabled {
+		return fmt.Errorf("LED mapping output disposition changed")
+	}
 	for _, id := range changedLEDBindings(v.Before, v.After) {
 		var count int
 		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM led_states WHERE binding=?", id).Scan(&count); err != nil {

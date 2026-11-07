@@ -23,18 +23,22 @@ type ledMappingStep struct {
 }
 
 type ledMappingIntent struct {
-	Version          int               `json:"version"`
-	Position         int               `json:"position"`
-	ID               string            `json:"id"`
-	Identity         protocol.Identity `json:"identity"`
-	Socket           string            `json:"socket"`
-	BaseConfigHash   string            `json:"base_config_hash"`
-	BeforeConfigHash string            `json:"before_config_hash"`
-	AfterConfigHash  string            `json:"after_config_hash"`
-	Before           ledLayout         `json:"before"`
-	After            ledLayout         `json:"after"`
-	HistoryHash      string            `json:"history_hash"`
-	Steps            []ledMappingStep  `json:"steps"`
+	OutputBeforeConfig *Config           `json:"output_before_config,omitempty"`
+	LEDOutputOperation string            `json:"led_output_operation,omitempty"`
+	LEDOutputHash      string            `json:"led_output_hash,omitempty"`
+	LEDOutputDisabled  bool              `json:"led_output_disabled,omitempty"`
+	Version            int               `json:"version"`
+	Position           int               `json:"position"`
+	ID                 string            `json:"id"`
+	Identity           protocol.Identity `json:"identity"`
+	Socket             string            `json:"socket"`
+	BaseConfigHash     string            `json:"base_config_hash"`
+	BeforeConfigHash   string            `json:"before_config_hash"`
+	AfterConfigHash    string            `json:"after_config_hash"`
+	Before             ledLayout         `json:"before"`
+	After              ledLayout         `json:"after"`
+	HistoryHash        string            `json:"history_hash"`
+	Steps              []ledMappingStep  `json:"steps"`
 }
 
 type ledMappingRecord struct {
@@ -107,8 +111,17 @@ func ledMappingSteps(before, after ledLayout) []ledMappingStep {
 
 func validateLEDMapping(m ledMappingRecord, c Config, id protocol.Identity) error {
 	v := m.Intent
-	if v.Version != 1 || v.Position < 1 || v.Position > maxLEDMigrations || !safefs.ValidID(v.ID, "n") || v.Identity != id || !safefs.DigestPattern.MatchString(v.BaseConfigHash) || !safefs.DigestPattern.MatchString(v.BeforeConfigHash) || !safefs.DigestPattern.MatchString(v.AfterConfigHash) || !safefs.DigestPattern.MatchString(v.HistoryHash) || !validLEDSocket(v.Socket) {
+	if (v.Version != 1 && v.Version != 2) || v.Position < 1 || v.Position > maxLEDMigrations || !safefs.ValidID(v.ID, "n") || v.Identity != id || !safefs.DigestPattern.MatchString(v.BaseConfigHash) || !safefs.DigestPattern.MatchString(v.BeforeConfigHash) || !safefs.DigestPattern.MatchString(v.AfterConfigHash) || !safefs.DigestPattern.MatchString(v.HistoryHash) || !validLEDSocket(v.Socket) {
 		return fmt.Errorf("invalid LED migration identity")
+	}
+	if v.Version == 1 && (v.OutputBeforeConfig != nil || v.LEDOutputOperation != "" || v.LEDOutputHash != "" || v.LEDOutputDisabled) || v.Version == 2 && (v.OutputBeforeConfig == nil || !safefs.ValidID(v.LEDOutputOperation, "n") || !safefs.DigestPattern.MatchString(v.LEDOutputHash)) {
+		return fmt.Errorf("invalid LED mapping output handoff")
+	}
+	if v.Version == 2 {
+		c := *v.OutputBeforeConfig
+		if c.Validate() != nil || protocol.Hash(c) != v.BeforeConfigHash || ledBaseConfigHash(c) != v.BaseConfigHash || protocol.Hash(desiredLEDLayout(c, id.Worker, v.Before.UID).Bindings) != protocol.Hash(v.Before.Bindings) {
+			return fmt.Errorf("LED output mapping predecessor policy changed")
+		}
 	}
 	for _, layout := range []ledLayout{v.Before, v.After} {
 		config := c
@@ -120,7 +133,7 @@ func validateLEDMapping(m ledMappingRecord, c Config, id protocol.Identity) erro
 			return err
 		}
 	}
-	if v.After.Version != 2 || v.After.Revision != v.ID || v.Before.UID != v.After.UID || protocol.Hash(v.Before.Legacy) != protocol.Hash(v.After.Legacy) || protocol.Hash(v.Before.Bindings) == protocol.Hash(v.After.Bindings) || protocol.Hash(v.Steps) != protocol.Hash(ledMappingSteps(v.Before, v.After)) {
+	if v.After.Version != 2 || v.After.Revision != v.ID || v.Before.UID != v.After.UID || protocol.Hash(v.Before.Legacy) != protocol.Hash(v.After.Legacy) || protocol.Hash(v.Before.Bindings) == protocol.Hash(v.After.Bindings) || protocol.Hash(v.Steps) != protocol.Hash(ledMappingIntentSteps(v)) {
 		return fmt.Errorf("invalid LED migration mapping")
 	}
 	if m.Reconciliations < 0 || m.Next < 0 || m.Next > len(v.Steps) || m.Attempts < int64(m.Next) || m.UpdatedAt.IsZero() {
@@ -128,7 +141,7 @@ func validateLEDMapping(m ledMappingRecord, c Config, id protocol.Identity) erro
 	}
 	switch m.Outcome {
 	case "":
-		if m.Next != 0 || m.Attempts != 0 || m.Completed {
+		if m.Next != 0 || m.Attempts != 0 || m.Completed && !v.LEDOutputDisabled {
 			return fmt.Errorf("invalid empty LED migration")
 		}
 	case "pending", "uncertain":
@@ -261,6 +274,9 @@ func checkLEDMigrations(ctx context.Context, q ledJournalReader, c Config, ident
 		}
 	}
 	for i, m := range records {
+		if err := checkLEDMappingOutputPin(ctx, q, m.Intent); err != nil {
+			return err
+		}
 		if protocol.Hash(m.Intent.Before) != protocol.Hash(expected) {
 			return fmt.Errorf("broken LED mapping chain")
 		}
@@ -307,4 +323,13 @@ func checkLEDMigrations(ctx context.Context, q ledJournalReader, c Config, ident
 		return fmt.Errorf("orphan LED migration history")
 	}
 	return nil
+}
+
+func ledMappingIntentSteps(v ledMappingIntent) []ledMappingStep {
+	// Disabled output remains disabled. No baseline, healthy lease or fault is
+	// published or cleared by a mapping-only transition.
+	if v.LEDOutputDisabled {
+		return nil
+	}
+	return ledMappingSteps(v.Before, v.After)
 }

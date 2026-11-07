@@ -1,18 +1,19 @@
 package backup
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dryaf/deploy/internal/backup/helper"
@@ -35,39 +36,56 @@ type SetupSource struct {
 }
 
 type WorkerSetupRequest struct {
-	Recover    bool                      `json:"recover,omitempty"`
-	Fenced     bool                      `json:"fenced,omitempty"`
-	Operation  string                    `json:"operation,omitempty"`
-	Schema     int                       `json:"schema"`
-	Policy     config.BackupWorkerConfig `json:"policy"`
-	Sources    []SetupSource             `json:"sources"`
-	Image      string                    `json:"image"`
-	RelayImage string                    `json:"relay_image"`
+	Declaration *SetupDeclaration         `json:"declaration,omitempty"`
+	Recover     bool                      `json:"recover,omitempty"`
+	Fenced      bool                      `json:"fenced,omitempty"`
+	Operation   string                    `json:"operation,omitempty"`
+	Schema      int                       `json:"schema"`
+	Policy      config.BackupWorkerConfig `json:"policy"`
+	Sources     []SetupSource             `json:"sources"`
+	Image       string                    `json:"image"`
+	RelayImage  string                    `json:"relay_image"`
 }
 
 type WorkerSetupJournal struct {
-	Shared              *sharedWorkerSetup                             `json:"shared,omitempty"`
-	RecoveryNeeded      bool                                           `json:"recovery_needed,omitempty"`
-	ArchivePath         string                                         `json:"archive_path,omitempty"`
-	BeforeInstallation  string                                         `json:"before_installation,omitempty"`
-	BeforeHelper        *helper.HelperArtifactManifest                 `json:"before_helper,omitempty"`
-	CandidateHelper     string                                         `json:"candidate_helper,omitempty"`
-	Updating            bool                                           `json:"updating"`
-	BeforeControl       *ArchiveControl                                `json:"before_control,omitempty"`
-	BeforeMinFreeBytes  *int64                                         `json:"before_min_free_bytes,omitempty"`
-	PreviousRequestHash string                                         `json:"previous_request_hash,omitempty"`
-	EnabledUnits        []string                                       `json:"enabled_units,omitempty"`
-	StateInitializing   bool                                           `json:"state_initializing"`
-	StateInitialized    bool                                           `json:"state_initialized"`
-	Schema              int                                            `json:"schema"`
-	ID                  string                                         `json:"id"`
-	RequestHash         string                                         `json:"request_hash"`
-	WorkerID            string                                         `json:"worker_id"`
-	ArchiveID           string                                         `json:"archive_id"`
-	Stage               string                                         `json:"stage"`
-	SourceEnrollments   map[string]deploysource.SourceEnrollmentResult `json:"source_enrollments"`
-	Files               map[string]setupFileChange                     `json:"files"`
-	OwnedFiles          map[string]string                              `json:"owned_files"`
+	SharedPolicyExpansion    *setupSourceExpansion                          `json:"shared_policy_expansion,omitempty"`
+	SharedPolicyUpdate       *sharedPolicyUpdate                            `json:"shared_policy_update,omitempty"`
+	SharedPolicyHistory      *sharedPolicyReference                         `json:"shared_policy_history,omitempty"`
+	NotificationScope        *setupNotificationScope                        `json:"notification_scope,omitempty"`
+	NotificationScopeHistory *setupNotificationScopeReference               `json:"notification_scope_history,omitempty"`
+	SourceRetirement         *setupSourceRetirement                         `json:"source_retirement,omitempty"`
+	RetiredSources           map[string]SetupSourceRetirement               `json:"retired_sources,omitempty"`
+	TelegramRotation         *setupTelegramRotation                         `json:"telegram_rotation,omitempty"`
+	SourceExpansion          *setupSourceExpansion                          `json:"source_expansion,omitempty"`
+	Adoption                 *SetupAdoptionReference                        `json:"adoption,omitempty"`
+	Activity                 *declaredBackupActivity                        `json:"activity,omitempty"`
+	Producer                 *ProducerReservation                           `json:"producer,omitempty"`
+	SourceKeys               map[string]string                              `json:"source_keys,omitempty"`
+	PreviousDeclaration      *SetupDeclaration                              `json:"previous_declaration,omitempty"`
+	Declaration              *SetupDeclaration                              `json:"declaration,omitempty"`
+	HomeFilesystem           string                                         `json:"home_filesystem,omitempty"`
+	Shared                   *sharedWorkerSetup                             `json:"shared,omitempty"`
+	RecoveryNeeded           bool                                           `json:"recovery_needed,omitempty"`
+	ArchivePath              string                                         `json:"archive_path,omitempty"`
+	BeforeInstallation       string                                         `json:"before_installation,omitempty"`
+	BeforeHelper             *helper.HelperArtifactManifest                 `json:"before_helper,omitempty"`
+	CandidateHelper          string                                         `json:"candidate_helper,omitempty"`
+	Updating                 bool                                           `json:"updating"`
+	BeforeControl            *ArchiveControl                                `json:"before_control,omitempty"`
+	BeforeMinFreeBytes       *int64                                         `json:"before_min_free_bytes,omitempty"`
+	PreviousRequestHash      string                                         `json:"previous_request_hash,omitempty"`
+	EnabledUnits             []string                                       `json:"enabled_units,omitempty"`
+	StateInitializing        bool                                           `json:"state_initializing"`
+	StateInitialized         bool                                           `json:"state_initialized"`
+	Schema                   int                                            `json:"schema"`
+	ID                       string                                         `json:"id"`
+	RequestHash              string                                         `json:"request_hash"`
+	WorkerID                 string                                         `json:"worker_id"`
+	ArchiveID                string                                         `json:"archive_id"`
+	Stage                    string                                         `json:"stage"`
+	SourceEnrollments        map[string]deploysource.SourceEnrollmentResult `json:"source_enrollments"`
+	Files                    map[string]setupFileChange                     `json:"files"`
+	OwnedFiles               map[string]string                              `json:"owned_files"`
 }
 
 type setupFileChange struct {
@@ -77,18 +95,25 @@ type setupFileChange struct {
 }
 
 type WorkerSetupResponse struct {
-	Schema     int               `json:"schema"`
-	Stage      string            `json:"stage"`
-	WorkerID   string            `json:"worker_id"`
-	ArchiveID  string            `json:"archive_id"`
-	PublicKeys map[string]string `json:"public_keys"`
-	Error      string            `json:"error,omitempty"`
+	RetiringSources                  map[string]SetupSourceRetirement               `json:"retiring_sources,omitempty"`
+	ReadOnlySources                  map[string]deploysource.SourceEnrollmentResult `json:"read_only_sources,omitempty"`
+	NotificationPolicyUpdateRequired bool                                           `json:"notification_policy_update_required,omitempty"`
+	PolicyUpdateRequired             bool                                           `json:"policy_update_required,omitempty"`
+	Producer                         *ProducerReservation                           `json:"producer,omitempty"`
+	Unchanged                        bool                                           `json:"unchanged,omitempty"`
+	Schema                           int                                            `json:"schema"`
+	Stage                            string                                         `json:"stage"`
+	WorkerID                         string                                         `json:"worker_id"`
+	ArchiveID                        string                                         `json:"archive_id"`
+	PublicKeys                       map[string]string                              `json:"public_keys"`
+	Error                            string                                         `json:"error,omitempty"`
 }
 
 type WorkerSetupStep struct {
-	Operation  string                               `json:"operation"`
-	Alias      string                               `json:"alias,omitempty"`
-	Enrollment *deploysource.SourceEnrollmentResult `json:"enrollment,omitempty"`
+	RetiredSources map[string]deploysource.SourceEnrollmentResult `json:"retired_sources,omitempty"`
+	Operation      string                                         `json:"operation"`
+	Alias          string                                         `json:"alias,omitempty"`
+	Enrollment     *deploysource.SourceEnrollmentResult           `json:"enrollment,omitempty"`
 }
 
 func SendSetupFrame(value any) error {
@@ -116,6 +141,9 @@ func WorkerSetupCoordinator() error {
 	if request.Schema != 1 {
 		return fmt.Errorf("unsupported setup protocol")
 	}
+	if !validSetupOperation(request) {
+		return fmt.Errorf("unsupported installation operation")
+	}
 	request.Policy, err = config.NormalizeWorker(request.Policy)
 	if err != nil {
 		return err
@@ -132,6 +160,20 @@ func WorkerSetupCoordinator() error {
 	if err != nil {
 		return err
 	}
+	if err = validateSetupDeclaration(request, home); err != nil {
+		return err
+	}
+	if request.Operation == "adopt" {
+		result, e := AdoptWorkerSetup(context.Background(), home, request)
+		if e != nil {
+			return e
+		}
+		return SendSetupFrame(result)
+	}
+	layout, err := declarationPaths(home, request.Declaration)
+	if err != nil {
+		return err
+	}
 	if err = workerHostPreflight(home, request); err != nil {
 		return err
 	}
@@ -140,6 +182,11 @@ func WorkerSetupCoordinator() error {
 		return err
 	}
 	defer root.Close()
+	if request.Declaration != nil {
+		if err = checkDeclarativeSetupReservation(root, request.Declaration); err != nil {
+			return err
+		}
+	}
 	if err = root.Mkdir(".local/state/deploy/locks"); err != nil {
 		return err
 	}
@@ -156,16 +203,13 @@ func WorkerSetupCoordinator() error {
 		return err
 	}
 	defer stateRoot.Close()
-	if request.Operation != "setup" && request.Operation != "update" && request.Operation != "" {
-		return fmt.Errorf("unsupported installation operation")
-	}
-	canonicalRequest := request
-	canonicalRequest.Operation = ""
-	canonical, _ := json.Marshal(canonicalRequest)
-	requestHash := fmt.Sprintf("%x", sha256.Sum256(canonical))
+	requestHash := workerSetupRequestHash(request)
 	var journal WorkerSetupJournal
 	err = stateRoot.ReadJSON("setup.json", &journal)
 	if errors.Is(err, os.ErrNotExist) {
+		if request.Declaration != nil && request.Declaration.Desired != nil && len(request.Declaration.Desired.Backup.RetireSources) != 0 {
+			return fmt.Errorf("source retirement requires an existing declared installation")
+		}
 		journal.Schema = 1
 		journal.ID, err = safefs.NewID("n")
 		if err != nil {
@@ -180,7 +224,7 @@ func WorkerSetupCoordinator() error {
 			return err
 		}
 		if request.Recover {
-			recoveredState, e := openBackupState(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false)
+			recoveredState, e := openInstalledBackupState(home, false)
 			if e != nil {
 				return e
 			}
@@ -198,6 +242,13 @@ func WorkerSetupCoordinator() error {
 			journal.StateInitialized = true
 		}
 		journal.RequestHash = requestHash
+		journal.Declaration = request.Declaration
+		if request.Policy.Storage.Mode == "home" {
+			journal.HomeFilesystem, err = homeArchiveFilesystem(request.Policy.Storage.Path)
+			if err != nil {
+				return err
+			}
+		}
 		journal.Stage = "started"
 		journal.SourceEnrollments = map[string]deploysource.SourceEnrollmentResult{}
 		journal.Files = map[string]setupFileChange{}
@@ -209,6 +260,119 @@ func WorkerSetupCoordinator() error {
 		return err
 	} else if (journal.Schema != 1 || journal.Shared != nil) && (journal.Schema != 2 || journal.Shared == nil) {
 		return fmt.Errorf("unsupported setup journal")
+	}
+	if pending, e := inspectSetupAdoption(root, journal); e != nil {
+		return e
+	} else if pending {
+		result, e := adoptWorkerSetupLocked(context.Background(), root, home, request, nil)
+		if e != nil {
+			return e
+		}
+		return SendSetupFrame(result)
+	}
+	if err = verifyNotificationScopeHistory(root, journal); err != nil {
+		return err
+	}
+	if err = checkSharedPolicyUpdate(journal); err != nil {
+		return err
+	}
+	if err = requireSharedHelperRequest(journal, request); err != nil {
+		return err
+	}
+	if err = checkSetupNotificationScope(journal); err != nil {
+		return err
+	}
+	if request.Operation == "reserve" {
+		if handled, e := inspectCoordinatedNotificationReservation(root, stateRoot, journal, request); handled || e != nil {
+			if e != nil {
+				return e
+			}
+			return SendSetupFrame(WorkerSetupResponse{Schema: 1, Stage: "reserved", WorkerID: journal.WorkerID, ArchiveID: journal.ArchiveID, Producer: journal.Producer, NotificationPolicyUpdateRequired: true})
+		}
+	}
+	if journal.NotificationScope != nil {
+		return fmt.Errorf("notification policy migration is pending; resume notification-worker with the exact YAML")
+	}
+	if err = checkSetupProducerReservation(stateRoot, &journal); err != nil {
+		return err
+	}
+	if err = checkSetupSourceRetirement(root, journal, &request); err != nil {
+		return err
+	}
+	if err = checkSetupSourceExpansion(root, journal, &request); err != nil {
+		return err
+	}
+	if err = checkSetupTelegramRotation(journal, &request, false); err != nil {
+		return err
+	}
+	if journal.Declaration != nil && request.Declaration == nil {
+		return fmt.Errorf("declarative installation requires its retained YAML coordinator")
+	}
+	if request.Declaration != nil {
+		if journal.Stage == "uninstalled" {
+			return fmt.Errorf("retained backup installation is uninstalled; explicit reenrollment is required")
+		}
+		var lifecycle workerLifecycleJournal
+		if e := stateRoot.ReadJSON("lifecycle.json", &lifecycle); e == nil {
+			if lifecycle.Stage != "complete" || lifecycle.Operation == "uninstall" {
+				return fmt.Errorf("finish the retained backup lifecycle before applying YAML")
+			}
+		} else if !errors.Is(e, os.ErrNotExist) {
+			return e
+		}
+		if journal.Declaration == nil {
+			return fmt.Errorf("existing backup installation requires explicit declarative adoption")
+		}
+		if journal.Stage == "complete" && journal.StateInitialized {
+			if journal.Activity != nil && journal.SourceExpansion == nil && journal.SourceRetirement == nil {
+				observed, e := inspectSetupLocked(context.Background(), root, home)
+				if e != nil {
+					return e
+				}
+				if !journal.Activity.Complete || journal.Activity.Disabled || (observed.Stage != "complete" && observed.Stage != "helper_upgrade_pending") {
+					return fmt.Errorf("finish or re-enable the declared backup activity before setup")
+				}
+			}
+			if err = requireSettledDeclaredActivation(home); err != nil {
+				return err
+			}
+		}
+		// A completed fresh shared connection may precede this exact setup retry.
+		// Capture its report ownership before checking the pending-only fence.
+		if journal.Stage == "complete" && !journal.Updating && !journal.RecoveryNeeded {
+			if err = prepareSharedWorkerSetup(home, root, stateRoot, &journal, "setup"); err != nil {
+				return err
+			}
+		}
+		if journal.Updating && journal.PreviousDeclaration == nil {
+			return fmt.Errorf("declarative update lost its predecessor authority")
+		}
+		if err = requireWorkerSetupOwnership(home, &journal); err != nil {
+			return err
+		}
+	}
+	if request.Operation == "apply" {
+		request.Operation = "setup"
+		if journal.Updating || journal.Stage == "complete" && journal.RequestHash != requestHash {
+			request.Operation = "update"
+		}
+	}
+	if request.Policy.Storage.Mode == "home" {
+		filesystem, pinErr := homeArchiveFilesystem(request.Policy.Storage.Path)
+		if pinErr != nil || journal.HomeFilesystem == "" || filesystem != journal.HomeFilesystem {
+			return fmt.Errorf("home archive filesystem differs from the pinned setup; reconciliation required")
+		}
+		if journal.Stage == "complete" {
+			archive, openErr := openBackupArchive(request.Policy.Storage.Path)
+			if openErr != nil {
+				return fmt.Errorf("completed home archive is unavailable; recovery required")
+			}
+			matches := archive.identity.ID == journal.ArchiveID && archive.identity.WriterID == journal.WorkerID && archive.identity.FilesystemID == journal.HomeFilesystem
+			archive.Close()
+			if !matches {
+				return fmt.Errorf("completed home archive identity changed; recovery required")
+			}
+		}
 	}
 	if err = prepareSharedWorkerSetup(home, root, stateRoot, &journal, request.Operation); err != nil {
 		return err
@@ -222,31 +386,51 @@ func WorkerSetupCoordinator() error {
 		}
 	}
 	if request.Operation == "update" && journal.Stage == "complete" && journal.RequestHash != requestHash {
-		for path, hash := range journal.OwnedFiles {
-			body, e := safefs.ReadFile(root, path, 8<<20)
-			if e != nil || fmt.Sprintf("%x", sha256.Sum256(body)) != hash {
-				return fmt.Errorf("installed worker file drift: %s", path)
-			}
-		}
-		journal.PreviousRequestHash = journal.RequestHash
-		journal.RequestHash = requestHash
-		journal.Updating = true
-		journal.Stage = "prepared"
-		if err = stateRoot.WriteJSON("setup.json", journal, true); err != nil {
+		if err = beginWorkerSetupUpdate(root, stateRoot, &journal, request); err != nil {
 			return err
 		}
+	}
+	if request.Operation == "reserve" && journal.RequestHash != requestHash {
+		reservation, e := inspectSetupUpdateReservation(root, stateRoot, &journal, request)
+		if e != nil {
+			return e
+		}
+		return SendSetupFrame(WorkerSetupResponse{Schema: 1, Stage: "reserved", WorkerID: journal.WorkerID, ArchiveID: journal.ArchiveID, Producer: &reservation, PolicyUpdateRequired: true})
+	}
+	if request.Operation == "reserve" && journal.Updating {
+		reservation, e := inspectPendingSetupUpdateReservation(root, stateRoot, &journal, request)
+		if e != nil {
+			return e
+		}
+		return SendSetupFrame(WorkerSetupResponse{Schema: 1, Stage: "reserved", WorkerID: journal.WorkerID, ArchiveID: journal.ArchiveID, Producer: &reservation, PolicyUpdateRequired: true})
 	}
 	if journal.RequestHash != requestHash {
 		return fmt.Errorf("installation policy differs from its setup journal; use explicit update/reconciliation before changing it")
 	}
+	if request.Operation == "reserve" {
+		reservation, err := reserveSetupProducer(stateRoot, &journal)
+		if err != nil {
+			return err
+		}
+		return SendSetupFrame(WorkerSetupResponse{Schema: 1, Stage: "reserved", WorkerID: journal.WorkerID, ArchiveID: journal.ArchiveID, Producer: &reservation, PolicyUpdateRequired: journal.SourceRetirement != nil})
+	}
+	if request.Policy.Notifications.Mode == "shared" && (journal.Producer == nil || journal.Producer.Validate(journal.WorkerID) != nil) {
+		return fmt.Errorf("reserve the real backup producer before shared installation")
+	}
+	if journal.Stage == "complete" && journal.SourceRetirement != nil {
+		return finishSourceRetirementExchange(home, root, stateRoot, &journal)
+	}
 	if journal.Stage == "complete" {
+		if err = verifySetupSourceKeys(root, journal); err != nil {
+			return err
+		}
 		for path, hash := range journal.OwnedFiles {
-			body, err := safefs.ReadFile(root, path, 8<<20)
+			body, err := readBackupOwnedFile(root, path, 8<<20)
 			if err != nil || fmt.Sprintf("%x", sha256.Sum256(body)) != hash {
 				return fmt.Errorf("installed worker file drift requires reconciliation: %s", path)
 			}
 		}
-		return SendSetupFrame(WorkerSetupResponse{Schema: 1, Stage: "complete", WorkerID: journal.WorkerID, ArchiveID: journal.ArchiveID})
+		return SendSetupFrame(WorkerSetupResponse{Schema: 1, Stage: "complete", WorkerID: journal.WorkerID, ArchiveID: journal.ArchiveID, Unchanged: true})
 	}
 	if journal.Stage == "installing" {
 		if err = rollbackWorkerFiles(root, &journal); err != nil {
@@ -257,10 +441,7 @@ func WorkerSetupCoordinator() error {
 			return err
 		}
 	}
-	if err = root.Mkdir(".config/deploy/backup-worker/ssh"); err != nil {
-		return err
-	}
-	keys, err := root.Sub(".config/deploy/backup-worker/ssh")
+	keys, err := safefs.EnsureOwnedDirectory(layout.Keys())
 	if err != nil {
 		return err
 	}
@@ -270,50 +451,28 @@ func WorkerSetupCoordinator() error {
 		if !config.ValidInventoryName(source.Alias) || source.User == "root" || !config.ValidInventoryName(source.User) || source.Host == "" || strings.ContainsAny(source.Host, " \r\n\t") || strings.HasPrefix(source.Host, "-") || source.Port < 1 || source.Port > 65535 || len(source.KnownHosts) > 16384 {
 			return fmt.Errorf("invalid setup source")
 		}
-		keyFile := filepath.Join(home, ".config/deploy/backup-worker/ssh", source.Alias+".key")
-		f, err := keys.Open(source.Alias+".key", unix.O_RDONLY, 0)
-		if errors.Is(err, os.ErrNotExist) {
-			cmd := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "deploy-backup:"+journal.WorkerID+":"+source.Alias, "-f", keyFile)
-			if _, err = process.Output(cmd, 10*time.Second); err != nil {
-				return err
-			}
-			f, err = keys.Open(source.Alias+".key", unix.O_RDONLY, 0)
-		}
+		publicKeys[source.Alias], err = setupSourceKey(home, keys, stateRoot, &journal, source.Alias)
 		if err != nil {
 			return err
 		}
-		info, err := f.Stat()
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
-			f.Close()
-			return fmt.Errorf("unsafe worker source key")
-		}
-		if err = f.Sync(); err != nil {
-			f.Close()
-			return err
-		}
-		if err = keys.File().Sync(); err != nil {
-			f.Close()
-			return err
-		}
-		key, err := io.ReadAll(io.LimitReader(f, 16385))
-		f.Close()
-		if err != nil || len(key) > 16384 {
-			return fmt.Errorf("invalid worker source key")
-		}
-		signer, err := ssh.ParsePrivateKey(key)
-		if err != nil || signer.PublicKey().Type() != ssh.KeyAlgoED25519 {
-			return fmt.Errorf("worker source identity is not Ed25519")
-		}
-		publicKeys[source.Alias] = string(ssh.MarshalAuthorizedKey(signer.PublicKey()))
 		if err = stageWorkerTrust(home, root, stateRoot, &journal, source.Alias, []byte(source.KnownHosts)); err != nil {
 			return err
 		}
 	}
-	mount, err := safefs.Open(request.Policy.Storage.RequireMount)
+	if request.Declaration != nil && request.Declaration.Paths != nil {
+		if err = requireBackupManagerLayout(context.Background(), layout, cutoverCommand); err != nil {
+			return err
+		}
+	}
+	storageBase, err := workerStorageBase(home, request.Policy.Storage, layout)
 	if err != nil {
 		return err
 	}
-	relative, err := filepath.Rel(request.Policy.Storage.RequireMount, request.Policy.Storage.Path)
+	mount, err := safefs.Open(storageBase)
+	if err != nil {
+		return err
+	}
+	relative, err := filepath.Rel(storageBase, request.Policy.Storage.Path)
 	if err == nil && relative != "." {
 		err = mount.Mkdir(relative)
 	}
@@ -331,11 +490,14 @@ func WorkerSetupCoordinator() error {
 		return err
 	}
 	defer archive.Close()
+	if request.Policy.Storage.Mode == "home" && archive.identity.FilesystemID != journal.HomeFilesystem {
+		return fmt.Errorf("home archive filesystem changed during preparation")
+	}
 	journal.Stage = "prepared"
 	if err = stateRoot.WriteJSON("setup.json", journal, true); err != nil {
 		return err
 	}
-	if err = SendSetupFrame(WorkerSetupResponse{Schema: 1, Stage: "prepared", WorkerID: journal.WorkerID, ArchiveID: journal.ArchiveID, PublicKeys: publicKeys}); err != nil {
+	if err = SendSetupFrame(WorkerSetupResponse{Schema: 1, Stage: "prepared", WorkerID: journal.WorkerID, ArchiveID: journal.ArchiveID, PublicKeys: publicKeys, ReadOnlySources: readOnlySetupSources(journal)}); err != nil {
 		return err
 	}
 	for {
@@ -347,6 +509,9 @@ func WorkerSetupCoordinator() error {
 		if err = protocol.StrictBackupJSON(raw, &step); err != nil {
 			return err
 		}
+		if len(step.RetiredSources) != 0 {
+			return fmt.Errorf("unexpected source retirement acknowledgements")
+		}
 		switch step.Operation {
 		case "source":
 			if publicKeys[step.Alias] == "" || step.Enrollment == nil || step.Enrollment.Schema != 1 || step.Enrollment.WorkerID != journal.WorkerID || !safefs.ValidID(step.Enrollment.SourceID, "s") {
@@ -356,8 +521,7 @@ func WorkerSetupCoordinator() error {
 			if err != nil || ssh.FingerprintSHA256(public) != step.Enrollment.Fingerprint {
 				return fmt.Errorf("source enrolled a different key")
 			}
-			journal.SourceEnrollments[step.Alias] = *step.Enrollment
-			if err = stateRoot.WriteJSON("setup.json", journal, true); err != nil {
+			if err = recordSetupSourceEnrollment(stateRoot, &journal, step.Alias, *step.Enrollment); err != nil {
 				return err
 			}
 			if err = SendSetupFrame(WorkerSetupResponse{Schema: 1, Stage: "source-recorded"}); err != nil {
@@ -367,6 +531,9 @@ func WorkerSetupCoordinator() error {
 			if err = finishWorkerSetup(home, root, stateRoot, &journal, request, archive); err != nil {
 				return err
 			}
+			if journal.SourceRetirement != nil {
+				return finishSourceRetirementExchange(home, root, stateRoot, &journal)
+			}
 			return SendSetupFrame(WorkerSetupResponse{Schema: 1, Stage: "complete", WorkerID: journal.WorkerID, ArchiveID: journal.ArchiveID})
 		default:
 			return fmt.Errorf("unsupported setup transition")
@@ -375,6 +542,24 @@ func WorkerSetupCoordinator() error {
 }
 
 func workerHostPreflight(home string, request WorkerSetupRequest) error {
+	layout, err := declarationPaths(home, request.Declaration)
+	if err != nil {
+		return err
+	}
+	// Changing reporting mode is a separate ownership migration. A policy edit
+	// must not discard pending events or install a second sender.
+	installed := layout.Runtime
+	if _, e := os.Lstat(installed); e == nil {
+		previous, e := loadWorkerInstallation(installed)
+		if e != nil {
+			return e
+		}
+		if previous.Policy.Notifications.Mode != request.Policy.Notifications.Mode {
+			return fmt.Errorf("reporting mode change requires an explicit ownership migration")
+		}
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return e
+	}
 	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
 		return fmt.Errorf("worker requires 64-bit AMD64 or ARM64 Linux")
 	}
@@ -393,26 +578,45 @@ func workerHostPreflight(home string, request WorkerSetupRequest) error {
 	if _, err = process.Output(exec.Command("systemctl", "--user", "show-environment"), 5*time.Second); err != nil {
 		return fmt.Errorf("rootless user systemd manager is unavailable")
 	}
-	mountData, err := os.ReadFile("/proc/self/mountinfo")
+	storageBase, err := workerStorageBase(home, request.Policy.Storage, layout)
 	if err != nil {
 		return err
 	}
-	mounted := false
-	for _, line := range strings.Split(string(mountData), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) > 6 && fields[4] == request.Policy.Storage.RequireMount {
-			mounted = true
-			break
+	if request.Policy.Storage.Mode == "home" {
+		creationRoot, openErr := safefs.Open(storageBase)
+		if openErr != nil {
+			return fmt.Errorf("home archive creation parent is unavailable")
+		}
+		creationRoot.Close()
+		storageBase, err = existingArchiveAncestor(request.Policy.Storage.Path)
+		if err != nil {
+			return err
 		}
 	}
-	if !mounted {
-		return fmt.Errorf("required storage path is not an actual mountpoint")
+	if request.Policy.Storage.Mode != "home" {
+		mountData, readErr := os.ReadFile("/proc/self/mountinfo")
+		if readErr != nil {
+			return readErr
+		}
+		if !workerMountPresent(mountData, request.Policy.Storage.RequireMount) {
+			return fmt.Errorf("required storage path is not an actual mountpoint")
+		}
 	}
-	dir, err := safefs.Open(request.Policy.Storage.RequireMount)
+	dir, err := safefs.Open(storageBase)
 	if err != nil {
 		return err
 	}
 	defer dir.Close()
+	if request.Policy.Storage.Mode == "home" {
+		info, statErr := dir.File().Stat()
+		if statErr != nil {
+			return statErr
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || st.Uid != uint32(os.Getuid()) || info.Mode().Perm()&0022 != 0 {
+			return fmt.Errorf("home archive parent must be owned and not writable by others")
+		}
+	}
 	var fs unix.Statfs_t
 	if err = unix.Fstatfs(int(dir.File().Fd()), &fs); err != nil {
 		return err
@@ -477,7 +681,7 @@ func rollbackWorkerFiles(home *safefs.Directory, journal *WorkerSetupJournal) er
 	sort.Strings(names)
 	for _, name := range names {
 		change := journal.Files[name]
-		parent, err := home.Sub(filepath.Dir(name))
+		parent, err := openBackupOwnedParent(home, name)
 		if err != nil {
 			return err
 		}
@@ -515,7 +719,7 @@ func rollbackWorkerFiles(home *safefs.Directory, journal *WorkerSetupJournal) er
 func bytesEqual(a, b []byte) bool { return string(a) == string(b) }
 
 func installSetupFile(home, stateRoot *safefs.Directory, journal *WorkerSetupJournal, path string, body []byte) error {
-	parent, err := home.Sub(filepath.Dir(path))
+	parent, err := openBackupOwnedParent(home, path)
 	if err != nil {
 		return err
 	}
@@ -540,16 +744,44 @@ func installSetupFile(home, stateRoot *safefs.Directory, journal *WorkerSetupJou
 }
 
 func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *WorkerSetupJournal, request WorkerSetupRequest, archive *backupArchive) error {
+	return finishWorkerSetupUsing(home, root, stateRoot, journal, request, archive, workerSetupHostTools{qualifySource: deploysource.QualifyRestrictedSource})
+}
+
+// Only external source qualification and Quadlet execution are substituted in
+// offline transaction tests; keys, leases, archive/SQLite state and publication
+// run through the production implementation.
+type workerSetupHostTools struct {
+	qualifySource func(deploysource.WorkerSource, config.WorkerTimeouts) error
+	generator     string
+}
+
+func finishWorkerSetupUsing(home string, root, stateRoot *safefs.Directory, journal *WorkerSetupJournal, request WorkerSetupRequest, archive *backupArchive, tools workerSetupHostTools) error {
+	if err := checkSetupTelegramRotation(*journal, &request, false); err != nil {
+		return err
+	}
 	if err := requireWorkerSetupOwnership(home, journal); err != nil {
 		return err
 	}
+	if err := checkSetupSourceExpansion(root, *journal, &request); err != nil {
+		return err
+	}
+	if err := verifySetupSourceKeys(root, *journal); err != nil {
+		return err
+	}
+	layout, err := declarationPaths(home, request.Declaration)
+	if err != nil {
+		return err
+	}
 	c := WorkerInstallation{Image: request.Image, RelayImage: request.RelayImage, Schema: 1, WorkerID: journal.WorkerID, ArchiveID: journal.ArchiveID, Policy: request.Policy, Qualification: map[string]bool{}}
+	if request.Declaration != nil {
+		c.Paths = request.Declaration.Paths
+	}
 	for _, source := range request.Sources {
 		enrolled, ok := journal.SourceEnrollments[source.Alias]
 		if !ok {
 			return fmt.Errorf("source enrollment not recorded: %s", source.Alias)
 		}
-		c.Sources = append(c.Sources, deploysource.WorkerSource{Alias: source.Alias, Host: source.Host, User: source.User, Port: source.Port, KeyFile: filepath.Join(home, ".config/deploy/backup-worker/ssh", source.Alias+".key"), KnownHosts: filepath.Join(home, ".config/deploy/backup-worker/ssh", source.Alias+".known_hosts"), SourceID: enrolled.SourceID})
+		c.Sources = append(c.Sources, deploysource.WorkerSource{Alias: source.Alias, Host: source.Host, User: source.User, Port: source.Port, KeyFile: filepath.Join(layout.Keys(), source.Alias+".key"), KnownHosts: filepath.Join(layout.Keys(), source.Alias+".known_hosts"), SourceID: enrolled.SourceID})
 	}
 	if len(c.Sources) != len(c.Policy.Sources) {
 		return fmt.Errorf("source set differs from policy")
@@ -558,7 +790,7 @@ func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *
 	c.ConfigHash = fmt.Sprintf("%x", sha256.Sum256(body))
 	for _, source := range c.Sources {
 		source.KnownHosts = filepath.Join(home, stagedWorkerTrustPath(journal.ID, source.Alias))
-		if err := deploysource.QualifyRestrictedSource(source, c.Policy.Timeouts); err != nil {
+		if err := tools.qualifySource(source, c.Policy.Timeouts); err != nil {
 			return fmt.Errorf("restricted source qualification failed for %s: %w", source.Alias, err)
 		}
 	}
@@ -602,12 +834,17 @@ func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *
 			return fmt.Errorf("notification/monitoring secret unavailable: configure private worker-host files")
 		}
 	}
-	for _, name := range []string{".config/containers/systemd", ".config/systemd/user", ".local/share/deploy/backup-worker/signal", ".local/state/deploy/backup-worker/relay"} {
-		if err = root.Mkdir(name); err != nil {
-			return err
+	for _, name := range []string{layout.QuadletDirectory, layout.UnitDirectory, layout.Config, filepath.Dir(layout.Runtime), layout.RelayState(), layout.RelaySocket()} {
+		d, e := safefs.EnsureOwnedDirectory(name)
+		if e != nil {
+			return e
 		}
+		d.Close()
 	}
-	paths := WorkerUnitPaths{Home: home, Config: filepath.Join(home, ".config/deploy/backup-worker/runtime.json"), State: filepath.Join(home, ".local/state/deploy/backup-worker/state"), Archive: c.Policy.Storage.Path, Keys: filepath.Join(home, ".config/deploy/backup-worker/ssh"), RelayState: filepath.Join(home, ".local/share/deploy/backup-worker/signal"), RelaySocket: filepath.Join(home, ".local/state/deploy/backup-worker/relay")}
+	paths, err := layout.UnitPaths(c.Policy.Storage.Path)
+	if err != nil {
+		return err
+	}
 	units, err := workerSetupUnits(c, paths, journal)
 	if err != nil {
 		return err
@@ -633,9 +870,12 @@ func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *
 			return err
 		}
 	}
-	generator := "/usr/lib/systemd/system-generators/podman-system-generator"
-	if _, err = os.Stat(generator); err != nil {
-		generator = "/usr/libexec/podman/quadlet"
+	generator := tools.generator
+	if generator == "" {
+		generator = "/usr/lib/systemd/system-generators/podman-system-generator"
+		if _, err = os.Stat(generator); err != nil {
+			generator = "/usr/libexec/podman/quadlet"
+		}
 	}
 	generate := exec.Command(generator, "--user", "--dryrun")
 	generate.Env = append(deploysource.SourceProcessEnvironment(home), "QUADLET_UNIT_DIRS="+filepath.Join(home, stage))
@@ -718,10 +958,15 @@ func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *
 	if err != nil {
 		return err
 	}
+	if journal.TelegramRotation != nil && journal.TelegramRotation.Version == 3 {
+		if err = requireSettledBackupDestination(state); err != nil {
+			return err
+		}
+	}
 	var control ArchiveControl
 	err = state.get("control", &control)
 	if err == sql.ErrNoRows {
-		control = ArchiveControl{Schema: 1, ArchiveID: c.ArchiveID, WriterID: c.WorkerID, Epoch: archive.identity.Epoch, Revision: 1, ConfigHash: c.ConfigHash, Instances: map[string]ExpectedInstance{}, RetiredSources: map[string]string{}, Pins: map[string]string{}, Retention: c.Policy.Retention}
+		control = ArchiveControl{ReportingDisabled: c.Policy.Notifications.Mode == "disabled", SharedRequired: c.Policy.Notifications.Mode == "shared", Schema: 1, ArchiveID: c.ArchiveID, WriterID: c.WorkerID, Epoch: archive.identity.Epoch, Revision: 1, ConfigHash: c.ConfigHash, Instances: map[string]ExpectedInstance{}, RetiredSources: map[string]string{}, Pins: map[string]string{}, Retention: c.Policy.Retention}
 		if err = state.put("control", control); err != nil {
 			return err
 		}
@@ -741,6 +986,9 @@ func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *
 				return err
 			}
 		}
+	}
+	if control.ReportingDisabled != (c.Policy.Notifications.Mode == "disabled") || control.SharedRequired != (c.Policy.Notifications.Mode == "shared") {
+		return fmt.Errorf("reporting policy differs from retained archive control")
 	}
 	// A crash after creating control but before mode is a journal-owned bootstrap.
 	var mode string
@@ -782,22 +1030,22 @@ func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *
 		containerConfig.Sources[i].KeyFile = "/keys/" + c.Sources[i].Alias + ".key"
 		containerConfig.Sources[i].KnownHosts = "/keys/" + c.Sources[i].Alias + ".known_hosts"
 	}
-	for name, value := range map[string]any{"runtime.json": c, "container.json": containerConfig, "images.json": map[string]string{"worker": request.Image, "relay": request.RelayImage}} {
+	for name, value := range map[string]any{layout.Runtime: c, layout.ContainerRuntime(): containerConfig, filepath.Join(layout.Config, "images.json"): map[string]string{"worker": request.Image, "relay": request.RelayImage}} {
 		body, _ := json.Marshal(value)
-		if err = installSetupFile(root, stateRoot, journal, ".config/deploy/backup-worker/"+name, body); err != nil {
+		if err = installSetupFile(root, stateRoot, journal, layout.OwnedPath(name), body); err != nil {
 			return err
 		}
 	}
 	for name, body := range units {
-		directory := ".config/systemd/user"
+		directory := layout.UnitDirectory
 		if strings.HasSuffix(name, ".container") {
-			directory = ".config/containers/systemd"
+			directory = layout.QuadletDirectory
 		}
-		if err = installSetupFile(root, stateRoot, journal, filepath.Join(directory, name), []byte(body)); err != nil {
+		if err = installSetupFile(root, stateRoot, journal, layout.OwnedPath(filepath.Join(directory, name)), []byte(body)); err != nil {
 			return err
 		}
 	}
-	if err = helper.InstallSelf(home, "backup-worker"); err != nil {
+	if err = helper.InstallSelfAt(home, "backup-worker", layout.Installation); err != nil {
 		return err
 	}
 	if _, err = process.LimitedOutput(exec.Command("systemctl", "--user", "daemon-reload"), 15*time.Second, 4096); err != nil {
@@ -809,29 +1057,12 @@ func finishWorkerSetup(home string, root, stateRoot *safefs.Directory, journal *
 	if err = state.put("installation", "staged-awaiting-qualification"); err != nil {
 		return err
 	}
-	completed := *journal
-	completed.Stage = "complete"
-	completed.RecoveryNeeded = false
-	completed.BeforeHelper = nil
-	completed.BeforeInstallation = ""
-	completed.CandidateHelper = ""
-	completed.Updating = false
-	completed.BeforeControl = nil
-	completed.BeforeMinFreeBytes = nil
-	completed.PreviousRequestHash = ""
-	completed.EnabledUnits = nil
-	completed.OwnedFiles = map[string]string{}
-	for path, hash := range journal.OwnedFiles {
-		completed.OwnedFiles[path] = hash
-	}
-	for path, change := range journal.Files {
-		completed.OwnedFiles[path] = change.AfterHash
-	}
-	completed.Files = map[string]setupFileChange{}
-	if err = stateRoot.WriteJSON("setup.json", completed, true); err != nil {
+	if err = checkSetupTelegramRotation(*journal, &request, false); err != nil {
 		return err
 	}
-	*journal = completed
+	if err = commitWorkerSetupJournal(stateRoot, journal); err != nil {
+		return err
+	}
 	success = true
 	if err = clearInstallationGate(state.directory, journal.ID); err != nil {
 		return err

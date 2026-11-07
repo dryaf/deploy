@@ -14,9 +14,11 @@ import (
 )
 
 type linker struct {
-	now   func() time.Time
-	run   func(context.Context, *Lease, string, io.Writer) error
-	fault func(string) error
+	native  *NativeCLI
+	prepare func(context.Context, *Lease) error
+	now     func() time.Time
+	run     func(context.Context, *Lease, string, io.Writer) error
+	fault   func(string) error
 }
 
 func (l linker) boundary(point string) error {
@@ -34,6 +36,11 @@ func Link(ctx context.Context, path, name, operation string, out io.Writer) (Sta
 }
 
 func (l linker) link(ctx context.Context, path, name, operation string, out io.Writer) (status Status, retErr error) {
+	if l.native != nil {
+		if err := l.native.validate(); err != nil {
+			return Status{}, err
+		}
+	}
 	if !protocol.ValidToken(name) || !safefs.ValidID(operation, "n") || out == nil {
 		return Status{}, fmt.Errorf("invalid Signal device name or output")
 	}
@@ -75,6 +82,9 @@ func (l linker) link(ctx context.Context, path, name, operation string, out io.W
 	if len(h.Records) > 0 {
 		last := h.Records[len(h.Records)-1]
 		if last.Intent.ID == operation {
+			if (last.Intent.Native == nil) != (l.native == nil) || l.native != nil && *last.Intent.Native != *l.native {
+				return h.status(), fmt.Errorf("Signal link operation reused with another executable")
+			}
 			if last.Intent.Name != name {
 				return h.status(), fmt.Errorf("Signal link operation reused with another device name")
 			}
@@ -89,6 +99,11 @@ func (l linker) link(ctx context.Context, path, name, operation string, out io.W
 			return h.status(), fmt.Errorf("previous Signal link operation is unfinished")
 		}
 	}
+	if l.prepare != nil {
+		if err = l.prepare(ctx, lease); err != nil {
+			return h.status(), err
+		}
+	}
 	if r.Intent.ID == "" {
 		if len(h.Records) >= maxLinks {
 			return h.status(), fmt.Errorf("Signal link history is full")
@@ -97,6 +112,10 @@ func (l linker) link(ctx context.Context, path, name, operation string, out io.W
 			return h.status(), err
 		}
 		r.Intent = linkIntent{Version: 1, Sequence: len(h.Records) + 1, ID: operation, Name: name, CreatedAt: l.now().UTC()}
+		if l.native != nil {
+			selected := *l.native
+			r.Intent.Version, r.Intent.Native = 2, &selected
+		}
 		if len(h.Records) > 0 {
 			last := h.Records[len(h.Records)-1]
 			r.Intent.Previous = protocol.Hash(last)

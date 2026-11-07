@@ -152,6 +152,11 @@ func validateBackupCutoverFence(tx *sql.Tx, intent backupCutoverIntent) error {
 	if err != nil {
 		return err
 	}
+	if intent.Spec.Fresh != nil {
+		if err = requireFreshBackupReportingEvidence(tx, current); err != nil {
+			return err
+		}
+	}
 	before := intent.Evidence
 	if current.Control.ArchiveID != before.Control.ArchiveID || current.Control.WriterID != before.Control.WriterID || current.Control.Epoch != before.Control.Epoch || current.Control.ConfigHash != before.Control.ConfigHash || current.Journal.Head != before.Journal.Head || current.Journal.JournalPresent != before.Journal.JournalPresent {
 		return fmt.Errorf("legacy authority or attempt evidence changed behind cutover fence")

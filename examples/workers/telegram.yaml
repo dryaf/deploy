@@ -1,0 +1,14 @@
+# Version 3 desired worker policy.
+version: 3
+servers:
+  manager:
+    host: raspberrypi.local
+    user: deploy
+    notification_worker:
+      providers: [telegram]
+    backup_worker:
+      sources: [vps-main]
+
+  vps-main:
+    host: vps.example.com
+    user: deploy

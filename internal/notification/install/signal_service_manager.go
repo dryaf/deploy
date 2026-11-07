@@ -76,13 +76,17 @@ var signalServiceFixedProperties = map[string]string{
 }
 
 func (u userSignalServiceManager) snapshot(ctx context.Context, m SignalServiceManifest) (map[string]string, signalServiceState, error) {
+	return u.snapshotUnit(ctx, signalServiceUnit, m.Spec.UnitDirectory)
+}
+
+func (u userSignalServiceManager) snapshotUnit(ctx context.Context, unit, directory string) (map[string]string, signalServiceState, error) {
 	var out signalServiceState
 	keys := append([]string{"LoadState", "ActiveState", "SubState", "FragmentPath", "UnitFileState", "Names", "NeedDaemonReload", "Type", "MainPID"}, signalServiceEmptyProperties...)
 	for key := range signalServiceFixedProperties {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	raw, err := u.command(ctx, "systemctl", "--user", "--no-pager", "show", signalServiceUnit, "--all", "--property="+strings.Join(keys, ","))
+	raw, err := u.command(ctx, "systemctl", "--user", "--no-pager", "show", unit, "--all", "--property="+strings.Join(keys, ","))
 	if err != nil && len(raw) == 0 {
 		return nil, out, fmt.Errorf("Signal verifier manager inspection failed")
 	}
@@ -115,7 +119,7 @@ func (u userSignalServiceManager) snapshot(ctx context.Context, m SignalServiceM
 			return nil, out, fmt.Errorf("unsupported Signal verifier property %s", k)
 		}
 	}
-	if props["Names"] != "" && props["Names"] != signalServiceUnit {
+	if props["Names"] != "" && props["Names"] != unit {
 		return nil, out, fmt.Errorf("Signal verifier has aliases")
 	}
 	if props["LoadState"] == "not-found" && props["ActiveState"] == "inactive" && props["FragmentPath"] == "" && props["MainPID"] == "0" && props["UnitFileState"] == "" && props["SubState"] == "dead" && props["NeedDaemonReload"] == "no" {
@@ -124,7 +128,7 @@ func (u userSignalServiceManager) snapshot(ctx context.Context, m SignalServiceM
 	if commandErr != nil {
 		return nil, out, fmt.Errorf("Signal verifier manager inspection failed")
 	}
-	if props["LoadState"] != "loaded" || props["FragmentPath"] != filepath.Join(m.Spec.UnitDirectory, signalServiceUnit) || props["Names"] != signalServiceUnit || props["NeedDaemonReload"] != "no" || props["Type"] != "exec" || (props["UnitFileState"] != "enabled" && props["UnitFileState"] != "disabled") {
+	if props["LoadState"] != "loaded" || props["FragmentPath"] != filepath.Join(directory, unit) || props["Names"] != unit || props["NeedDaemonReload"] != "no" || props["Type"] != "exec" || (props["UnitFileState"] != "enabled" && props["UnitFileState"] != "disabled") {
 		return nil, out, fmt.Errorf("Signal verifier loaded unit differs")
 	}
 	for key, want := range signalServiceFixedProperties {
@@ -145,21 +149,25 @@ func (u userSignalServiceManager) snapshot(ctx context.Context, m SignalServiceM
 	return props, out, nil
 }
 func (u userSignalServiceManager) Inspect(ctx context.Context, m SignalServiceManifest) (signalServiceState, error) {
-	before, state, err := u.snapshot(ctx, m)
+	return u.inspectUnit(ctx, signalServiceUnit, m.Spec.UnitDirectory, "/org/freedesktop/systemd1/unit/deploy_2dnotification_2dsignal_2dverification_2eservice", m.executable(), m.commandArgs())
+}
+
+func (u userSignalServiceManager) inspectUnit(ctx context.Context, unit, directory, object, executable string, args []string) (signalServiceState, error) {
+	before, state, err := u.snapshotUnit(ctx, unit, directory)
 	if err != nil || !state.Loaded {
 		return state, err
 	}
 	check := func() error {
-		raw, err := u.command(ctx, "busctl", "--user", "--json=short", "get-property", "org.freedesktop.systemd1", "/org/freedesktop/systemd1/unit/deploy_2dnotification_2dsignal_2dverification_2eservice", "org.freedesktop.systemd1.Service", "ExecStartEx")
+		raw, err := u.command(ctx, "busctl", "--user", "--json=short", "get-property", "org.freedesktop.systemd1", object, "org.freedesktop.systemd1.Service", "ExecStartEx")
 		if err != nil {
 			return fmt.Errorf("Signal verifier manager command inspection failed")
 		}
-		return parseSignalExec(raw, m.executable(), m.commandArgs(), nil)
+		return parseSignalExec(raw, executable, args, nil)
 	}
 	if err = check(); err != nil {
 		return state, err
 	}
-	after, _, err := u.snapshot(ctx, m)
+	after, _, err := u.snapshotUnit(ctx, unit, directory)
 	if err != nil {
 		return state, err
 	}
@@ -170,7 +178,7 @@ func (u userSignalServiceManager) Inspect(ctx context.Context, m SignalServiceMa
 		return state, err
 	}
 	if state.Active {
-		if err = checkSignalServiceProcess(state.PID, m); err != nil {
+		if err = checkManagedNativeProcess(state.PID, executable, args); err != nil {
 			return state, err
 		}
 	}

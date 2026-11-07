@@ -9,11 +9,10 @@ import (
 	notify "github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/safefs"
 	"os"
-	"path/filepath"
 )
 
 func runBackupRemigration(ctx context.Context, home string, c WorkerInstallation, spec backupRemigrationSpec, revoke bool, deps backupCutoverDependencies) error {
-	if spec.Version != 1 || !safefs.DigestPattern.MatchString(spec.RollbackHash) || spec.Cutover.Managed.LegacyGeneration != "" {
+	if spec.Cutover.Fresh != nil || c.Policy.Notifications.Mode == "shared" || spec.Version != 1 || !safefs.DigestPattern.MatchString(spec.RollbackHash) || spec.Cutover.Managed.LegacyGeneration != "" {
 		return fmt.Errorf("remigration requires the exact completed legacy rollback")
 	}
 	if err := validateBackupCutoverSpec(spec.Cutover, c); err != nil {
@@ -30,7 +29,7 @@ func runBackupRemigration(ctx context.Context, home string, c WorkerInstallation
 	}
 	defer setup.Close()
 	var installed WorkerInstallation
-	if err = root.ReadJSON(".config/deploy/backup-worker/runtime.json", &installed); err != nil {
+	if err = readInstalledWorkerJSON(root, &installed); err != nil {
 		return err
 	}
 	if notify.Hash(installed) != spec.Cutover.ConfigHash {
@@ -105,7 +104,7 @@ func runBackupRemigration(ctx context.Context, home string, c WorkerInstallation
 		}
 		predecessors, ok := session.(install.ManagedRemigrationProducerSession)
 		m := session.Manifest()
-		if !ok || m.UnitDirectory != filepath.Join(home, ".config/systemd/user") {
+		if !ok || m.UnitDirectory != backupCutoverPaths(home, c).unitDirectory() {
 			return fmt.Errorf("remigration requires an initialized managed gateway with predecessor checks")
 		}
 		var err error

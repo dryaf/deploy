@@ -251,6 +251,9 @@ func (j *legacyDeliveryJournal) reserve(ctx context.Context, s *backupState, c W
 		if err != nil {
 			return err
 		}
+		if control.SharedRequired || control.ReportingDisabled {
+			return fmt.Errorf("direct delivery is disabled by retained archive policy")
+		}
 		if control.ArchiveID == "" || control.WriterID == "" || control.Epoch == 0 {
 			return fmt.Errorf("legacy delivery source authority is missing")
 		}

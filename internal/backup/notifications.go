@@ -20,6 +20,13 @@ import (
 const eventTimeLayout = "2006-01-02T15:04:05.000000000Z"
 
 func enqueueNotification(tx *sql.Tx, event notification.NotificationEvent, now time.Time) error {
+	control, err := incidentControl(tx)
+	if err != nil {
+		return err
+	}
+	if control.ReportingDisabled {
+		return nil
+	}
 	if err := freezeBackupEventContext(tx, event); err != nil {
 		return err
 	}
@@ -226,6 +233,9 @@ func drainNotificationOutbox(ctx context.Context, state *backupState, c WorkerIn
 }
 
 func drainNotificationOutboxWith(ctx context.Context, state *backupState, c WorkerInstallation, send notification.Sender, now time.Time, fault func(string) error) (err error) {
+	if err := requireBackupReporting(state, c); err != nil {
+		return err
+	}
 	if err = requireLegacyDeliveryOwner(state); err != nil {
 		return err
 	}
@@ -462,7 +472,7 @@ func evaluateWorkerHealth(c WorkerInstallation, state *backupState, now time.Tim
 	if err := state.get("health_probe", &probe); err != nil || !probe.Fresh(now) || !probe.BackupHealthy || probe.ConfigHash != c.ConfigHash {
 		problems = append(problems, "independent host/timer/storage evidence unavailable or unhealthy")
 	}
-	for _, gate := range []string{"source_restrictions", "rootless_runtime", "storage_durability", "notification_delivery", "external_monitor"} {
+	for _, gate := range workerQualificationGates(c, false) {
 		if !c.Qualification[gate] {
 			problems = append(problems, "qualification pending: "+gate)
 		}
@@ -482,6 +492,9 @@ func evaluateWorkerHealth(c WorkerInstallation, state *backupState, now time.Tim
 }
 
 func runNotifier(ctx context.Context, c WorkerInstallation, state *backupState) error {
+	if err := requireBackupReporting(state, c); err != nil {
+		return err
+	}
 	if err := notification.ValidateMonitoringChecks(c.Policy.Monitoring); err != nil {
 		return err
 	}
@@ -573,6 +586,13 @@ func runNotifier(ctx context.Context, c WorkerInstallation, state *backupState) 
 }
 
 func (s *backupState) wakeNotifier() error {
+	var control ArchiveControl
+	if err := s.get("control", &control); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if control.ReportingDisabled {
+		return nil
+	}
 	dir, err := safefs.Open(s.directory)
 	if err != nil {
 		return err

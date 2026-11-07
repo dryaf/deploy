@@ -48,7 +48,11 @@ func signalInstallationLease(home string) (*safefs.Lock, error) {
 }
 
 func requireNoSignalMaintenance(home string) error {
-	path := filepath.Join(home, ".local/share/deploy/backup-worker/signal")
+	layout, err := lookupInstalledBackupPaths(home)
+	if err != nil {
+		return err
+	}
+	path := layout.RelayState()
 	if _, err := os.Lstat(path); os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
@@ -93,14 +97,21 @@ func (s *signalService) Inspect(ctx context.Context) (signalaccount.ServiceState
 	if protocol.Hash(c) != protocol.Hash(s.installation) || c.Policy.Notifications.Signal == nil {
 		return zero, fmt.Errorf("Signal installation configuration changed")
 	}
-	images, err := signalFile(filepath.Join(s.home, ".config/deploy/backup-worker/images.json"), 8192)
+	paths := backupCutoverPaths(s.home, c)
+	if c.Paths != nil {
+		current, e := loadInstalledWorker(s.home)
+		if e != nil || protocol.Hash(current) != protocol.Hash(c) || s.configuration != c.Paths.Runtime {
+			return zero, fmt.Errorf("Signal installation layout changed")
+		}
+	}
+	images, err := signalFile(filepath.Join(filepath.Dir(paths.containerConfigFile()), "images.json"), 8192)
 	if err != nil {
 		return zero, err
 	}
 	if protocol.Hash(images) != s.imagesHash {
 		return zero, fmt.Errorf("Signal image enrollment changed")
 	}
-	unitPath := filepath.Join(s.home, ".config/containers/systemd/deploy-backup-signal.container")
+	unitPath := filepath.Join(paths.quadletDirectory(), "deploy-backup-signal.container")
 	unit, err := signalFile(unitPath, 64<<10)
 	if err != nil {
 		return zero, err

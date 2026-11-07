@@ -20,6 +20,10 @@ func checkManagedSignalHealth(ctx context.Context, m ManagedManifest) error {
 	return checkManagedSignalHealthPID(ctx, m, 0)
 }
 func checkManagedSignalHealthPID(ctx context.Context, m ManagedManifest, pid uint32) error {
+	if m.FreshSignal != nil {
+		return checkFreshSignalGatewayHealth(ctx, m, pid)
+	}
+
 	if m.SignalVerification == nil {
 		return nil
 	}
@@ -53,6 +57,20 @@ func checkManagedSignalHealthPID(ctx context.Context, m ManagedManifest, pid uin
 }
 
 func checkSignalHealthResponse(ctx context.Context, want SignalVerificationHealth, socket string, pid uint32, native *SignalServiceManifest) error {
+	var processCheck func(uint32) error
+	if native != nil {
+		processCheck = func(pid uint32) error { return checkSignalServiceProcess(pid, *native) }
+	}
+	return checkNativeSignalHealth(ctx, socket, pid, processCheck, func(raw []byte) error {
+		var actual SignalVerificationHealth
+		if safefs.DecodeJSON(raw, &actual, 16384) != nil || actual != want {
+			return fmt.Errorf("Signal verification health pins changed")
+		}
+		return nil
+	})
+}
+
+func checkNativeSignalHealth(ctx context.Context, socket string, pid uint32, processCheck func(uint32) error, verify func([]byte) error) error {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	transport := &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -79,8 +97,8 @@ func checkSignalHealthResponse(ctx context.Context, want SignalVerificationHealt
 			c.Close()
 			return nil, fmt.Errorf("Signal verification socket peer changed")
 		}
-		if native != nil {
-			if err = checkSignalServiceProcess(uint32(cred.Pid), *native); err != nil {
+		if processCheck != nil {
+			if err = processCheck(uint32(cred.Pid)); err != nil {
 				c.Close()
 				return nil, err
 			}
@@ -113,15 +131,15 @@ func checkSignalHealthResponse(ctx context.Context, want SignalVerificationHealt
 		if readErr != nil || response.StatusCode != http.StatusOK {
 			return fmt.Errorf("Signal verification health failed")
 		}
-		var actual SignalVerificationHealth
-		if safefs.DecodeJSON(raw, &actual, 16384) != nil || actual != want {
-			return fmt.Errorf("Signal verification health pins changed")
-		}
-		return nil
+		return verify(raw)
 	}
 }
 
 func serveManagedSignalRuntime(ctx context.Context, d *safefs.Directory, s *worker.Store, c Runtime, m ManagedManifest, installation *safefs.Lock) error {
+	if m.FreshSignal != nil {
+		return serveFreshSignalGateway(ctx, d, s, c, m, installation)
+	}
+
 	if m.SignalVerification == nil {
 		return serveRuntime(ctx, s, c, m.Paths.Socket)
 	}

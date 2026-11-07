@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dryaf/deploy/internal/notification/protocol"
+	"github.com/dryaf/deploy/internal/safefs"
 )
 
 type State struct {
@@ -33,14 +34,17 @@ type Entry struct {
 	Winner    bool    `json:"winner"`
 }
 type Client struct {
-	Socket string
-	Budget time.Duration
-	dial   func(context.Context) (net.Conn, error) // In-memory transport for protocol tests.
+	Endpoint *Endpoint
+	Socket   string
+	Budget   time.Duration
+	dial     func(context.Context) (net.Conn, error) // In-memory transport for protocol tests.
 }
 
 // DaemonStatus intentionally leaves hardware-specific details opaque while
 // inspecting the properties used to qualify a healthy lease.
 type DaemonStatus struct {
+	Daemon   string                     `json:"daemon,omitempty"`
+	Version  string                     `json:"version,omitempty"`
 	Degraded bool                       `json:"degraded"`
 	LEDs     map[string]json.RawMessage `json:"leds"`
 	Patterns map[string]json.RawMessage `json:"patterns,omitempty"`
@@ -59,6 +63,7 @@ func (c Client) Status(ctx context.Context) (DaemonStatus, error) {
 }
 
 type request struct {
+	PlanHash  string `json:"plan_hash,omitempty"`
 	Version   int    `json:"v"`
 	Operation string `json:"op"`
 	State     *State `json:"state,omitempty"`
@@ -66,6 +71,26 @@ type request struct {
 	Offset    *int   `json:"offset,omitempty"`
 	Limit     int    `json:"limit,omitempty"`
 }
+
+// PrepareRemoval is the managed daemon's root-only extension. It atomically
+// requires an empty registry and durably fences future state mutations.
+func (c Client) PrepareRemoval(ctx context.Context, hash string) error {
+	if !safefs.DigestPattern.MatchString(hash) {
+		return fmt.Errorf("exact LED removal plan required")
+	}
+	var result struct {
+		Version  int    `json:"version"`
+		PlanHash string `json:"plan_hash"`
+	}
+	if err := c.call(ctx, request{Operation: "deploy.prepare-removal", PlanHash: hash}, &result); err != nil {
+		return err
+	}
+	if result.Version != 1 || result.PlanHash != hash {
+		return fmt.Errorf("LED removal fence reply changed")
+	}
+	return nil
+}
+
 type reply struct {
 	Version int             `json:"v"`
 	OK      bool            `json:"ok"`
@@ -93,6 +118,12 @@ func (c Client) call(ctx context.Context, r request, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, c.Budget)
 	defer cancel()
 	dial := c.dial
+	if c.Endpoint != nil {
+		if c.Endpoint.Socket != c.Socket || c.dial != nil {
+			return fmt.Errorf("LED endpoint differs from selected socket")
+		}
+		dial = c.Endpoint.dial
+	}
 	if dial == nil {
 		dial = func(ctx context.Context) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", c.Socket)

@@ -12,13 +12,65 @@ import (
 )
 
 type WorkerUnitPaths struct {
-	Home        string
-	Config      string
-	State       string
-	Archive     string
-	Keys        string
-	RelayState  string
-	RelaySocket string
+	Home             string
+	Config           string
+	ContainerConfig  string
+	State            string
+	Archive          string
+	Keys             string
+	RelayState       string
+	RelaySocket      string
+	Helper           string
+	UnitDirectory    string
+	QuadletDirectory string
+	DeniedPaths      []string
+}
+
+func (p WorkerUnitPaths) unitDirectory() string {
+	if p.UnitDirectory != "" {
+		return p.UnitDirectory
+	}
+	return filepath.Join(p.Home, ".config/systemd/user")
+}
+
+func (p WorkerUnitPaths) quadletDirectory() string {
+	if p.QuadletDirectory != "" {
+		return p.QuadletDirectory
+	}
+	return filepath.Join(p.Home, ".config/containers/systemd")
+}
+
+func (p WorkerUnitPaths) helperFile() string {
+	if p.Helper != "" {
+		return p.Helper
+	}
+	return filepath.Join(p.Home, ".local/lib/deploy/backup-worker/deploy")
+}
+
+func (p WorkerUnitPaths) containerConfigFile() string {
+	if p.ContainerConfig != "" {
+		return p.ContainerConfig
+	}
+	return filepath.Join(filepath.Dir(p.Config), "container.json")
+}
+
+func (p WorkerUnitPaths) nativeExclusions() (string, error) {
+	if len(p.DeniedPaths) == 0 {
+		return "", nil
+	}
+	var lines strings.Builder
+	for _, path := range p.DeniedPaths {
+		if !config.WorkerAbsolutePath(path) {
+			return "", fmt.Errorf("invalid backup service exclusion")
+		}
+		for _, required := range []string{p.Config, p.State, p.Keys, p.Archive, p.helperFile(), p.RelayState, p.RelaySocket} {
+			if required != "" && (pathInside(required, path) || pathInside(path, required)) {
+				return "", fmt.Errorf("backup service exclusion overlaps required path")
+			}
+		}
+		lines.WriteString("InaccessiblePaths=" + reportUnitPathQuote("-"+path) + "\n")
+	}
+	return lines.String(), nil
 }
 
 func unitQuote(s string) string {
@@ -26,6 +78,17 @@ func unitQuote(s string) string {
 }
 
 func renderWorkerUnits(c WorkerInstallation, paths WorkerUnitPaths, image, relayImage string) (map[string]string, error) {
+	exclusions, err := paths.nativeExclusions()
+	if err != nil {
+		return nil, err
+	}
+	for required := range notificationMounts(c.Policy) {
+		for _, denied := range paths.DeniedPaths {
+			if pathInside(required, denied) || pathInside(denied, required) {
+				return nil, fmt.Errorf("backup exclusion overlaps required credential or monitor input")
+			}
+		}
+	}
 	if err := config.PinnedWorkerImage(image); err != nil {
 		return nil, err
 	}
@@ -45,7 +108,7 @@ func renderWorkerUnits(c WorkerInstallation, paths WorkerUnitPaths, image, relay
 		if c.Policy.Notifications.Signal != nil && (name == "deploy-backup-notifier" || strings.HasPrefix(name, "deploy-backup-test-")) {
 			b.WriteString("Wants=deploy-backup-signal.service\nAfter=deploy-backup-signal.service\n")
 		}
-		if requiresArchive {
+		if requiresArchive && c.Policy.Storage.Mode != "home" {
 			b.WriteString("RequiresMountsFor=" + unitQuote(c.Policy.Storage.RequireMount) + "\nConditionPathIsMountPoint=" + unitQuote(c.Policy.Storage.RequireMount) + "\n")
 		}
 		b.WriteString("\n[Container]\nImage=" + image + "\nPull=never\nReadOnly=true\nNoNewPrivileges=true\nDropCapability=ALL\nPodmanArgs=--security-opt=seccomp=unconfined\nTmpfs=/tmp:rw,size=128m,nosuid,nodev\nLabel=io.deploy.managed-by=deploy\nLabel=io.deploy.role=" + role + "\nLabel=io.deploy.service=" + name + "\n")
@@ -56,7 +119,7 @@ func renderWorkerUnits(c WorkerInstallation, paths WorkerUnitPaths, image, relay
 		units[name+".container"] = b.String()
 		return nil
 	}
-	configMount := filepath.Join(filepath.Dir(paths.Config), "container.json") + ":/config/runtime.json:ro"
+	configMount := paths.containerConfigFile() + ":/config/runtime.json:ro"
 	stateMount := paths.State + ":/state:rw"
 	common := " --local --config /config/runtime.json --state-dir /state"
 	if err := container("deploy-backup", "backup-worker", "backup-worker __run"+common+" --archive /archive", []string{configMount, stateMount, paths.Archive + ":/archive:rw", paths.Keys + ":/keys:ro"}, "768M", config.Budget(c.Policy.MaxRunTime, "40m")+time.Minute, true); err != nil {
@@ -90,13 +153,20 @@ func renderWorkerUnits(c WorkerInstallation, paths WorkerUnitPaths, image, relay
 	for _, name := range []string{"deploy-backup-notifier", "deploy-backup-health"} {
 		units[name+".timer"] = "[Unit]\nDescription=Independent deploy backup supervision\n\n[Timer]\nOnCalendar=*-*-* *:*:00 UTC\nAccuracySec=5s\nPersistent=true\nUnit=" + name + ".service\n\n[Install]\nWantedBy=timers.target\n"
 	}
-	helper := filepath.Join(paths.Home, ".local/lib/deploy/backup-worker/deploy")
+	helper := paths.helperFile()
 	// Allow the bounded manager probe, scheduler contention, and catch-up start
 	// to finish while keeping observations inside the 120-second freshness limit.
 	units["deploy-backup-health.service"] = "[Unit]\nDescription=Independent deploy backup host probe\n\n[Service]\nType=oneshot\nExecStart=" + unitQuote(helper) + " backup-worker __health --local --config " + unitQuote(paths.Config) + " --state-dir " + unitQuote(paths.State) + " --archive " + unitQuote(paths.Archive) + "\nTimeoutStartSec=75\nTimeoutStopSec=5\nMemoryMax=128M\nTasksMax=64\nNoNewPrivileges=true\nUMask=0077\n"
 	units["deploy-backup-maintenance.timer"] = "[Unit]\nDescription=Bounded backup integrity and restore maintenance\n\n[Timer]\nOnCalendar=*-*-* *:00/5:00 UTC\nPersistent=true\nUnit=deploy-backup-maintenance.service\n\n[Install]\nWantedBy=timers.target\n"
 	units["deploy-backup-maintenance.service"] = "[Unit]\nDescription=Isolated backup verification and retention\n\n[Service]\nType=oneshot\nExecStart=" + unitQuote(helper) + " backup-worker __maintenance --local --config " + unitQuote(paths.Config) + " --state-dir " + unitQuote(paths.State) + " --archive " + unitQuote(paths.Archive) + "\nTimeoutStartSec=25min\nTimeoutStopSec=10s\nKillMode=control-group\nMemoryMax=768M\nCPUQuota=50%\nTasksMax=256\nUMask=0077\n"
 	units["deploy-backup-notifier.path"] = "[Unit]\nDescription=Wake backup notifier for committed urgent events\n\n[Path]\nPathChanged=" + strings.ReplaceAll(filepath.Join(paths.State, "urgent"), "%", "%%") + "\nUnit=deploy-backup-notifier.service\n\n[Install]\nWantedBy=default.target\n"
+	units["deploy-backup-health.service"] += exclusions
+	units["deploy-backup-maintenance.service"] += exclusions
+	if c.Policy.Notifications.Mode == "disabled" || c.Policy.Notifications.Mode == "shared" {
+		delete(units, "deploy-backup-notifier.container")
+		delete(units, "deploy-backup-notifier.timer")
+		delete(units, "deploy-backup-notifier.path")
+	}
 	return units, nil
 }
 

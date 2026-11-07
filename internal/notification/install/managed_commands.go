@@ -17,7 +17,7 @@ import (
 )
 
 func isManagedCommandPolicyOperation(op string) bool {
-	return op == "narrow-commands" || op == "migrate-commands"
+	return op == "narrow-commands" || op == "migrate-commands" || op == "restore-command-permissions"
 }
 
 type ManagedCommandAdmission struct {
@@ -57,7 +57,7 @@ func validateCommandJournal(j managedJournal) error {
 			return fmt.Errorf("disable existing command admission before enabling a different mode")
 		}
 	} else if isManagedCommandPolicyOperation(i.Operation) {
-		if a.Commands.Mode != "drain" || b.Commands == nil || b.Commands.Mode != "drain" {
+		if a.Commands.Mode != "drain" || !disabledManagedCommandPolicy(b) {
 			return fmt.Errorf("disable commands before narrowing")
 		}
 	} else if i.Operation != "disable-commands" || a.Commands.Mode != "drain" || b.Commands == nil || b.Commands.Mode == "drain" {
@@ -91,13 +91,13 @@ func readManagedCommandAdmission(d *safefs.Directory, m ManagedManifest, c Runti
 	if err = validateCommandJournal(managedJournal{Intent: intent, Phase: "complete"}); err != nil {
 		return
 	}
-	if protocol.Hash(intent.After) != protocol.Hash(m) {
-		return record, fmt.Errorf("command admission installation changed")
+	if _, err = deliveryPolicyAncestor(d, m, protocol.Hash(intent.After)); err != nil {
+		return record, fmt.Errorf("command admission installation changed: %w", err)
 	}
 	if err = d.ReadJSON(base+"command-admission.json", &record); err != nil {
 		return
 	}
-	if ((record.Version != 1 || record.Policy != "") && (record.Version != 2 || record.Policy == "" || intent.Operation != "narrow-commands") && (record.Version != 3 || record.Policy == "" || intent.Operation != "migrate-commands")) || (intent.Operation == "narrow-commands" && record.Version != 2) || (intent.Operation == "migrate-commands" && record.Version != 3) || record.Operation != intent.ID || record.Mode != m.Commands.Mode || record.BeforeHash != protocol.Hash(*intent.Before) || record.ActivationHash != m.DeliveryActivation.Hash || protocol.Hash(record) != m.Commands.Hash {
+	if ((record.Version != 1 || record.Policy != "") && (record.Version != 2 || record.Policy == "" || intent.Operation != "narrow-commands") && (record.Version != 3 || record.Policy == "" || intent.Operation != "migrate-commands") && (record.Version != 4 || record.Policy == "" || intent.Operation != "restore-command-permissions")) || (intent.Operation == "narrow-commands" && record.Version != 2) || (intent.Operation == "migrate-commands" && record.Version != 3) || (intent.Operation == "restore-command-permissions" && record.Version != 4) || record.Operation != intent.ID || record.Mode != m.Commands.Mode || record.BeforeHash != protocol.Hash(*intent.Before) || record.ActivationHash != m.DeliveryActivation.Hash || protocol.Hash(record) != m.Commands.Hash {
 		return record, fmt.Errorf("command admission evidence changed")
 	}
 	delivery, _, err := readDeliveryAdmission(d, m, c)
@@ -122,7 +122,7 @@ func (i managedInstaller) prepareCommands(ctx context.Context, operation, root, 
 		if policy == "" || mode != "" || qualificationHash != "" {
 			return zero, fmt.Errorf("narrowing requires explicit policy and no enable flags")
 		}
-		if operation == "migrate-commands" {
+		if operation == "migrate-commands" || operation == "restore-command-permissions" {
 			var configuration interaction.Config
 			if protocol.Decode([]byte(policy), &configuration, 16384) != nil || configuration.Validate() != nil {
 				return zero, fmt.Errorf("migration requires a complete command configuration")
@@ -174,7 +174,7 @@ func (i managedInstaller) prepareCommands(ctx context.Context, operation, root, 
 	if operation == "enable-commands" && b.Commands != nil && b.Commands.Mode != "drain" || operation == "disable-commands" && (b.Commands == nil || b.Commands.Mode == "drain") {
 		return zero, fmt.Errorf("command transition does not match current admission")
 	}
-	if isManagedCommandPolicyOperation(operation) && (b.Commands == nil || b.Commands.Mode != "drain") {
+	if isManagedCommandPolicyOperation(operation) && !disabledManagedCommandPolicy(b) {
 		return zero, fmt.Errorf("disable commands before narrowing")
 	}
 	c, err := verifyManagedArtifacts(d, b)
@@ -209,7 +209,11 @@ func (i managedInstaller) prepareCommands(ctx context.Context, operation, root, 
 		return zero, fmt.Errorf("command admission unit changed")
 	}
 	if isManagedCommandPolicyOperation(operation) {
-		if err = worker.ValidateManagedCommandPolicyFile(b.Paths.State, c.Worker.Interaction, b.CommandHistoryHash, policy); err != nil {
+		validate := worker.ValidateManagedCommandPolicyFile
+		if operation == "restore-command-permissions" {
+			validate = worker.ValidateManagedCommandGrantFile
+		}
+		if err = validate(b.Paths.State, c.Worker.Interaction, b.CommandHistoryHash, policy); err != nil {
 			return zero, err
 		}
 	}
@@ -217,7 +221,7 @@ func (i managedInstaller) prepareCommands(ctx context.Context, operation, root, 
 		return b, nil
 	}
 	if isManagedCommandPolicyOperation(operation) {
-		if err = i.probeCommandPolicy(ctx, d, b, operation == "migrate-commands"); err != nil {
+		if err = i.probeCommandPolicy(ctx, d, b, operation == "migrate-commands", operation == "restore-command-permissions"); err != nil {
 			return zero, err
 		}
 	}
@@ -237,8 +241,11 @@ func (i managedInstaller) prepareCommands(ctx context.Context, operation, root, 
 	record := managedCommandRecord{Version: 1, Operation: id, BeforeHash: manifestHash, ActivationHash: b.DeliveryActivation.Hash, QualificationHash: protocol.Hash(proof.Qualification), Mode: mode}
 	if isManagedCommandPolicyOperation(operation) {
 		record.Version, record.Policy = 2, policy
-		if operation == "migrate-commands" {
+		if operation == "migrate-commands" || operation == "restore-command-permissions" {
 			record.Version = 3
+			if operation == "restore-command-permissions" {
+				record.Version = 4
+			}
 		}
 	}
 	a := b
@@ -350,7 +357,7 @@ func (i managedInstaller) commandState(ctx context.Context, d *safefs.Directory,
 		return err
 	}
 	if record.Policy != "" {
-		if err = i.probeCommandPolicy(ctx, d, m, record.Version == 3); err != nil {
+		if err = i.probeCommandPolicy(ctx, d, m, record.Version == 3, record.Version == 4); err != nil {
 			return err
 		}
 	}
@@ -381,7 +388,11 @@ func (i managedInstaller) commandState(ctx context.Context, d *safefs.Directory,
 		return s.RequireManagedCommandHistory(m.CommandHistoryHash)
 	}
 	if record.Policy != "" {
-		err = s.CommitManagedCommandPolicy(m.Commands.Hash, j.Intent.Before.CommandHistoryHash, record.Policy)
+		if record.Version == 4 {
+			err = s.CommitManagedCommandGrant(m.Commands.Hash, j.Intent.Before.CommandHistoryHash, record.Policy)
+		} else {
+			err = s.CommitManagedCommandPolicy(m.Commands.Hash, j.Intent.Before.CommandHistoryHash, record.Policy)
+		}
 	} else {
 		err = s.CommitManagedCommandAdmission(m.Commands.Mode, m.Commands.Hash, j.Intent.Before.CommandHistoryHash)
 	}
@@ -391,13 +402,16 @@ func (i managedInstaller) commandState(ctx context.Context, d *safefs.Directory,
 	return i.boundary("command-admission-committed")
 }
 
-func (i managedInstaller) probeCommandPolicy(ctx context.Context, d *safefs.Directory, m ManagedManifest, enrollment bool) error {
+func (i managedInstaller) probeCommandPolicy(ctx context.Context, d *safefs.Directory, m ManagedManifest, enrollment bool, grants ...bool) error {
 	probe := i.commandPolicyProbe
 	if probe == nil {
 		probe = func(ctx context.Context, d *safefs.Directory, name, hash string) error {
 			capability := "__managed-command-policy-probe"
 			if enrollment {
 				capability = "__managed-command-enrollment-probe"
+			}
+			if len(grants) == 1 && grants[0] {
+				capability = "__managed-command-grants-probe"
 			}
 			return probeManagedCapability(ctx, d, name, hash, capability)
 		}
@@ -408,4 +422,13 @@ func (i managedInstaller) probeCommandPolicy(ctx context.Context, d *safefs.Dire
 		}
 	}
 	return nil
+}
+
+// Delivery renewal retains the disabled command history without admitting a new
+// command runtime. Policy reductions remain available in that state.
+func disabledManagedCommandPolicy(m ManagedManifest) bool {
+	if m.Commands != nil {
+		return m.Commands.Mode == "drain"
+	}
+	return m.Mode == "delivery" && m.DeliveryActivation != nil && m.DeliveryOwnerHash != "" && m.RecoveryCommitHash == "" && safefs.DigestPattern.MatchString(m.CommandHistoryHash)
 }

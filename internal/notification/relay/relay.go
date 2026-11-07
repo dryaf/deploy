@@ -47,8 +47,13 @@ func Destination(account, recipient string) string {
 // ManagedExecution is supplied by the managed service after durable admission.
 // Command must execute its pinned CLI and inherit the supplied account descriptor.
 // It must return only after its complete process group has exited.
+type AccountRuntime interface {
+	FileFor(string) (*os.File, error)
+}
+
 type ManagedExecution struct {
-	Account *signalaccount.RecoveryRuntime
+	fresh   bool
+	Account AccountRuntime
 	Inbox   *Inbox
 	Check   func(context.Context) error
 	Command func(context.Context, *os.File, io.Writer, ...string) error
@@ -68,6 +73,37 @@ func RunManaged(ctx context.Context, c Config, m ManagedExecution) error {
 	return runRelay(ctx, c, &m)
 }
 
+// FreshExecution owns a genuinely linked native account and a fresh canonical
+// inbox. Direct alert delivery is permitted only on this distinct first-install
+// path; recovered services retain their conversation-only contract.
+type FreshExecution struct {
+	Account *signalaccount.NativeRuntime
+	Inbox   *Inbox
+	Check   func(context.Context) error
+	Command func(context.Context, *os.File, io.Writer, ...string) error
+	Health  func(context.Context) (any, error)
+}
+
+func RunFreshManaged(ctx context.Context, c Config, f FreshExecution) error {
+	if f.Account == nil || f.Inbox == nil || f.Inbox.freshBootstrap == nil || f.Inbox.installation != nil || f.Inbox.runtimeAdmission == nil || f.Check == nil || f.Command == nil || c.RecipientFile == "" {
+		return fmt.Errorf("fresh Signal runtime requires its native account, canonical inbox and pinned direct destination")
+	}
+	if c.Interactive != nil && (c.Interactive.InboxDir != f.Inbox.dir.File().Name() || c.Interactive.Account != f.Inbox.account) {
+		return fmt.Errorf("fresh Signal intake differs from canonical inbox")
+	}
+	if _, err := f.Account.FileFor(c.StateDir); err != nil {
+		return err
+	}
+	if account, err := f.Account.AccountIdentity(); err != nil || account != f.Inbox.account {
+		return fmt.Errorf("fresh Signal account and inbox enrollment differ")
+	}
+	if err := f.Check(ctx); err != nil {
+		return err
+	}
+	m := ManagedExecution{fresh: true, Account: f.Account, Inbox: f.Inbox, Check: f.Check, Command: f.Command, Health: f.Health}
+	return runRelay(ctx, c, &m)
+}
+
 func Run(ctx context.Context, c Config) error {
 	return runRelay(ctx, c, nil)
 }
@@ -80,7 +116,7 @@ func runRelay(ctx context.Context, c Config, managed *ManagedExecution) error {
 		return err
 	}
 	var recipient string
-	if managed == nil {
+	if managed == nil || managed.fresh {
 		recipient, err = provider.ReadSecret(c.RecipientFile)
 		if err != nil {
 			return err
@@ -105,8 +141,12 @@ func runRelay(ctx context.Context, c Config, managed *ManagedExecution) error {
 			defer inbox.Close()
 		}
 	} else {
-		if err = c.Interactive.Validate(); err != nil {
-			return err
+		if c.Interactive != nil {
+			if err = c.Interactive.Validate(); err != nil {
+				return err
+			}
+		} else if !managed.fresh {
+			return fmt.Errorf("recovered managed Signal requires conversation enrollment")
 		}
 		inbox = managed.Inbox
 	}
@@ -169,9 +209,13 @@ func runRelay(ctx context.Context, c Config, managed *ManagedExecution) error {
 	}
 	run := func(ctx context.Context, args ...string) error { return runOutput(ctx, io.Discard, args...) }
 	if inbox != nil {
+		expectedVersion := "0.14.9"
+		if c.Interactive != nil {
+			expectedVersion = c.Interactive.Version
+		}
 		var version process.Buffer
 		version.Limit = 4096
-		if err = runCLI(ctx, &version, "--version"); err != nil || strings.TrimSpace(version.String()) != "signal-cli "+c.Interactive.Version {
+		if err = runCLI(ctx, &version, "--version"); err != nil || strings.TrimSpace(version.String()) != "signal-cli "+expectedVersion {
 			return fmt.Errorf("interactive Signal CLI version mismatch")
 		}
 		var accounts process.Buffer
@@ -179,7 +223,7 @@ func runRelay(ctx context.Context, c Config, managed *ManagedExecution) error {
 		if err = runCLI(ctx, &accounts, "--output=json", "listAccounts"); err != nil {
 			return fmt.Errorf("Signal account identity check failed")
 		}
-		if err = verifySignalAccount([]byte(accounts.String()), account, c.Interactive.Account); err != nil {
+		if err = verifySignalAccount([]byte(accounts.String()), account, inbox.account); err != nil {
 			return err
 		}
 	}
@@ -199,11 +243,11 @@ func runRelay(ctx context.Context, c Config, managed *ManagedExecution) error {
 			_ = json.NewEncoder(w).Encode(value)
 		})
 	}
-	if inbox != nil {
+	if inbox != nil && c.Interactive != nil {
 		installInteractiveHandlers(mux, inbox, *c.Interactive, slots, runOutput)
 	}
 	mux.HandleFunc("/send", func(w http.ResponseWriter, r *http.Request) {
-		if managed != nil {
+		if managed != nil && !managed.fresh {
 			http.Error(w, "managed Signal requires an enrolled conversation", http.StatusForbidden)
 			return
 		}
@@ -285,7 +329,7 @@ func runRelay(ctx context.Context, c Config, managed *ManagedExecution) error {
 				}
 				select {
 				case slots <- struct{}{}:
-					if inbox == nil {
+					if inbox == nil || c.Interactive == nil {
 						_ = run(ctx, "receive", "--timeout", "1", "--max-messages", "32", "--ignore-attachments", "--ignore-stories", "--ignore-avatars", "--ignore-stickers")
 					} else {
 						output := &receiveWriter{ctx: ctx, inbox: inbox, selector: account, config: *c.Interactive}

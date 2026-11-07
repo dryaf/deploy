@@ -20,27 +20,40 @@ import (
 // managedInstaller coordinates files and a user manager. Its crash hook is only
 // supplied by tests; every hook follows a durable boundary or external effect.
 type managedInstaller struct {
-	commandRecoveryProbe  func(context.Context, *safefs.Directory, string, string) error
-	telegramHandoffProbe  func(context.Context, *safefs.Directory, string, string) error
-	commandPolicyProbe    func(context.Context, *safefs.Directory, string, string) error
-	commandProbe          func(context.Context, *safefs.Directory, string, string) error
-	deliveryRecoveryProbe func(context.Context, *safefs.Directory, string, string) error
-	deliveryProbe         func(context.Context, *safefs.Directory, string, string) error
-	deliveryInspect       func(context.Context, ManagedManifest, bool) error
-	services              managedServices
-	signalProbe           func(context.Context, *safefs.Directory, string, string) error
-	signalProfilesProbe   func(context.Context, *safefs.Directory, string, string) error
-	signalCheck           func(context.Context, ManagedManifest) error
-	probe                 func(context.Context, *safefs.Directory, string, string, bool) error
-	nextRecoveryProbe     func(context.Context, *safefs.Directory, string, string) error
-	recoveryProbe         func(context.Context, *safefs.Directory, string, string) error
-	helperProbe           func(context.Context, *safefs.Directory, string, string) error
-	telegramProbe         func(context.Context, *safefs.Directory, string, string) error
-	telegramTransport     http.RoundTripper
-	ledProbe              func(context.Context, *safefs.Directory, string, string) error
-	ledDeliveryProbe      func(context.Context, *safefs.Directory, string, string) error
-	ledAPI                func(string) worker.LEDAPI
-	fault                 func(string) error
+	commandLimitsProbe               func(context.Context, *safefs.Directory, string, string) error
+	commandPauseProbe                func(context.Context, *safefs.Directory, string, string) error
+	deliveryLimitsProbe              func(context.Context, *safefs.Directory, string, string) error
+	deliveryProvidersProbe           func(context.Context, *safefs.Directory, string, string) error
+	deliveryPauseProbe               func(context.Context, *safefs.Directory, string, string) error
+	bootstrapProvidersProbe          func(context.Context, *safefs.Directory, string, string) error
+	enrolledLimitsProbe              func(context.Context, *safefs.Directory, string, string) error
+	bootstrapLimitsProbe             func(context.Context, *safefs.Directory, string, string) error
+	bootstrapEnrollmentLEDProbe      func(context.Context, *safefs.Directory, string, string) error
+	bootstrapEnrollmentCommandsProbe func(context.Context, *safefs.Directory, string, string) error
+	bootstrapProbe                   func(context.Context, *safefs.Directory, string, string) error
+	commandRecoveryProbe             func(context.Context, *safefs.Directory, string, string) error
+	telegramHandoffProbe             func(context.Context, *safefs.Directory, string, string) error
+	commandPolicyProbe               func(context.Context, *safefs.Directory, string, string) error
+	commandProbe                     func(context.Context, *safefs.Directory, string, string) error
+	deliveryRecoveryProbe            func(context.Context, *safefs.Directory, string, string) error
+	deliveryProbe                    func(context.Context, *safefs.Directory, string, string) error
+	deliveryInspect                  func(context.Context, ManagedManifest, bool) error
+	services                         managedServices
+	signalProbe                      func(context.Context, *safefs.Directory, string, string) error
+	signalProfilesProbe              func(context.Context, *safefs.Directory, string, string) error
+	signalCheck                      func(context.Context, ManagedManifest) error
+	probe                            func(context.Context, *safefs.Directory, string, string, bool) error
+	nextRecoveryProbe                func(context.Context, *safefs.Directory, string, string) error
+	recoveryProbe                    func(context.Context, *safefs.Directory, string, string) error
+	helperProbe                      func(context.Context, *safefs.Directory, string, string) error
+	telegramProbe                    func(context.Context, *safefs.Directory, string, string) error
+	telegramTransport                http.RoundTripper
+	ledEndpointProbe                 func(context.Context, *safefs.Directory, string, string) error
+	ledOutputProbe                   func(context.Context, *safefs.Directory, string, string) error
+	ledProbe                         func(context.Context, *safefs.Directory, string, string) error
+	ledDeliveryProbe                 func(context.Context, *safefs.Directory, string, string) error
+	ledAPI                           func(string) worker.LEDAPI
+	fault                            func(string) error
 }
 
 func newManagedInstaller() managedInstaller {
@@ -87,7 +100,7 @@ func (i managedInstaller) prepare(ctx context.Context, operation string, spec Ma
 // The operation lease protects the check through durable intent publication.
 func (i managedInstaller) prepareExpected(ctx context.Context, operation string, spec ManagedSpec, expected string) (ManagedManifest, error) {
 	var zero ManagedManifest
-	if operation != "setup" && operation != "update" && operation != "migrate-schema" && operation != "migrate-led" && operation != "adopt-recovery" && operation != "upgrade-helper" && operation != "adopt-signal" && operation != "supervise-signal" && operation != "migrate-signal-profiles" {
+	if !isManagedPolicyOperation(operation) && operation != "enroll-bootstrap" && operation != "setup" && operation != "update" && operation != "migrate-schema" && operation != "migrate-led" && operation != "adopt-recovery" && operation != "upgrade-helper" && operation != "adopt-signal" && operation != "supervise-signal" && operation != "migrate-signal-profiles" {
 		return zero, fmt.Errorf("invalid preparation operation")
 	}
 	nextSignal := operation == "adopt-recovery" && spec.SignalVerification != nil
@@ -115,6 +128,11 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	c, err := decodeRuntime(raw)
 	if err != nil {
 		return zero, err
+	}
+	if spec.FreshSignal != nil {
+		if _, err = validateFreshSignalGateway(ctx, *spec.FreshSignal, spec.Root, spec.State, spec.UnitDirectory, c, false); err != nil {
+			return zero, err
+		}
 	}
 	if operation == "setup" {
 		if err = verifyReplacementEnrollment(spec, c); err != nil {
@@ -213,10 +231,13 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		if (operation == "adopt-recovery" || operation == "upgrade-helper") && b.Mode != "verification" {
 			return zero, fmt.Errorf("helper upgrade/recovery adoption requires an installed verification service")
 		}
+		if protocol.Hash(b.FreshSignal) != protocol.Hash(spec.FreshSignal) {
+			return zero, fmt.Errorf("fresh Signal ownership must remain explicit and unchanged")
+		}
 		if expected != "" && protocol.Hash(b) != expected {
 			return zero, fmt.Errorf("installation changed while preparing rollback; review the current revision")
 		}
-		if b.Root != spec.Root || b.Paths.State != spec.State || b.UnitDirectory != spec.UnitDirectory || (operation != "migrate-led" && operation != "adopt-signal" && !nextSignal && b.ConfigHash != protocol.Hash(c)) {
+		if b.Root != spec.Root || b.Paths.State != spec.State || b.UnitDirectory != spec.UnitDirectory || (!isManagedPolicyOperation(operation) && operation != "enroll-bootstrap" && operation != "migrate-led" && operation != "adopt-signal" && !nextSignal && b.ConfigHash != protocol.Hash(c)) {
 			return zero, fmt.Errorf("update changes identity, configuration or schema; explicit migration required")
 		}
 		if operation == "migrate-schema" {
@@ -243,6 +264,63 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		}
 		if operation == "adopt-signal" || operation == "supervise-signal" {
 			if _, e = validateManagedSignalTransition(operation, b, c, raw, *spec.SignalVerification); e != nil {
+				return zero, e
+			}
+		}
+		if isManagedPolicyOperation(operation) {
+			previous, e := managedRuntime(d, b)
+			if e != nil {
+				return zero, e
+			}
+			if e = validateManagedBootstrapPolicy(b, previous, c, operation); e != nil {
+				return zero, e
+			}
+			preflight := worker.PreflightBootstrapLimits
+			if operation == "enrolled-command-activity" {
+				preflight = worker.PreflightEnrolledCommandActivity
+			}
+			if operation == "enrolled-command-policy" {
+				preflight = worker.PreflightEnrolledCommandPolicy
+			}
+			if operation == "enrolled-commands" {
+				preflight = worker.PreflightEnrolledCommands
+			}
+			if operation == "enrolled-providers" {
+				preflight = worker.PreflightEnrolledProviders
+			}
+			if operation == "enrolled-producer" {
+				preflight = worker.PreflightEnrolledProducerPolicy
+			}
+			if operation == "enrolled-routes" {
+				preflight = worker.PreflightEnrolledRoutes
+			}
+			if operation == "enrolled-freshness" {
+				preflight = worker.PreflightEnrolledFreshness
+			}
+			if operation == "enrolled-limits" {
+				preflight = worker.PreflightEnrolledLimits
+			}
+			if operation == "bootstrap-routes" || operation == "bootstrap-providers" {
+				preflight = worker.PreflightBootstrapRoutes
+			}
+			if e = preflight(ctx, b.Paths.State, b.Identity, previous.Worker, c.Worker); e != nil {
+				return zero, e
+			}
+		}
+		if operation == "enroll-bootstrap" {
+			previous, e := managedRuntime(d, b)
+			if e != nil {
+				return zero, e
+			}
+			if e = validateManagedBootstrapChange(b, previous, c); e != nil {
+				return zero, e
+			}
+			var outputOperation string
+			var outputDisabled bool
+			if b.LEDOutput != nil {
+				outputOperation, outputDisabled = b.LEDOutput.Operation, b.LEDOutput.Disabled
+			}
+			if e = worker.PreflightBootstrapEnrollment(ctx, b.Paths.State, b.Identity, previous.Worker, c.Worker, outputOperation, outputDisabled); e != nil {
 				return zero, e
 			}
 		}
@@ -298,7 +376,12 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		if e != nil {
 			return zero, e
 		}
-		s, e := worker.OpenManagedVerification(spec.State, c.Worker, identity)
+		var s *worker.Store
+		if c.Bootstrap {
+			s, e = worker.OpenBootstrapVerification(spec.State, c.Worker, identity, "")
+		} else {
+			s, e = worker.OpenManagedVerification(spec.State, c.Worker, identity)
+		}
 		if e != nil {
 			return zero, e
 		}
@@ -332,16 +415,19 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	if err != nil {
 		return zero, err
 	}
-	m := ManagedManifest{Version: managedVersion, Installation: id, Revision: revision, Root: spec.Root, UnitDirectory: spec.UnitDirectory, Paths: ServicePaths{Executable: filepath.Join(spec.Root, "releases", revision, "deploy"), Config: filepath.Join(spec.Root, "releases", revision, "runtime.json"), State: spec.State, Socket: filepath.Join(spec.State, "api.sock"), DeniedPaths: spec.DeniedPaths}, Identity: identity, RuntimeHash: managedDigest(raw), ConfigHash: protocol.Hash(c), BinaryHash: spec.BinarySHA256, HelperHash: spec.BinarySHA256, Schema: worker.StorageSchemaVersion(), Mode: "verification"}
+	m := ManagedManifest{FreshSignal: spec.FreshSignal, Version: managedVersion, Installation: id, Revision: revision, Root: spec.Root, UnitDirectory: spec.UnitDirectory, Paths: ServicePaths{Executable: filepath.Join(spec.Root, "releases", revision, "deploy"), Config: filepath.Join(spec.Root, "releases", revision, "runtime.json"), State: spec.State, Socket: filepath.Join(spec.State, "api.sock"), DeniedPaths: spec.DeniedPaths}, Identity: identity, RuntimeHash: managedDigest(raw), ConfigHash: protocol.Hash(c), BinaryHash: spec.BinarySHA256, HelperHash: spec.BinarySHA256, Schema: worker.StorageSchemaVersion(), Mode: "verification"}
 	if before != nil {
 		m.Installation = before.Installation
 		m.HelperHash = before.HelperHash
 		m.HelperRevision = before.HelperRevision
 		m.RecoveryCommitHash = before.RecoveryCommitHash
 		m.TelegramRenewalID = before.TelegramRenewalID
+		m.LEDOutput = before.LEDOutput
 		m.SignalVerification = before.SignalVerification
 		m.SignalProfiles = before.SignalProfiles
 		m.DeliveryOwnerHash = before.DeliveryOwnerHash
+		m.DeliveryOwnerConfigHash = before.DeliveryOwnerConfigHash
+		m.ReportCredentialHistory = before.ReportCredentialHistory
 		m.CommandHistoryHash = before.CommandHistoryHash
 		m.DeliveryRecovery = before.DeliveryRecovery
 	}
@@ -417,7 +503,7 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		}
 		m.CommandHistoryHash = protocol.Hash(r)
 	}
-	if operation == "migrate-schema" || operation == "migrate-led" || operation == "adopt-recovery" || operation == "upgrade-helper" || operation == "adopt-signal" || operation == "supervise-signal" || operation == "migrate-signal-profiles" {
+	if isManagedPolicyOperation(operation) || operation == "enroll-bootstrap" || operation == "migrate-schema" || operation == "migrate-led" || operation == "adopt-recovery" || operation == "upgrade-helper" || operation == "adopt-signal" || operation == "supervise-signal" || operation == "migrate-signal-profiles" {
 		m.HelperRevision = m.Revision
 		m.HelperHash = m.BinaryHash
 	}
@@ -446,7 +532,7 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	if err == nil {
 		err = frozenManagedFile(release, "runtime.json", raw, 0600)
 	}
-	if err == nil && (operation == "migrate-schema" || operation == "migrate-led" || operation == "adopt-recovery" || operation == "upgrade-helper" || operation == "adopt-signal" || operation == "supervise-signal" || operation == "migrate-signal-profiles") {
+	if err == nil && (isManagedPolicyOperation(operation) || operation == "enroll-bootstrap" || operation == "migrate-schema" || operation == "migrate-led" || operation == "adopt-recovery" || operation == "upgrade-helper" || operation == "adopt-signal" || operation == "supervise-signal" || operation == "migrate-signal-profiles") {
 		err = frozenManagedFile(release, "recovery-helper", binary, 0700)
 	}
 	release.Close()
@@ -479,6 +565,43 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	}
 	if err = i.probeTelegramRenewal(ctx, d, m); err != nil {
 		return zero, err
+	}
+	if c.Bootstrap || operation == "enroll-bootstrap" {
+		probe := i.bootstrapProbe
+		if probe == nil {
+			probe = func(ctx context.Context, d *safefs.Directory, name, hash string) error {
+				return probeManagedCapability(ctx, d, name, hash, "__managed-bootstrap-probe")
+			}
+		}
+		for _, binary := range []struct{ name, hash string }{{"releases/" + m.Revision + "/deploy", m.BinaryHash}, {managedHelperName(m), m.HelperHash}} {
+			if err = probe(ctx, d, binary.name, binary.hash); err != nil {
+				return m, err
+			}
+		}
+	}
+	if err = i.requireBootstrapEnrollmentLEDCapability(ctx, d, m, operation == "enroll-bootstrap" && m.LEDOutput != nil); err != nil {
+		return m, err
+	}
+	if err = i.requireBootstrapEnrollmentCommandsCapability(ctx, d, m, operation == "enroll-bootstrap" && c.Worker.Interaction != nil); err != nil {
+		return m, err
+	}
+	if err = i.requireBootstrapProvidersCapability(ctx, d, m, operation); err != nil {
+		return m, err
+	}
+	if err = i.requireEnrolledLimitsCapability(ctx, d, m, (operation == "enrolled-limits" || operation == "enrolled-freshness" || operation == "enrolled-routes" || operation == "enrolled-producer" || operation == "enrolled-providers" || operation == "enrolled-command-activity" || operation == "enrolled-command-policy" || operation == "enrolled-commands")); err != nil {
+		return zero, err
+	}
+	if err = i.requireBootstrapLimitsCapability(ctx, d, m, isManagedPolicyOperation(operation)); err != nil {
+		return m, err
+	}
+	if err = i.probeLEDEndpoint(ctx, d, m, c); err != nil {
+		return m, err
+	}
+	if err = i.requireLEDMappingOutputCapability(ctx, d, m); err != nil {
+		return zero, err
+	}
+	if err = i.probeLEDOutput(ctx, d, m); err != nil {
+		return m, err
 	}
 	if err = i.probeSignalVerification(ctx, d, m); err != nil {
 		return zero, err
@@ -615,6 +738,10 @@ func (i managedInstaller) resume(ctx context.Context, root string) (ManagedManif
 }
 
 func (i managedInstaller) uninstall(ctx context.Context, root string) (ManagedManifest, error) {
+	return i.uninstallExpected(ctx, root, "")
+}
+
+func (i managedInstaller) uninstallExpected(ctx context.Context, root, expected string) (ManagedManifest, error) {
 	var zero ManagedManifest
 	d, err := privateManagedDir(root, true)
 	if err != nil {
@@ -633,8 +760,13 @@ func (i managedInstaller) uninstall(ctx context.Context, root string) (ManagedMa
 	if j.Intent.After.Root != root {
 		return zero, fmt.Errorf("installation root moved")
 	}
+	if expected != "" && protocol.Hash(j.Intent.After) != expected {
+		if j.Intent.Operation != "uninstall" || j.Intent.Before == nil || protocol.Hash(*j.Intent.Before) != expected {
+			return zero, fmt.Errorf("installation changed before uninstall")
+		}
+	}
 	interrupted := j.Phase != "complete"
-	if interrupted && (j.Intent.Operation == "migrate-schema" || j.Intent.Operation == "migrate-led" || j.Intent.Operation == "adopt-recovery" || j.Intent.Operation == "renew-telegram" || j.Intent.Operation == "upgrade-helper" || j.Intent.Operation == "adopt-signal" || j.Intent.Operation == "supervise-signal" || j.Intent.Operation == "migrate-signal-profiles") {
+	if interrupted && (isManagedPolicyOperation(j.Intent.Operation) || j.Intent.Operation == "set-led-output" || j.Intent.Operation == "enroll-bootstrap" || j.Intent.Operation == "migrate-schema" || j.Intent.Operation == "migrate-led" || j.Intent.Operation == "adopt-recovery" || j.Intent.Operation == "renew-telegram" || j.Intent.Operation == "upgrade-helper" || j.Intent.Operation == "adopt-signal" || j.Intent.Operation == "supervise-signal" || j.Intent.Operation == "migrate-signal-profiles") {
 		return zero, fmt.Errorf("resume the pending migration before uninstalling")
 	}
 	if interrupted && j.Intent.Operation == "uninstall" {
@@ -650,8 +782,12 @@ func (i managedInstaller) uninstall(ctx context.Context, root string) (ManagedMa
 	if b.Mode == "uninstalled" {
 		return i.resumeLocked(ctx, d, j)
 	}
-	if _, err = verifyManagedArtifacts(d, b); err != nil {
+	c, err := verifyManagedArtifacts(d, b)
+	if err != nil {
 		return zero, err
+	}
+	if c.Bootstrap && c.LEDSocket != "" && (b.LEDOutput == nil || !b.LEDOutput.Disabled) {
+		return zero, fmt.Errorf("disable owned LED output before removing the unbound gateway")
 	}
 	units, err := managedUnitDirectory(b.UnitDirectory)
 	if err != nil {
@@ -719,6 +855,17 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 	if err != nil {
 		return m, err
 	}
+	if isPausedRuntimeChange(j.Intent.Operation) {
+		if _, err = deliveryProviderPause(d, j, c); err != nil {
+			return m, err
+		}
+		if _, err = retainedDeliveryCredentials(d, j, c); err != nil {
+			return m, err
+		}
+		if err = i.probePausedRuntimeChange(ctx, d, m, j.Intent.DeliveryProvider.Kind); err != nil {
+			return m, err
+		}
+	}
 	// Completed uninstall changes only Mode (proved by journal validation).
 	// Its After artifacts already validate the identical retained installation;
 	// revalidating Before as live would incorrectly require removed dependencies.
@@ -728,6 +875,36 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 			successor = &m.SignalVerification.SignalVerificationReference
 		}
 		if _, err = verifyManagedArtifactsPolicy(d, *j.Intent.Before, j.Intent.Operation == "migrate-schema", "", successor); err != nil {
+			return m, err
+		}
+	}
+	if isManagedPolicyOperation(j.Intent.Operation) {
+		if _, err = managedBootstrapLimitsPair(d, j, c); err != nil {
+			return m, err
+		}
+	}
+	if m.Mode != "uninstalled" {
+		if err = i.requireLEDMappingOutputCapability(ctx, d, m); err != nil {
+			return m, err
+		}
+		if err = i.requireBootstrapEnrollmentLEDCapability(ctx, d, m, j.Intent.Operation == "enroll-bootstrap" && m.LEDOutput != nil); err != nil {
+			return m, err
+		}
+		if err = i.requireBootstrapEnrollmentCommandsCapability(ctx, d, m, j.Intent.Operation == "enroll-bootstrap" && c.Worker.Interaction != nil); err != nil {
+			return m, err
+		}
+		if err = i.requireBootstrapProvidersCapability(ctx, d, m, j.Intent.Operation); err != nil {
+			return m, err
+		}
+		if err = i.requireEnrolledLimitsCapability(ctx, d, m, (j.Intent.Operation == "enrolled-limits" || j.Intent.Operation == "enrolled-freshness" || j.Intent.Operation == "enrolled-routes" || j.Intent.Operation == "enrolled-producer" || j.Intent.Operation == "enrolled-providers" || j.Intent.Operation == "enrolled-command-activity" || j.Intent.Operation == "enrolled-command-policy" || j.Intent.Operation == "enrolled-commands")); err != nil {
+			return m, err
+		}
+		if err = i.requireBootstrapLimitsCapability(ctx, d, m, isManagedPolicyOperation(j.Intent.Operation)); err != nil {
+			return m, err
+		}
+	}
+	if j.Intent.Operation == "enroll-bootstrap" {
+		if _, err = managedBootstrapPair(d, j, c); err != nil {
 			return m, err
 		}
 	}
@@ -794,6 +971,12 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 		}
 		return m, i.services.Verify(ctx, m)
 	}
+	if err = i.probeLEDEndpoint(ctx, d, m, c); err != nil {
+		return m, err
+	}
+	if err = i.probeLEDOutput(ctx, d, m); err != nil {
+		return m, err
+	}
 	if err = i.probeSignalVerification(ctx, d, m); err != nil {
 		return m, err
 	}
@@ -816,6 +999,19 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 	state, err := inspectManagedService(ctx, i.services, m, true)
 	if err != nil {
 		return m, err
+	}
+	// A policy transition has already committed its database and published its
+	// exact runtime before reloaded. A lost start acknowledgement may leave that
+	// revision running. Verify it through the normal health/identity checks before
+	// recording completion, rather than stopping and starting it a second time.
+	if (isManagedPolicyOperation(j.Intent.Operation) || isPausedRuntimeChange(j.Intent.Operation)) && managedPhase(j.Phase) >= managedPhase("reloaded") && m.Mode == "verification" && present && bytes.Equal(unit, after) && state.Load == "loaded" && state.Active == "active" && state.UnitFile == "enabled" {
+		if err = i.services.Verify(ctx, m); err != nil {
+			return m, err
+		}
+		if err = i.advance(d, &j, "started"); err != nil {
+			return m, err
+		}
+		return m, i.advance(d, &j, "complete")
 	}
 	// Only stop a unit that the manifest pins. An initial cached not-found unit
 	// has no service to stop. Stop completion is verified before taking leases.
@@ -843,6 +1039,84 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 			lease.Close()
 		}
 	}()
+	if j.Intent.Operation == "change-command-delivery-limits" || j.Intent.Operation == "change-delivery-limits" || j.Intent.Operation == "change-delivery-producer" || j.Intent.Operation == "change-delivery-routes" || j.Intent.Operation == "change-delivery-destination" || j.Intent.Operation == "change-delivery-provider-enrollment" {
+		previous, e := managedRuntime(d, *j.Intent.Before)
+		if e != nil {
+			return m, e
+		}
+		migrate := worker.MigrateDeliveryLimits
+		if j.Intent.Operation == "change-delivery-destination" || j.Intent.Operation == "change-delivery-provider-enrollment" {
+			migrate = worker.MigrateDeliveryProviders
+		}
+		if j.Intent.Operation == "change-delivery-routes" {
+			migrate = worker.MigrateDeliveryRoutes
+		}
+		if j.Intent.Operation == "change-delivery-producer" {
+			migrate = worker.MigrateDeliveryProducerPolicy
+		}
+		if j.Intent.Operation == "change-command-delivery-limits" {
+			_, err = worker.MigrateCommandDeliveryLimits(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID, m.CommandHistoryHash)
+		} else {
+			_, err = migrate(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID)
+		}
+		if err != nil {
+			return m, err
+		}
+		if err = i.boundary("delivery-limits-migrated"); err != nil {
+			return m, err
+		}
+	}
+	if isManagedPolicyOperation(j.Intent.Operation) {
+		previous, e := managedBootstrapLimitsPair(d, j, c)
+		if e != nil {
+			return m, e
+		}
+		migrate := worker.MigrateBootstrapLimits
+		if j.Intent.Operation == "bootstrap-routes" || j.Intent.Operation == "bootstrap-providers" {
+			migrate = worker.MigrateBootstrapRoutes
+		}
+		if j.Intent.Operation == "enrolled-command-activity" {
+			_, err = worker.MigrateEnrolledCommandActivity(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID)
+		} else if j.Intent.Operation == "enrolled-command-policy" {
+			_, err = worker.MigrateEnrolledCommandPolicy(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID)
+		} else if j.Intent.Operation == "enrolled-commands" {
+			_, err = worker.MigrateEnrolledCommands(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID)
+		} else if j.Intent.Operation == "enrolled-providers" {
+			_, err = worker.MigrateEnrolledProviders(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID)
+		} else if j.Intent.Operation == "enrolled-producer" {
+			_, err = worker.MigrateEnrolledProducerPolicy(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID)
+		} else if j.Intent.Operation == "enrolled-routes" {
+			_, err = worker.MigrateEnrolledRoutes(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID)
+		} else if j.Intent.Operation == "enrolled-freshness" {
+			_, err = worker.MigrateEnrolledFreshness(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID)
+		} else if j.Intent.Operation == "enrolled-limits" {
+			_, err = worker.MigrateEnrolledLimits(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID)
+		} else if j.Intent.Operation == "bootstrap-providers" && protocol.Hash(previous.Worker) == protocol.Hash(c.Worker) {
+			// A token/reference rotation for the same bot and destination changes
+			// runtime ownership, not the worker's frozen audience. Recheck the
+			// stopped database without inventing a different route generation.
+			err = worker.PreflightBootstrapRoutes(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker)
+		} else {
+			_, err = migrate(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID)
+		}
+		if err != nil {
+			return m, err
+		}
+		if err = i.boundary(j.Intent.Operation + "-migrated"); err != nil {
+			return m, err
+		}
+	}
+	if j.Intent.Operation == "enroll-bootstrap" {
+		if _, err = managedBootstrapPair(d, j, c); err != nil {
+			return m, err
+		}
+		if _, err = worker.EnrollBootstrap(ctx, m.Paths.State, m.Identity, c.Worker, j.Intent.ID); err != nil {
+			return m, err
+		}
+		if err = i.boundary("bootstrap-enrolled"); err != nil {
+			return m, err
+		}
+	}
 	if j.Intent.Operation == "migrate-schema" {
 		// Probe both new executables before touching the old database. The separately
 		// retained old helper remains available for inspection of the pre-upgrade copy.
@@ -864,6 +1138,14 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 			return m, err
 		}
 		if err = i.boundary("led-migrated"); err != nil {
+			return m, err
+		}
+	}
+	if j.Intent.Operation == "set-led-output" {
+		if err = i.configureLEDOutput(ctx, d, j, c); err != nil {
+			return m, err
+		}
+		if err = i.boundary("led-output-complete"); err != nil {
 			return m, err
 		}
 	}
@@ -911,7 +1193,19 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 			return m, err
 		}
 	}
-	if j.Intent.Operation != "enable-commands" && j.Intent.Operation != "disable-commands" && !isManagedCommandPolicyOperation(j.Intent.Operation) {
+	// Output-only production changes preserve the exact runtime, producer
+	// generations and delivery owner; they never transfer reporting authority.
+	preservesDeliveryOutput := j.Intent.Operation == "set-led-output" && m.Mode == "delivery"
+	preservesOwner := preservesManagedDeliveryOwner(j)
+	if preservesOwner {
+		if err = i.probeDeliveryPause(ctx, d, m); err != nil {
+			return m, err
+		}
+		if err = requireDeliveryOwner(s, m, c); err != nil {
+			return m, err
+		}
+	}
+	if !preservesOwner && !preservesDeliveryOutput && j.Intent.Operation != "enable-commands" && j.Intent.Operation != "disable-commands" && !isManagedCommandPolicyOperation(j.Intent.Operation) {
 		if err = s.RequireInactiveProducers(); err != nil {
 			return m, err
 		}

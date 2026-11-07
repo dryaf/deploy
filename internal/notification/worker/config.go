@@ -39,7 +39,18 @@ type Config struct {
 	ReceiptAuditDays int                 `json:"receipt_audit_days,omitempty"` // Zero uses 90; intermediate receipt history only.
 }
 
-func (c Config) Validate() error {
+func (c Config) Validate() error { return c.validate(false) }
+
+// ValidateBootstrap is only for an explicitly unbound verification gateway.
+// Normal runtime validation continues to require at least one real producer.
+func (c Config) ValidateBootstrap() error {
+	if len(c.Producers) != 0 || c.Interaction != nil || len(c.LEDBindings) != 0 {
+		return fmt.Errorf("unbound gateway cannot enroll producers, commands or LED output")
+	}
+	return c.validate(true)
+}
+
+func (c Config) validate(unbound bool) error {
 	if c.ReceiptAuditDays != 0 && (c.ReceiptAuditDays < 90 || c.ReceiptAuditDays > 3650) {
 		return fmt.Errorf("receipt audit retention must be 90..3650 days")
 	}
@@ -56,7 +67,7 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	if len(c.Producers) == 0 || len(c.Producers) > 128 || len(c.Routes) > 128 {
+	if !unbound && len(c.Producers) == 0 || len(c.Producers) > 128 || len(c.Routes) > 128 {
 		return fmt.Errorf("invalid enrollment size")
 	}
 	seen := map[string]bool{}

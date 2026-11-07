@@ -34,6 +34,10 @@ func openManagedStore(m ManagedManifest, c Runtime) (*worker.Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err = requireManagedLEDOutput(context.Background(), s, m); err != nil {
+		s.Close()
+		return nil, err
+	}
 	if m.DeliveryOwnerHash != "" {
 		if err = requireDeliveryOwner(s, m, c); err != nil {
 			s.Close()
@@ -81,6 +85,12 @@ func openManagedStore(m ManagedManifest, c Runtime) (*worker.Store, error) {
 }
 
 func openCanonicalManagedStore(m ManagedManifest, c Runtime) (*worker.Store, error) {
+	if c.Bootstrap {
+		if (m.Mode != "verification" && m.Mode != "uninstalled") || m.RecoveryCommitHash != "" || m.DeliveryOwnerHash != "" || m.Commands != nil || m.SignalProfiles != nil {
+			return nil, fmt.Errorf("unbound gateway cannot adopt production or recovered authority")
+		}
+		return worker.OpenBootstrapVerification(m.Paths.State, c.Worker, m.Identity, m.Revision)
+	}
 	if m.Mode == "delivery" {
 		if m.DeliveryRecovery != nil {
 			s, err := worker.OpenManagedRecoveredDelivery(m.Paths.State, c.Worker, m.Revision, *m.DeliveryRecovery, m.DeliveryOwnerHash, m.DeliveryActivation.Hash)

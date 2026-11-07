@@ -40,6 +40,7 @@ type signalServiceBinding struct {
 	ManifestHash string `json:"manifest_hash"`
 }
 type signalServiceJournal struct {
+	Restart      string `json:"restart,omitempty"`
 	ManifestHash string `json:"manifest_hash"`
 	Phase        string `json:"phase"`
 }

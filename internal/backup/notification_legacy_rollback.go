@@ -39,6 +39,9 @@ type backupLegacyServices interface {
 }
 
 func (s backupLegacyRollbackSpec) validate(c WorkerInstallation) error {
+	if s.Cutover.Fresh != nil || c.Policy.Notifications.Mode == "shared" {
+		return fmt.Errorf("a declared shared installation has no legacy sender to restore")
+	}
 	if s.Version != 1 || !safefs.DigestPattern.MatchString(s.CredentialHash) || !notify.ValidToken(s.Generation) || s.Generation == s.Cutover.Managed.Generation || strings.TrimSpace(s.Reason) == "" || len(s.Reason) > 512 {
 		return fmt.Errorf("legacy rollback requires a new generation and bounded audit reason")
 	}
@@ -67,7 +70,7 @@ func runBackupLegacyRollback(ctx context.Context, home string, c WorkerInstallat
 	}
 	defer setup.Close()
 	var current WorkerInstallation
-	if err = root.ReadJSON(".config/deploy/backup-worker/runtime.json", &current); err != nil {
+	if err = readInstalledWorkerJSON(root, &current); err != nil {
 		return err
 	}
 	if notify.Hash(current) != spec.Cutover.ConfigHash {

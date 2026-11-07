@@ -71,3 +71,20 @@ func TestRecipientChangeBlocksWithoutRequest(t *testing.T) {
 		t.Fatal("recipient drift accepted")
 	}
 }
+
+func TestDirectSignalUsesAdmittedTransport(t *testing.T) {
+	calls := 0
+	a := Adapter{Profiles: map[string]Profile{"signal": {Kind: "signal", Socket: "/unused/private.sock", Destination: protocol.Hash("fixture")}}, Transport: transport(func(*http.Request) (*http.Response, error) {
+		t.Fatal("direct Signal bypassed its admitted transport")
+		return nil, nil
+	}), SignalTransport: transport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.URL.String() != "http://relay/send" || r.Method != "POST" {
+			t.Fatal("wrong direct request")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"accepted":true}`)), Header: make(http.Header)}, nil
+	})}
+	if result := a.Send(context.Background(), "signal", protocol.Message{ID: "fixture", Text: "synthetic message"}); !result.Accepted || calls != 1 {
+		t.Fatal("admitted Signal transport not used", result, calls)
+	}
+}

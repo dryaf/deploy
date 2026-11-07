@@ -76,20 +76,20 @@ func runRecoveryLEDCLI(args []string, out io.Writer) error {
 	defer stop()
 	if args[0] == "recovery-led-adopt" {
 		request := worker.RecoveryLEDAdoptionRequest{InventoryID: *inventory, InventoryHash: *hash, PreservationHash: *preservation}
-		view, err := worker.AdoptRecoveryLED(ctx, *state, runtime.Worker, runtime.LEDSocket, request, led.Client{Socket: runtime.LEDSocket, Budget: 2 * time.Second})
+		view, err := worker.AdoptRecoveryLED(ctx, *state, runtime.Worker, runtime.LEDSocket, request, led.Client{Socket: runtime.LEDSocket, Budget: 2 * time.Second, Endpoint: runtime.LEDEndpoint})
 		if err != nil {
 			return err
 		}
 		return json.NewEncoder(out).Encode(view)
 	}
 	if args[0] == "recovery-led-preserve" {
-		view, err := worker.PreserveRecoveryLED(ctx, *state, runtime.Worker, runtime.LEDSocket, *inventory, *hash, led.Client{Socket: runtime.LEDSocket, Budget: 2 * time.Second})
+		view, err := worker.PreserveRecoveryLED(ctx, *state, runtime.Worker, runtime.LEDSocket, *inventory, *hash, led.Client{Socket: runtime.LEDSocket, Budget: 2 * time.Second, Endpoint: runtime.LEDEndpoint})
 		if err != nil {
 			return err
 		}
 		return json.NewEncoder(out).Encode(view)
 	}
-	review, err := worker.ReviewRecoveryLED(ctx, *state, runtime.Worker, runtime.LEDSocket, led.Client{Socket: runtime.LEDSocket, Budget: 2 * time.Second}, *refresh)
+	review, err := worker.ReviewRecoveryLED(ctx, *state, runtime.Worker, runtime.LEDSocket, led.Client{Socket: runtime.LEDSocket, Budget: 2 * time.Second, Endpoint: runtime.LEDEndpoint}, *refresh)
 	if err != nil {
 		return err
 	}

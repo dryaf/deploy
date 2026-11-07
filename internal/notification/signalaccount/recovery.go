@@ -58,6 +58,9 @@ func (c recoveryCoordinator) runExpectedParent(ctx context.Context, path string,
 		return out, err
 	}
 	defer d.Close()
+	if err = requireNoNativeService(d); err != nil {
+		return out, err
+	}
 	op, err := d.Lock("deploy-service-link.lock", true, true)
 	if err != nil {
 		return out, err
@@ -114,6 +117,9 @@ func (c recoveryCoordinator) runExpectedParent(ctx context.Context, path string,
 		}
 		defer q.Close()
 		defer guard.Close()
+		if err = requireNoNativeService(q); err != nil {
+			return
+		}
 		if err = directoryCheck(); err != nil {
 			return
 		}

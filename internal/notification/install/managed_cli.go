@@ -18,6 +18,99 @@ import (
 )
 
 func runManagedCLI(args []string) error {
+	if args[0] == "__managed-command-limits-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("command limits probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), CommandLimits: 1})
+	}
+	if args[0] == "__managed-command-pause-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), CommandPause: 1})
+	}
+
+	if args[0] == "__managed-delivery-limits-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), DeliveryLimits: 5})
+	}
+	if args[0] == "__managed-delivery-providers-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), DeliveryProviders: 1})
+	}
+	if args[0] == "__managed-delivery-pause-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), DeliveryPause: 1})
+	}
+	if args[0] == "__managed-enrolled-limits-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), EnrolledLimits: 12})
+	}
+	if args[0] == "__managed-bootstrap-enrollment-commands-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), BootstrapEnrollmentCommands: 1})
+	}
+	if args[0] == "__managed-bootstrap-providers-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), BootstrapProviders: 2})
+	}
+	if args[0] == "__managed-bootstrap-enrollment-led-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), BootstrapEnrollmentLED: 1})
+	}
+
+	if args[0] == "__managed-bootstrap-limits-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), BootstrapLimits: 3})
+	}
+	if args[0] == "__managed-led-endpoint-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), LEDEndpoint: 1})
+	}
+	if args[0] == "__managed-delivery-led-output-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), LEDDeliveryOutput: 1})
+	}
+	if args[0] == "__managed-led-output-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), LEDOutput: 1})
+	}
+	if args[0] == "__managed-fresh-signal-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), FreshSignalGateway: 1})
+	}
+	if args[0] == "__managed-bootstrap-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), Bootstrap: 1})
+	}
+
 	if args[0] == "__managed-next-recovery-probe" {
 		if len(args) != 1 {
 			return fmt.Errorf("probe takes no arguments")
@@ -55,6 +148,12 @@ func runManagedCLI(args []string) error {
 			return fmt.Errorf("probe takes no arguments")
 		}
 		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), SignalProfiles: 1, SignalConversations: 1})
+	}
+	if args[0] == "__managed-command-grants-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("invalid command grants probe")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), CommandGrants: 1})
 	}
 	if args[0] == "__managed-command-enrollment-probe" {
 		if len(args) != 1 {
@@ -107,7 +206,7 @@ func runManagedCLI(args []string) error {
 			capability.SchemaMigration = 1
 		}
 		if args[0] == "__managed-led-migration-probe" {
-			capability.LEDMappingMigration = 1
+			capability.LEDMappingMigration = 2
 		}
 		if args[0] == "__managed-recovery-probe" {
 			capability.RecoveryVerification = 1
@@ -400,7 +499,7 @@ func serveManaged(ctx context.Context, root, revision string) error {
 	if m.Mode == "delivery" {
 		return serveManagedDelivery(ctx, d, s, c, m, lease, nil)
 	}
-	if err = s.RequireInactiveProducers(); err != nil {
+	if err = requireManagedVerificationProducers(d, s, m, c, j); err != nil {
 		return err
 	}
 	c, err = managedEffectiveRuntime(d, m, c)

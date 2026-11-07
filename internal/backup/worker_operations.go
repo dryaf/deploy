@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -106,11 +105,17 @@ func runWorkerOperation(args []string) error {
 	if err != nil {
 		return err
 	}
-	if *configFile == "" {
-		*configFile = filepath.Join(home, ".config/deploy/backup-worker/runtime.json")
-	}
-	if *stateDir == "" {
-		*stateDir = filepath.Join(home, ".local/state/deploy/backup-worker/state")
+	if *configFile == "" || *stateDir == "" {
+		paths, err := lookupInstalledBackupPaths(home)
+		if err != nil {
+			return err
+		}
+		if *configFile == "" {
+			*configFile = paths.Runtime
+		}
+		if *stateDir == "" {
+			*stateDir = paths.State
+		}
 	}
 	if operation == "signal-link" {
 		lease, e := signalInstallationLease(home)
@@ -127,6 +132,15 @@ func runWorkerOperation(args []string) error {
 		*archivePath = c.Policy.Storage.Path
 	}
 	if operation == "run" {
+		state, err := openBackupState(*stateDir, false)
+		if err != nil {
+			return err
+		}
+		err = requireBackupActivityReady(state)
+		state.Close()
+		if err != nil {
+			return err
+		}
 		cmd := exec.Command("systemctl", "--user", "start", "--no-block", "deploy-backup.service")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -149,6 +163,11 @@ func runWorkerOperation(args []string) error {
 		return err
 	}
 	defer state.Close()
+	if operation != "status" {
+		if err = requireBackupActivityReady(state); err != nil {
+			return err
+		}
+	}
 	c = applyWorkerQualification(c, state)
 	switch operation {
 	case "activate":
@@ -249,7 +268,7 @@ func runWorkerOperation(args []string) error {
 		for _, name := range c.Policy.Sources {
 			fmt.Println("Source: " + name)
 		}
-		for _, gate := range []string{"source_restrictions", "rootless_runtime", "storage_durability", "notification_delivery", "external_monitor"} {
+		for _, gate := range workerQualificationGates(c, false) {
 			if !c.Qualification[gate] {
 				fmt.Println("Qualification pending: " + gate)
 			}
@@ -264,6 +283,9 @@ func runWorkerOperation(args []string) error {
 	case "resume":
 		return consumeBackupCatchup(state, c, true, startBackupCatchup)
 	case "notify-test":
+		if err = requireBackupReporting(state, c); err != nil {
+			return err
+		}
 		if err = requireLegacyNotificationOwner(state); err != nil {
 			return err
 		}
@@ -278,6 +300,9 @@ func runWorkerOperation(args []string) error {
 		cmd.Stderr = os.Stderr
 		return process.Run(cmd, 40*time.Second, 5*time.Second)
 	case "__notify_test":
+		if err = requireBackupReporting(state, c); err != nil {
+			return err
+		}
 		lease, err := backupNotifierLease(state)
 		if err != nil {
 			return err

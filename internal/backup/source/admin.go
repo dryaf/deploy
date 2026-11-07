@@ -21,14 +21,15 @@ import (
 )
 
 type SourceEnrollmentRequest struct {
-	SourceID  string `json:"source_id,omitempty"`
-	Previous  string `json:"previous,omitempty"`
-	Schema    int    `json:"schema"`
-	Operation string `json:"operation"`
-	WorkerID  string `json:"worker_id"`
-	PublicKey string `json:"public_key"`
-	Service   string `json:"service,omitempty"`
-	Reason    string `json:"reason,omitempty"`
+	HelperSHA256 string `json:"helper_sha256,omitempty"`
+	SourceID     string `json:"source_id,omitempty"`
+	Previous     string `json:"previous,omitempty"`
+	Schema       int    `json:"schema"`
+	Operation    string `json:"operation"`
+	WorkerID     string `json:"worker_id"`
+	PublicKey    string `json:"public_key"`
+	Service      string `json:"service,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 type SourceEnrollmentResult struct {
@@ -46,6 +47,20 @@ func Admin() error {
 	var request SourceEnrollmentRequest
 	if err = safefs.ReadJSON(os.Stdin, &request, protocol.MaxBackupHeader); err != nil {
 		return err
+	}
+	if request.Operation == "inspect" {
+		result, err := inspectSourceEnrollment(home, request)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
+	if request.Operation == "revoke-retained" {
+		result, err := revokeRetainedSource(home, request)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(result)
 	}
 	if request.Operation == "reconcile-generation" {
 		result, e := reconcileSourceGeneration(home, request)
@@ -101,6 +116,19 @@ func enrollSourceWorker(home string, request SourceEnrollmentRequest) (SourceEnr
 		return result, err
 	}
 	defer lock.Close()
+	// A declaration must not regain retired access by naming the same source
+	// under another alias. Ordinary enrollment/rotation has no authority to erase
+	// the explicit disposition, even when the selected key is unchanged.
+	if request.Operation == "enroll" || request.Operation == "rotate" {
+		var retained SourceIdentity
+		if e := dir.ReadJSON("identity.json", &retained); e == nil {
+			if retained.Workers[request.WorkerID].RetirementReason != "" {
+				return result, fmt.Errorf("worker authorization is retired; explicit source reenrollment migration required")
+			}
+		} else if !errors.Is(e, os.ErrNotExist) {
+			return result, e
+		}
+	}
 	if err = deployhelper.InstallSelf(home, "backup-source"); err != nil {
 		return result, err
 	}

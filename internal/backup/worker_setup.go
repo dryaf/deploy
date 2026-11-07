@@ -1,24 +1,22 @@
 package backup
 
 import (
-	"bytes"
+	"context"
 	"crypto/sha256"
 	"debug/elf"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/dryaf/deploy/internal/backup/protocol"
-	deploysource "github.com/dryaf/deploy/internal/backup/source"
 	"github.com/dryaf/deploy/internal/config"
 	"github.com/dryaf/deploy/internal/process"
-	"github.com/dryaf/deploy/internal/safefs"
 	"github.com/dryaf/deploy/internal/transport"
 	"github.com/dryaf/deploy/internal/ui"
 )
@@ -58,7 +56,16 @@ func bootstrapHelperCommand(server config.ServerConfig, artifact, operation stri
 	if operation != "__worker_setup" && operation != "__source_admin" {
 		return nil, nil, fmt.Errorf("invalid bootstrap operation")
 	}
-	binary, err := os.ReadFile(artifact)
+	f, err := os.Open(artifact)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 128<<20 {
+		return nil, nil, fmt.Errorf("helper artifact must be a bounded regular file")
+	}
+	binary, err := io.ReadAll(io.LimitReader(f, 128<<20+1))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -90,6 +97,11 @@ sys.exit(status)
 }
 
 func verifiedKnownHosts(server config.ServerConfig) (string, error) {
+	return VerifiedSetupKnownHosts(context.Background(), server)
+}
+
+// VerifiedSetupKnownHosts reads only matching entries from the existing operator trust store.
+func VerifiedSetupKnownHosts(ctx context.Context, server config.ServerConfig) (string, error) {
 	file := server.KnownHostsFile
 	if file == "" {
 		home, err := os.UserHomeDir()
@@ -102,7 +114,15 @@ func verifiedKnownHosts(server config.ServerConfig) (string, error) {
 	if server.SSHPort != 0 && server.SSHPort != 22 {
 		host = fmt.Sprintf("[%s]:%d", host, server.SSHPort)
 	}
-	body, err := process.LimitedOutput(exec.Command("ssh-keygen", "-F", host, "-f", file), 5*time.Second, 16384)
+	var output, stderr process.Buffer
+	output.Limit, stderr.Limit = 16384, 4096
+	cmd := exec.Command("ssh-keygen", "-F", host, "-f", file)
+	cmd.Stdout, cmd.Stderr = &output, &stderr
+	err := ctx.Err()
+	if err == nil {
+		err = process.RunContext(ctx, cmd, 5*time.Second, time.Second)
+	}
+	body := output.Bytes()
 	if err != nil {
 		return "", fmt.Errorf("source has no matching operator-verified known-host entry")
 	}
@@ -168,118 +188,34 @@ func setupBackupWorkerOperation(operation string, args []string) error {
 		}
 		request.Sources = append(request.Sources, SetupSource{alias, server.Host, server.User, port, known})
 	}
-	artifact, err := remoteHelperArtifact(worker, *artifacts)
-	if err != nil {
-		return err
-	}
-	cmd, binary, err := bootstrapHelperCommand(worker, artifact, "__worker_setup")
-	if err != nil {
-		return err
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-	stdout, stdoutWriter, err := os.Pipe()
-	if err != nil {
-		return err
-	}
-	cmd.Stdout = stdoutWriter
-	var stderr process.Buffer
-	stderr.Limit = 8192
-	cmd.Stderr = &stderr
-	done := make(chan error, 1)
-	go func() { defer stdoutWriter.Close(); done <- process.Run(cmd, 60*time.Minute, 10*time.Second) }()
-	finished := false
-	defer func() {
-		stdin.Close()
-		stdout.Close()
-		if !finished {
-			<-done
-		}
-	}()
-	if _, err = stdin.Write(binary); err != nil {
-		return err
-	}
-	body, _ := json.Marshal(request)
-	if err = protocol.WriteBackupFrame(stdin, body); err != nil {
-		return err
-	}
-	readResponse := func() (WorkerSetupResponse, error) {
-		var response WorkerSetupResponse
-		raw, err := protocol.ReadBackupFrame(stdout)
+	resolve := func(server config.ServerConfig) (SetupTarget, error) {
+		file, err := remoteHelperArtifact(server, *artifacts)
 		if err != nil {
-			return response, fmt.Errorf("setup coordinator failed before response")
+			return SetupTarget{}, err
 		}
-		if err = protocol.StrictBackupJSON(raw, &response); err != nil {
-			return response, err
+		body, err := os.ReadFile(file)
+		if err != nil {
+			return SetupTarget{}, err
 		}
-		if response.Error != "" {
-			return response, fmt.Errorf("worker setup: %s", response.Error)
-		}
-		return response, nil
+		arch := strings.TrimPrefix(filepath.Base(file), "deploy-linux-")
+		return SetupTarget{Server: server, Helper: SetupArtifact{File: file, SHA256: fmt.Sprintf("%x", sha256.Sum256(body)), Architecture: arch}}, nil
 	}
-	response, err := readResponse()
+	target, err := resolve(worker)
 	if err != nil {
 		return err
 	}
-	if response.Stage == "complete" {
-		stdin.Close()
-		err = <-done
-		finished = true
-		if err != nil {
-			return err
-		}
-		fmt.Println("Worker already staged; installation identities and owned files match.")
-		return nil
-	}
-	if response.Stage != "prepared" || !safefs.ValidID(response.WorkerID, "w") {
-		return fmt.Errorf("invalid setup coordinator response")
-	}
+	plan := SetupPlan{Target: target, Request: request, Sources: map[string]SetupTarget{}}
 	for _, source := range request.Sources {
-		server := inventory.Servers[source.Alias]
-		artifact, err := remoteHelperArtifact(server, *artifacts)
+		plan.Sources[source.Alias], err = resolve(inventory.Servers[source.Alias])
 		if err != nil {
 			return err
 		}
-		sourceCommand, binary, err := bootstrapHelperCommand(server, artifact, "__source_admin")
-		if err != nil {
-			return err
-		}
-		enrollment := deploysource.SourceEnrollmentRequest{Schema: 1, Operation: "enroll", WorkerID: response.WorkerID, PublicKey: response.PublicKeys[source.Alias]}
-		body, _ := json.Marshal(enrollment)
-		sourceCommand.Stdin = io.MultiReader(bytes.NewReader(binary), bytes.NewReader(body))
-		output, err := process.LimitedOutput(sourceCommand, 2*time.Minute, protocol.MaxBackupHeader)
-		if err != nil {
-			return fmt.Errorf("source enrollment failed for %s; setup journal retained for retry", source.Alias)
-		}
-		var enrolled deploysource.SourceEnrollmentResult
-		if err = protocol.StrictBackupJSON(output, &enrolled); err != nil {
-			return err
-		}
-		step, _ := json.Marshal(WorkerSetupStep{Operation: "source", Alias: source.Alias, Enrollment: &enrolled})
-		if err = protocol.WriteBackupFrame(stdin, step); err != nil {
-			return err
-		}
-		if _, err = readResponse(); err != nil {
-			return err
-		}
 	}
-	finish, _ := json.Marshal(WorkerSetupStep{Operation: "finish"})
-	if err = protocol.WriteBackupFrame(stdin, finish); err != nil {
-		return err
-	}
-	if response, err = readResponse(); err != nil {
-		return err
-	}
-	stdin.Close()
-	err = <-done
-	finished = true
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	_, err = SetupWorker(ctx, plan)
 	if err != nil {
-		return fmt.Errorf("setup coordinator did not exit successfully")
-	}
-	if response.Stage != "complete" {
-		return fmt.Errorf("setup did not commit")
+		return err
 	}
 	fmt.Println("Worker staged. Timers remain disabled pending live qualification and explicit activation. Manual run, status, list and pull are available.")
 	return nil

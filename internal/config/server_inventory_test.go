@@ -86,7 +86,7 @@ environments:
 
 func TestServerInventoryStrictness(t *testing.T) {
 	for name, input := range map[string]string{
-		"version":         "version: 3\nservers: {vps: {host: example.com, user: deploy}}",
+		"version":         "version: 4\nservers: {vps: {host: example.com, user: deploy}}",
 		"missing version": "servers: {vps: {host: example.com, user: deploy}}",
 		"user":            "version: 2\nservers: {vps: {host: example.com}}",
 		"unknown":         "version: 2\nservers: {vps: {host: example.com, user: deploy, token: secret}}",

@@ -16,14 +16,16 @@ import (
 const backupCutoverFile = "notification-cutover.json"
 
 type backupCutoverSpec struct {
-	Version      int                              `json:"version"`
-	Predecessor  string                           `json:"predecessor,omitempty"`
-	Signal       *backupSignalMigration           `json:"signal,omitempty"`
-	Managed      install.ManagedProducerRequest   `json:"managed"`
-	HelperHash   string                           `json:"helper_hash"`
-	ConfigHash   string                           `json:"config_hash"`
-	EvidenceHash string                           `json:"evidence_hash"`
-	Decisions    map[string]backupCutoverDecision `json:"decisions"`
+	CompletedPolicyHash string                           `json:"completed_policy_hash,omitempty"` // v6 read-only view of an already completed fresh owner.
+	Fresh               *freshBackupReporting            `json:"fresh,omitempty"`
+	Version             int                              `json:"version"`
+	Predecessor         string                           `json:"predecessor,omitempty"`
+	Signal              *backupSignalMigration           `json:"signal,omitempty"`
+	Managed             install.ManagedProducerRequest   `json:"managed"`
+	HelperHash          string                           `json:"helper_hash"`
+	ConfigHash          string                           `json:"config_hash"`
+	EvidenceHash        string                           `json:"evidence_hash"`
+	Decisions           map[string]backupCutoverDecision `json:"decisions"`
 }
 type backupCutoverIntent struct {
 	Spec     backupCutoverSpec     `json:"spec"`
@@ -37,19 +39,32 @@ type backupCutoverServices interface {
 	StopReports(context.Context, map[string]string) error
 }
 type backupCutoverDependencies struct {
-	Services backupCutoverServices
-	Managed  func(context.Context, install.ManagedProducerRequest, func(install.ManagedProducerSession) error) error
-	Verify   func(context.Context, backupNotificationOwner) error
-	Fault    func(string) error
+	CommandContinuation func(context.Context, string, string, string) (install.ManagedManifest, error)
+	Completed           func(context.Context, string, WorkerInstallation, backupCutoverSpec, backupNotificationOwner) error
+	Services            backupCutoverServices
+	Managed             func(context.Context, install.ManagedProducerRequest, func(install.ManagedProducerSession) error) error
+	Verify              func(context.Context, backupNotificationOwner) error
+	Fault               func(string) error
 }
 
 func mustCutoverJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 func backupCutoverPaths(home string, c WorkerInstallation) WorkerUnitPaths {
+	if c.Paths != nil {
+		return c.Paths.unitPaths(c.Policy.Storage.Path)
+	}
 	return WorkerUnitPaths{Home: home, Config: filepath.Join(home, ".config/deploy/backup-worker/runtime.json"), State: filepath.Join(home, ".local/state/deploy/backup-worker/state"), Archive: c.Policy.Storage.Path, Keys: filepath.Join(home, ".config/deploy/backup-worker/ssh"), RelayState: filepath.Join(home, ".local/share/deploy/backup-worker/signal"), RelaySocket: filepath.Join(home, ".local/state/deploy/backup-worker/relay")}
 }
 func validateBackupCutoverSpec(spec backupCutoverSpec, c WorkerInstallation) error {
+	if c.Paths != nil {
+		if _, err := c.Paths.UnitPaths(c.Policy.Storage.Path); err != nil {
+			return err
+		}
+	}
 	if spec.Managed.Validate() != nil || !validCutoverVersion(spec) || spec.Managed.Revoke || spec.Managed.LegacyGeneration != "" || !safefs.DigestPattern.MatchString(spec.HelperHash) || !safefs.DigestPattern.MatchString(spec.EvidenceHash) || spec.ConfigHash != notify.Hash(c) || spec.Managed.Producer.ID != c.WorkerID {
 		return fmt.Errorf("cutover requires exact helper, installation, evidence and producer pins")
+	}
+	if spec.Fresh != nil || c.Policy.Notifications.Mode == "shared" {
+		return validateFreshBackupReportingSpec(spec, c)
 	}
 	if c.Policy.Notifications.Signal != nil {
 		return validateBackupSignalMigration(spec, c)
@@ -61,13 +76,19 @@ func validateBackupCutoverSpec(spec backupCutoverSpec, c WorkerInstallation) err
 }
 
 func validCutoverVersion(s backupCutoverSpec) bool {
-	return s.Version == 1 && s.Predecessor == "" && s.Signal == nil || s.Version == 3 && s.Predecessor == "" && s.Signal != nil || (s.Version == 2 || s.Version == 4) && safefs.DigestPattern.MatchString(s.Predecessor)
+	if s.Version == 6 || s.Version == 7 || s.Version == 8 {
+		return s.Fresh != nil && s.Signal == nil && safefs.DigestPattern.MatchString(s.Predecessor) && safefs.DigestPattern.MatchString(s.CompletedPolicyHash)
+	}
+	if s.CompletedPolicyHash != "" {
+		return false
+	}
+	return s.Version == 5 && s.Fresh != nil && s.Predecessor == "" && s.Signal == nil || s.Fresh == nil && (s.Version == 1 && s.Predecessor == "" && s.Signal == nil || s.Version == 3 && s.Predecessor == "" && s.Signal != nil || (s.Version == 2 || s.Version == 4) && safefs.DigestPattern.MatchString(s.Predecessor))
 }
 
 // A continuation pins today's installed artifacts while retaining the original
 // ownership decision. It cannot create authority or change its audience.
 func matchCutoverContinuation(original backupCutoverIntent, current backupCutoverSpec) error {
-	if (current.Version == 1 || current.Version == 3) && notify.Hash(original.Spec) == notify.Hash(current) {
+	if (current.Version == 1 || current.Version == 3 || current.Version == 5) && notify.Hash(original.Spec) == notify.Hash(current) {
 		return nil
 	}
 	if current.Version != 2 || current.Predecessor != notify.Hash(original) {
@@ -87,6 +108,9 @@ func matchCutoverContinuation(original backupCutoverIntent, current backupCutove
 // leases drain both scheduled passes and direct compatible senders. Worker and
 // installation leases remain held until the shared owner is durably published.
 func runBackupCutover(ctx context.Context, home string, c WorkerInstallation, spec backupCutoverSpec, revoke bool, deps backupCutoverDependencies) error {
+	if spec.Version == 6 || spec.Version == 7 || spec.Version == 8 {
+		return fmt.Errorf("completed shared policy inspection cannot enter a delivery ownership transaction")
+	}
 	if err := validateBackupCutoverSpec(spec, c); err != nil {
 		return err
 	}
@@ -102,7 +126,7 @@ func runBackupCutover(ctx context.Context, home string, c WorkerInstallation, sp
 	}
 	defer setup.Close()
 	var current WorkerInstallation
-	if err = root.ReadJSON(".config/deploy/backup-worker/runtime.json", &current); err != nil {
+	if err = readInstalledWorkerJSON(root, &current); err != nil {
 		return err
 	}
 	if notify.Hash(current) != spec.ConfigHash {
@@ -115,6 +139,11 @@ func runBackupCutover(ctx context.Context, home string, c WorkerInstallation, sp
 	}
 	if setupJournal.Stage != "complete" || setupJournal.RecoveryNeeded || setupJournal.WorkerID != c.WorkerID || setupJournal.ArchiveID != c.ArchiveID {
 		return fmt.Errorf("backup setup is unfinished or belongs to another archive")
+	}
+	if spec.Fresh != nil {
+		if err = requireFreshBackupReportingSetup(root, home, setupJournal, spec); err != nil {
+			return err
+		}
 	}
 	if err = deps.Services.Prepare(ctx, c, paths, spec.HelperHash); err != nil {
 		return err
@@ -199,6 +228,11 @@ func runBackupCutover(ctx context.Context, home string, c WorkerInstallation, sp
 			if e.Control.ArchiveID != c.ArchiveID || e.Control.WriterID != c.WorkerID || e.Control.ConfigHash != c.ConfigHash {
 				return fmt.Errorf("backup archive/configuration binding changed")
 			}
+			if spec.Fresh != nil {
+				if err = requireFreshBackupReportingEvidence(tx, e); err != nil {
+					return err
+				}
+			}
 			if notify.Hash(e) != spec.EvidenceHash {
 				return fmt.Errorf("legacy evidence changed; review again before cutover")
 			}
@@ -224,7 +258,7 @@ func runBackupCutover(ctx context.Context, home string, c WorkerInstallation, sp
 			return err
 		}
 		m := session.Manifest()
-		if m.UnitDirectory != filepath.Join(home, ".config/systemd/user") {
+		if m.UnitDirectory != backupCutoverPaths(home, c).unitDirectory() {
 			return fmt.Errorf("report and gateway must use the same canonical user manager")
 		}
 		binding := backupNotificationBinding{Identity: m.Identity, Producer: spec.Managed.Producer, Archive: c.ArchiveID, Epoch: intent.Evidence.Control.Epoch, Generation: spec.Managed.Generation, Route: spec.Managed.Route}

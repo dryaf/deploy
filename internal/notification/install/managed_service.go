@@ -116,6 +116,9 @@ func (u userManagedServices) Verify(ctx context.Context, m ManagedManifest) erro
 			if m.SignalProfiles != nil {
 				profileHash = m.SignalProfiles.Hash
 			}
+			if m.LEDOutput == nil && h.LEDOutputDisposition != nil || m.LEDOutput != nil && (h.LEDOutputDisposition == nil || !h.LEDOutputDisposition.Complete || h.LEDOutputDisposition.Operation != m.LEDOutput.Operation || h.LEDOutputDisposition.Disabled != m.LEDOutput.Disabled) {
+				return fmt.Errorf("managed worker LED output disposition differs")
+			}
 			if h.SignalProfilesHash != profileHash {
 				return fmt.Errorf("managed worker has a different effective Signal profile binding")
 			}
@@ -137,6 +140,12 @@ func (u userManagedServices) Verify(ctx context.Context, m ManagedManifest) erro
 				loop, ok := h.Loops["delivery-admission"]
 				if !ok || loop.Condition != "ok" || !loop.ValidUntil.After(time.Now()) {
 					return fmt.Errorf("delivery runtime has no current admission observation")
+				}
+			}
+			if m.FreshSignal != nil {
+				loop, ok := h.Loops["signal-verification"]
+				if h.FreshSignalServiceHash != m.FreshSignal.ManifestHash || !ok || loop.Condition != "ok" || !loop.ValidUntil.After(time.Now()) {
+					return fmt.Errorf("fresh Signal service health missing or changed")
 				}
 			}
 			if m.SignalVerification != nil {

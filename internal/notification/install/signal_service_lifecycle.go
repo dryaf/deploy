@@ -203,7 +203,7 @@ func readSignalServiceJournal(d *safefs.Directory, m SignalServiceManifest) (j s
 	if err != nil {
 		return
 	}
-	if j.ManifestHash != m.ManifestHash || signalServicePhase(j.Phase) == 0 {
+	if j.Restart != "" || j.ManifestHash != m.ManifestHash || signalServicePhase(j.Phase) == 0 {
 		err = fmt.Errorf("Signal service journal changed")
 	}
 	return
@@ -233,7 +233,7 @@ func (i signalServiceInstaller) resumeLocked(ctx context.Context, d *safefs.Dire
 				return m, e
 			}
 		}
-		j = signalServiceJournal{m.ManifestHash, "prepared"}
+		j = signalServiceJournal{ManifestHash: m.ManifestHash, Phase: "prepared"}
 		if err = d.WriteJSON("lifecycle.json", j, false); err != nil {
 			return m, err
 		}

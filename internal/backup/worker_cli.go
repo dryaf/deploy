@@ -60,6 +60,20 @@ func RunCLI(args []string) error {
 	if args[0] == "notification-recovery-activate" {
 		return runBackupRecoveryActivationCLI(args[1:], os.Stdout)
 	}
+	if args[0] == "__shared-commands-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("shared commands probe accepts no arguments")
+		}
+		fmt.Println("backup-shared-commands-v2")
+		return nil
+	}
+	if args[0] == "__shared-reporting-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("shared reporting probe accepts no arguments")
+		}
+		fmt.Println("backup-shared-reporting-v1")
+		return nil
+	}
 	if args[0] == "__notification-cutover-probe" {
 		if len(args) != 1 {
 			return fmt.Errorf("cutover probe accepts no arguments")

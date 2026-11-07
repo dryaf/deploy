@@ -226,7 +226,7 @@ func inspectSignalServiceRetained(ref SignalVerificationReference, allowRemoval 
 	if err = d.ReadJSON("lifecycle.json", &j); err != nil {
 		return
 	}
-	if j.ManifestHash != m.ManifestHash || (j.Phase != "complete" && !(removing && (j.Phase == "removing" || j.Phase == "removed"))) {
+	if j.Restart != "" || j.ManifestHash != m.ManifestHash || (j.Phase != "complete" && !(removing && (j.Phase == "removing" || j.Phase == "removed"))) {
 		return m, fmt.Errorf("Signal service lifecycle incomplete")
 	}
 	endpoint, err := privateManagedDir(ref.Root, true)

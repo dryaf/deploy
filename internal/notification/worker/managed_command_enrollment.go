@@ -67,16 +67,23 @@ func commandPolicyVersion(raw string) int {
 	return 2
 }
 
-func validateCommandEnrollmentHistory(d *safefs.Directory, head *managedCommandHead, base *interaction.Config, proposed string) error {
+func validateCommandEnrollmentHistory(d *safefs.Directory, head *managedCommandHead, base *interaction.Config, proposed string, grants ...bool) error {
+	grant := len(grants) == 1 && grants[0]
+	if len(grants) > 1 {
+		return fmt.Errorf("invalid command grant review")
+	}
 	if proposed != "" && commandPolicyVersion(proposed) == 3 && head != nil && proposed == head.Policy {
 		return fmt.Errorf("command enrollment is unchanged")
 	}
-	var policies []string
+	type policyChange struct {
+		policy string
+		grant  bool
+	}
+	var policies []policyChange
 	for n := 0; head != nil; n++ {
 		if n >= 1024 {
 			return fmt.Errorf("command enrollment history budget exceeded")
 		}
-		policies = append(policies, head.Policy)
 		var t managedCommandTransition
 		if err := d.ReadJSON(head.Hash+".json", &t); err != nil {
 			return err
@@ -84,13 +91,14 @@ func validateCommandEnrollmentHistory(d *safefs.Directory, head *managedCommandH
 		if t.After != *head || !validCommandTransition(t) {
 			return fmt.Errorf("command enrollment history changed")
 		}
+		policies = append(policies, policyChange{head.Policy, t.Grant})
 		head = t.Before
 	}
 	for i, j := 0, len(policies)-1; i < j; i, j = i+1, j-1 {
 		policies[i], policies[j] = policies[j], policies[i]
 	}
 	if proposed != "" {
-		policies = append(policies, proposed)
+		policies = append(policies, policyChange{proposed, grant})
 	}
 	if base == nil {
 		return fmt.Errorf("command enrollment unavailable")
@@ -106,11 +114,12 @@ func validateCommandEnrollmentHistory(d *safefs.Directory, head *managedCommandH
 		generations[dest.ID+"/"+dest.Generation] = true
 	}
 	prior := ""
-	for _, policy := range policies {
+	for _, change := range policies {
+		policy := change.policy
 		if policy == prior {
 			continue
 		}
-		next, err := narrowedCommandConfig(base, prior, policy)
+		next, err := changedCommandConfig(base, prior, policy, change.grant)
 		if err != nil {
 			return err
 		}

@@ -32,7 +32,12 @@ func TestLEDMappingMigrationCrashChild(t *testing.T) {
 	api.onClear = func(string) { save() }
 	api.onSet = func(led.State) { save() }
 	phase, kind := os.Getenv("DEPLOY_LED_MAPPING_PHASE"), os.Getenv("DEPLOY_LED_MAPPING_KIND")
-	_, err = migrateLEDBindings(context.Background(), path, before, after, migrationSocket, api, func(stage string) error {
+	var authority *managedLEDAuthority
+	if os.Getenv("DEPLOY_LED_MAPPING_MANAGED") == "1" {
+		authority = new(managedLEDAuthority)
+		must(t, d.ReadJSON("test-authority.json", authority))
+	}
+	_, err = migrateLEDBindingsPinned(context.Background(), path, before, after, migrationSocket, api, func(stage string) error {
 		if stage != phase {
 			return nil
 		}
@@ -54,7 +59,7 @@ func TestLEDMappingMigrationCrashChild(t *testing.T) {
 		}
 		fmt.Println("READY")
 		select {}
-	})
+	}, authority)
 	must(t, err)
 	t.Fatal("kill boundary not reached")
 }
@@ -124,5 +129,64 @@ func TestLEDMappingMigrationSIGKILL(t *testing.T) {
 			}
 			must(t, verifyLEDMappingOutput(context.Background(), api, record.Intent))
 		})
+	}
+}
+
+func TestLEDMappingOutputSIGKILL(t *testing.T) {
+	for _, disabled := range []bool{true, false} {
+		boundaries := []string{"mapping_intent", "mapping_prepared", "mapping_before_commit", "mapping_committed", "mapping_unfenced"}
+		if !disabled {
+			boundaries = append(boundaries, "mapping_rpc_intent", "mapping_rpc_returned", "mapping_rpc_ack")
+		}
+		for _, boundary := range boundaries {
+			t.Run(fmt.Sprintf("%t/%s", disabled, boundary), func(t *testing.T) {
+				path, before, output, api := mappingOutputFixture(t, disabled)
+				after := before
+				after.LEDBindings = []LEDBinding{{ID: "backup", Producer: before.Producers[0].Producer, Subjects: []string{"*"}, LED: "green"}}
+				op, err := safefs.NewID("n")
+				must(t, err)
+				d, err := safefs.Open(path)
+				must(t, err)
+				defer d.Close()
+				must(t, d.WriteJSON("test-authority.json", managedLEDAuthority{output.Identity, op}, false))
+				must(t, d.WriteJSON("test-before.json", before, false))
+				must(t, d.WriteJSON("test-after.json", after, false))
+				must(t, d.WriteJSON("test-daemon.json", api.states, false))
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLEDMappingMigrationCrashChild$")
+				cmd.Env = append(os.Environ(), "DEPLOY_LED_MAPPING_STATE="+path, "DEPLOY_LED_MAPPING_PHASE="+boundary, "DEPLOY_LED_MAPPING_KIND=", "DEPLOY_LED_MAPPING_MANAGED=1")
+				pipe, err := cmd.StdoutPipe()
+				must(t, err)
+				var stderr bytes.Buffer
+				cmd.Stderr = &stderr
+				must(t, cmd.Start())
+				defer func() {
+					if cmd.ProcessState == nil {
+						cmd.Process.Kill()
+						cmd.Wait()
+					}
+				}()
+				scanner := bufio.NewScanner(pipe)
+				if !scanner.Scan() || scanner.Text() != "READY" {
+					t.Fatalf("boundary not reached: %s %s", scanner.Text(), stderr.String())
+				}
+				must(t, cmd.Process.Kill())
+				if cmd.Wait() == nil {
+					t.Fatal("expected SIGKILL")
+				}
+				api.states = nil
+				must(t, d.ReadJSON("test-daemon.json", &api.states))
+				for range 2 {
+					_, err = MigrateManagedLEDBindings(context.Background(), path, before, after, migrationSocket, api, output.Identity, op)
+					must(t, err)
+				}
+				s, err := OpenManagedVerification(path, after, output.Identity)
+				must(t, err)
+				defer s.Close()
+				must(t, s.RequireLEDOutput(context.Background(), output.Operation, disabled))
+				must(t, s.RequireInactiveProducers())
+			})
+		}
 	}
 }

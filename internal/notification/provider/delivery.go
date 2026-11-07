@@ -131,6 +131,9 @@ func (a Adapter) Send(ctx context.Context, name string, m protocol.Message) Resu
 			Text string `json:"text"`
 		}{chat, message}
 	case "signal":
+		if a.SignalTransport != nil {
+			transport = a.SignalTransport
+		}
 		if !filepath.IsAbs(p.Socket) || p.Destination == "" {
 			return Result{Permanent: true}
 		}

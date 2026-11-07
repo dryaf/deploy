@@ -21,31 +21,49 @@ import (
 )
 
 type managedCapabilities struct {
-	SignalNextRecovery   int `json:"signal_next_recovery,omitempty"`
-	NextRecovery         int `json:"next_recovery,omitempty"`
-	LEDDelivery          int `json:"led_delivery,omitempty"`
-	SignalConversations  int `json:"signal_conversations,omitempty"`
-	SignalProduction     int `json:"signal_production,omitempty"`
-	CommandRecovery      int `json:"command_recovery,omitempty"`
-	TelegramHandoff      int `json:"telegram_handoff,omitempty"`
-	Commands             int `json:"commands,omitempty"`
-	CommandEnrollment    int `json:"command_enrollment,omitempty"`
-	CommandPolicy        int `json:"command_policy,omitempty"`
-	DeliveryRecovery     int `json:"delivery_recovery,omitempty"`
-	LegacyOwnership      int `json:"legacy_ownership,omitempty"`
-	Delivery             int `json:"delivery,omitempty"`
-	SignalProfiles       int `json:"signal_profiles,omitempty"`
-	SignalService        int `json:"signal_service,omitempty"`
-	SignalReplacement    int `json:"signal_replacement,omitempty"`
-	SignalSupervision    int `json:"signal_supervision,omitempty"`
-	SignalVerification   int `json:"signal_verification,omitempty"`
-	HelperUpgrade        int `json:"helper_upgrade,omitempty"`
-	TelegramRenewal      int `json:"telegram_renewal,omitempty"`
-	RecoveryVerification int `json:"recovery_verification,omitempty"`
-	Version              int `json:"version"`
-	Schema               int `json:"schema"`
-	SchemaMigration      int `json:"schema_migration,omitempty"`
-	LEDMappingMigration  int `json:"led_mapping_migration,omitempty"`
+	CommandLimits               int `json:"command_limits,omitempty"`
+	CommandPause                int `json:"command_pause,omitempty"`
+	DeliveryLimits              int `json:"delivery_limits,omitempty"`
+	DeliveryProviders           int `json:"delivery_providers,omitempty"`
+	DeliveryPause               int `json:"delivery_pause,omitempty"`
+	CommandGrants               int `json:"command_grants,omitempty"`
+	BootstrapProviders          int `json:"bootstrap_providers,omitempty"`
+	FreshSignalRestart          int `json:"fresh_signal_restart,omitempty"`
+	BootstrapEnrollmentLED      int `json:"bootstrap_enrollment_led,omitempty"`
+	BootstrapEnrollmentCommands int `json:"bootstrap_enrollment_commands,omitempty"`
+	EnrolledLimits              int `json:"enrolled_limits,omitempty"`
+	BootstrapLimits             int `json:"bootstrap_limits,omitempty"`
+	LEDEndpoint                 int `json:"led_endpoint,omitempty"`
+	LEDOutput                   int `json:"led_output,omitempty"`
+	LEDDeliveryOutput           int `json:"led_delivery_output,omitempty"`
+	FreshSignalGateway          int `json:"fresh_signal_gateway,omitempty"`
+	FreshSignal                 int `json:"fresh_signal,omitempty"`
+	Bootstrap                   int `json:"bootstrap,omitempty"`
+	SignalNextRecovery          int `json:"signal_next_recovery,omitempty"`
+	NextRecovery                int `json:"next_recovery,omitempty"`
+	LEDDelivery                 int `json:"led_delivery,omitempty"`
+	SignalConversations         int `json:"signal_conversations,omitempty"`
+	SignalProduction            int `json:"signal_production,omitempty"`
+	CommandRecovery             int `json:"command_recovery,omitempty"`
+	TelegramHandoff             int `json:"telegram_handoff,omitempty"`
+	Commands                    int `json:"commands,omitempty"`
+	CommandEnrollment           int `json:"command_enrollment,omitempty"`
+	CommandPolicy               int `json:"command_policy,omitempty"`
+	DeliveryRecovery            int `json:"delivery_recovery,omitempty"`
+	LegacyOwnership             int `json:"legacy_ownership,omitempty"`
+	Delivery                    int `json:"delivery,omitempty"`
+	SignalProfiles              int `json:"signal_profiles,omitempty"`
+	SignalService               int `json:"signal_service,omitempty"`
+	SignalReplacement           int `json:"signal_replacement,omitempty"`
+	SignalSupervision           int `json:"signal_supervision,omitempty"`
+	SignalVerification          int `json:"signal_verification,omitempty"`
+	HelperUpgrade               int `json:"helper_upgrade,omitempty"`
+	TelegramRenewal             int `json:"telegram_renewal,omitempty"`
+	RecoveryVerification        int `json:"recovery_verification,omitempty"`
+	Version                     int `json:"version"`
+	Schema                      int `json:"schema"`
+	SchemaMigration             int `json:"schema_migration,omitempty"`
+	LEDMappingMigration         int `json:"led_mapping_migration,omitempty"`
 }
 
 func ownedManagedFile(d *safefs.Directory, name string, limit int64) ([]byte, error) {
@@ -178,6 +196,20 @@ func probeManagedCapability(ctx context.Context, d *safefs.Directory, name, hash
 		return err
 	}
 	if c.Version != managedVersion || c.Schema != worker.StorageSchemaVersion() ||
+		(probe == "__managed-delivery-limits-probe" && c.DeliveryLimits != 5) ||
+		(probe == "__managed-delivery-providers-probe" && c.DeliveryProviders != 1) ||
+		(probe == "__managed-delivery-pause-probe" && c.DeliveryPause != 1) ||
+		(probe == "__managed-command-limits-probe" && c.CommandLimits != 1) ||
+		(probe == "__managed-command-pause-probe" && c.CommandPause != 1) ||
+		(probe == "__fresh-signal-probe" && c.FreshSignal != 1) ||
+		(probe == "__fresh-signal-restart-probe" && c.FreshSignalRestart != 1) ||
+		(probe == "__managed-fresh-signal-probe" && c.FreshSignalGateway != 1) ||
+		(probe == "__managed-enrolled-limits-probe" && c.EnrolledLimits != 12) ||
+		(probe == "__managed-bootstrap-limits-probe" && c.BootstrapLimits != 3) ||
+		(probe == "__managed-bootstrap-providers-probe" && c.BootstrapProviders != 2) ||
+		(probe == "__managed-bootstrap-probe" && c.Bootstrap != 1) ||
+		(probe == "__managed-bootstrap-enrollment-led-probe" && c.BootstrapEnrollmentLED != 1) ||
+		(probe == "__managed-bootstrap-enrollment-commands-probe" && c.BootstrapEnrollmentCommands != 1) ||
 		(probe == "__managed-signal-replacement-probe" && c.SignalReplacement != 1) ||
 		(probe == "__managed-signal-production-probe" && (c.SignalProduction != 1 || c.SignalReplacement != 1)) ||
 		(probe == "__managed-signal-conversations-probe" && (c.SignalConversations != 1 || c.SignalProfiles != 1)) ||
@@ -185,13 +217,17 @@ func probeManagedCapability(ctx context.Context, d *safefs.Directory, name, hash
 		(probe == "__managed-command-recovery-probe" && c.CommandRecovery != 1) ||
 		(probe == "__managed-telegram-handoff-probe" && c.TelegramHandoff != 1) ||
 		(probe == "__managed-commands-probe" && c.Commands != 1) ||
+		(probe == "__managed-command-grants-probe" && c.CommandGrants != 1) ||
 		(probe == "__managed-command-policy-probe" && c.CommandPolicy != 1) ||
 		(probe == "__managed-command-enrollment-probe" && c.CommandEnrollment != 1) ||
+		(probe == "__managed-led-endpoint-probe" && c.LEDEndpoint != 1) ||
+		(probe == "__managed-led-output-probe" && c.LEDOutput != 1) ||
+		(probe == "__managed-delivery-led-output-probe" && c.LEDDeliveryOutput != 1) ||
 		(probe == "__managed-led-delivery-probe" && c.LEDDelivery != 1) ||
 		(probe == "__managed-delivery-recovery-probe" && c.DeliveryRecovery != 1) ||
 		(probe == "__managed-legacy-probe" && c.LegacyOwnership != 1) ||
 		(probe == "__managed-migration-probe" && c.SchemaMigration != 1) ||
-		(probe == "__managed-led-migration-probe" && c.LEDMappingMigration != 1) ||
+		(probe == "__managed-led-migration-probe" && c.LEDMappingMigration != 2) ||
 		(probe == "__managed-next-recovery-probe" && c.NextRecovery != 1) ||
 		(probe == "__signal-next-recovery-probe" && c.SignalNextRecovery != 1) ||
 		(probe == "__managed-recovery-probe" && c.RecoveryVerification != 1) ||
@@ -259,6 +295,20 @@ func verifyManagedArtifactsPolicy(d *safefs.Directory, m ManagedManifest, migrat
 	c, err := managedRuntime(d, m)
 	if err != nil {
 		return c, err
+	}
+	if m.FreshSignal != nil {
+		if m.Mode == "uninstalled" {
+			var service FreshSignalManifest
+			service, _, err = inspectRetainedFreshSignal(*m.FreshSignal)
+			if err == nil {
+				err = validateFreshSignalGatewayManifest(service, m.Root, m.Paths.State, m.UnitDirectory, c)
+			}
+		} else {
+			_, err = validateFreshSignalGateway(context.Background(), *m.FreshSignal, m.Root, m.Paths.State, m.UnitDirectory, c, false)
+		}
+		if err != nil {
+			return c, err
+		}
 	}
 	if m.DeliveryOwnerHash != "" {
 		if err := deliveryPolicyWithSuccessor(m, c, successor); err != nil {

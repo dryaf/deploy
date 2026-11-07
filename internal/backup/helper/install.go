@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/dryaf/deploy/internal/safefs"
 	"golang.org/x/sys/unix"
@@ -19,19 +20,19 @@ type HelperArtifactManifest struct {
 }
 
 func InstallSelf(home string, role string) error {
+	return InstallSelfAt(home, role, filepath.Join(home, ".local/lib/deploy", role))
+}
+
+// InstallSelfAt retains the same artifact ownership transaction at an explicitly
+// pinned target directory. Existing unknown executables are never adopted.
+func InstallSelfAt(home string, role string, installation string) error {
 	if role != "backup-worker" && role != "backup-source" {
 		return fmt.Errorf("invalid helper role")
 	}
-	root, err := safefs.Open(home)
-	if err != nil {
-		return err
+	if !filepath.IsAbs(home) || filepath.Clean(home) != home || home == "/" {
+		return fmt.Errorf("invalid helper target home")
 	}
-	defer root.Close()
-	relative := ".local/lib/deploy/" + role
-	if err = root.Mkdir(relative); err != nil {
-		return err
-	}
-	dir, err := root.Sub(relative)
+	dir, err := safefs.EnsureOwnedDirectory(installation)
 	if err != nil {
 		return err
 	}

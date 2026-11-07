@@ -10,8 +10,9 @@ import (
 )
 
 // Command policy is an immutable runtime overlay. Canonical recovery and owner
-// configuration hashes remain unchanged. Every new policy can only remove rights;
-// enrollment overlays also preserve immutable audiences and worker contracts.
+// configuration hashes remain unchanged. Ordinary changes remove rights; explicit
+// grant records may restore the original receiver authority. Enrollment overlays
+// preserve immutable audiences and worker contracts.
 func (s *Store) commandConfig() *interaction.Config {
 	if s.managedCommandPolicy != nil {
 		return s.managedCommandPolicy
@@ -127,6 +128,10 @@ func (s *Store) CommitManagedCommandPolicy(hash, previous, policy string) error 
 // operation lock. Commit independently validates both SQL and file authority after
 // stopping the runtime; this preflight never opens or repairs the live database.
 func ValidateManagedCommandPolicyFile(path string, base *interaction.Config, previous, policy string) error {
+	return validateManagedCommandPolicyFile(path, base, previous, policy, false)
+}
+
+func validateManagedCommandPolicyFile(path string, base *interaction.Config, previous, policy string, grant bool) error {
 	root, err := safefs.Open(path)
 	if err != nil {
 		return err
@@ -147,5 +152,38 @@ func ValidateManagedCommandPolicyFile(path string, base *interaction.Config, pre
 	if err = verifyCommandHistory(d, head, ""); err != nil {
 		return err
 	}
-	return validateCommandEnrollmentHistory(d, head, base, policy)
+	return validateCommandEnrollmentHistory(d, head, base, policy, grant)
+}
+
+// InspectManagedCommandPolicyFile reads the independently anchored effective
+// policy. Reading the original runtime alone would restore permissions removed
+// by an overlay. This function does not open or repair the live database.
+func InspectManagedCommandPolicyFile(path string, base *interaction.Config, expected string) (*interaction.Config, error) {
+	if !safefs.DigestPattern.MatchString(expected) {
+		return nil, fmt.Errorf("exact command history required")
+	}
+	root, err := safefs.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	d, err := root.Sub("managed-commands")
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	head, err := commandFileHead(d)
+	if err != nil {
+		return nil, err
+	}
+	if head == nil || head.Hash != expected {
+		return nil, fmt.Errorf("effective command history differs")
+	}
+	if err = verifyCommandHistory(d, head, ""); err != nil {
+		return nil, err
+	}
+	if err = validateCommandEnrollmentHistory(d, head, base, ""); err != nil {
+		return nil, err
+	}
+	return commandPolicyConfig(base, head.Policy)
 }

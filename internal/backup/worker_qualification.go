@@ -85,12 +85,25 @@ func recordWorkerQualification(proof WorkerQualification) error {
 	if err != nil {
 		return err
 	}
-	config := filepath.Join(home, ".config/deploy/backup-worker/runtime.json")
-	c, err := loadWorkerInstallation(config)
+	root, err := safefs.Open(home)
 	if err != nil {
 		return err
 	}
-	dir, err := safefs.Open(filepath.Dir(config))
+	defer root.Close()
+	lock, err := root.Lock(".local/state/deploy/locks/backup-worker-setup.lock", true, false)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	layout, _, err := installedBackupPaths(root)
+	if err != nil {
+		return err
+	}
+	c, err := loadInstalledWorker(home)
+	if err != nil {
+		return err
+	}
+	dir, err := safefs.Open(layout.Config)
 	if err != nil {
 		return err
 	}
@@ -102,17 +115,20 @@ func recordWorkerQualification(proof WorkerQualification) error {
 	if proof.Schema != 1 || proof.WorkerID != c.WorkerID || proof.ArchiveID != c.ArchiveID || proof.ConfigHash != c.ConfigHash || proof.Architecture != runtime.GOARCH || proof.WorkerImage != images["worker"] || proof.CheckedAt.After(time.Now().Add(time.Minute)) || time.Since(proof.CheckedAt) > 7*24*time.Hour {
 		return fmt.Errorf("qualification report does not match this installation and recent test window")
 	}
-	for _, name := range []string{"storage_crash_recovery", "notification_receipt", "missed_worker_route", "daily_delivery_route", "isolated_application_restore"} {
+	for _, name := range workerQualificationChecks(c) {
 		check := proof.Checks[name]
 		if !check.Passed || len(strings.TrimSpace(check.Evidence)) < 8 || len(check.Evidence) > 4096 {
 			return fmt.Errorf("missing passing qualification evidence: %s", name)
 		}
 	}
-	state, err := openBackupState(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false)
+	state, err := openInstalledBackupState(home, false)
 	if err != nil {
 		return err
 	}
 	defer state.Close()
+	if err = requireNoPendingDeclaredActivation(state); err != nil {
+		return err
+	}
 	if err = state.put("qualification", proof); err != nil {
 		return err
 	}
@@ -144,7 +160,16 @@ func activateWorker(c WorkerInstallation, state *backupState) error {
 	return activateWorkerUsing(c, state, requireSharedBackupReportUnits, deploysource.QualifyRestrictedSource)
 }
 func activateWorkerUsing(c WorkerInstallation, state *backupState, verifyReports func(string, WorkerInstallation, *backupState, backupNotificationOwner) error, qualifySource func(deploysource.WorkerSource, deployconfig.WorkerTimeouts) error) error {
+	if err := requireBackupActivityReady(state); err != nil {
+		return err
+	}
 	home := strings.TrimSuffix(state.directory, "/.local/state/deploy/backup-worker/state")
+	if c.Paths != nil {
+		if c.Paths.Validate() != nil || c.Paths.State != state.directory {
+			return fmt.Errorf("activation state differs from retained layout")
+		}
+		home = c.Paths.Home
+	}
 	if home != state.directory {
 		root, e := safefs.Open(home)
 		if e != nil {
@@ -156,42 +181,27 @@ func activateWorkerUsing(c WorkerInstallation, state *backupState, verifyReports
 			return e
 		}
 		defer lock.Close()
+		var setup WorkerSetupJournal
+		if e = root.ReadJSON(backupSetupFile, &setup); e != nil {
+			return e
+		}
+		if c.Paths != nil {
+			p, e := declarationPaths(home, setup.Declaration)
+			if e != nil || notificationprotocol.Hash(p) != notificationprotocol.Hash(*c.Paths) {
+				return fmt.Errorf("activation path authority changed")
+			}
+		}
+		if setup.Activity != nil && (!setup.Activity.Complete || setup.Activity.Disabled) {
+			return fmt.Errorf("finish or re-enable declared backup activity before activation")
+		}
 	}
-	owner, err := currentSharedBackupOwner(state)
+	if err := requireNoPendingDeclaredActivation(state); err != nil {
+		return err
+	}
+	units, err := validateWorkerActivation(c, state, verifyReports, qualifySource)
 	if err != nil {
 		return err
 	}
-	if owner != nil {
-		home := strings.TrimSuffix(state.directory, "/.local/state/deploy/backup-worker/state")
-		if state.directory != filepath.Join(home, ".local/state/deploy/backup-worker/state") {
-			return fmt.Errorf("shared activation requires canonical backup state")
-		}
-		if err = verifyReports(home, c, state, *owner); err != nil {
-			return err
-		}
-	}
-	if err := notification.ValidateMonitoringChecks(c.Policy.Monitoring); err != nil {
-		return err
-	}
-	c = applyWorkerQualification(c, state)
-	for _, gate := range []string{"source_restrictions", "rootless_runtime", "storage_durability", "notification_delivery", "external_monitor", "application_restore"} {
-		if !c.Qualification[gate] {
-			return fmt.Errorf("activation requires qualification: %s", gate)
-		}
-	}
-	if c.Policy.Monitoring.BackupPingURLFile == "" || c.Policy.Monitoring.DailyDeliveryPingURLFile == "" {
-		return fmt.Errorf("activation requires separate qualified backup and daily-delivery monitoring checks")
-	}
-	var run WorkerRun
-	if err := state.get("run", &run); err != nil || !run.Complete || run.ConfigHash != c.ConfigHash || time.Since(run.FinishedAt) > time.Hour {
-		return fmt.Errorf("activation requires a recent successful manual backup pass")
-	}
-	for _, source := range c.Sources {
-		if err := qualifySource(source, c.Policy.Timeouts); err != nil {
-			return err
-		}
-	}
-	units := workerActivationUnitsFor(owner != nil)
 	if _, err := process.LimitedOutput(exec.Command("systemctl", append([]string{"--user", "enable", "--now"}, units...)...), 30*time.Second, 4096); err != nil {
 		_, _ = process.LimitedOutput(exec.Command("systemctl", append([]string{"--user", "disable", "--now"}, units...)...), 30*time.Second, 4096)
 		return fmt.Errorf("worker timer activation failed; activation rolled back")
@@ -203,21 +213,80 @@ func activateWorkerUsing(c WorkerInstallation, state *backupState, verifyReports
 	return nil
 }
 
+// Caller holds the installation setup lease. This validates all existing gates
+// without enabling a unit or printing into a framed controller response.
+func validateWorkerActivation(c WorkerInstallation, state *backupState, verifyReports func(string, WorkerInstallation, *backupState, backupNotificationOwner) error, qualifySource func(deploysource.WorkerSource, deployconfig.WorkerTimeouts) error) ([]string, error) {
+	var control ArchiveControl
+	if err := state.get("control", &control); err != nil || (control.ReportingDisabled != (c.Policy.Notifications.Mode == "disabled") || control.SharedRequired != (c.Policy.Notifications.Mode == "shared")) {
+		return nil, fmt.Errorf("activation reporting policy differs from retained archive control")
+	}
+	owner, err := currentSharedBackupOwner(state)
+	if err != nil {
+		return nil, err
+	}
+	if c.Policy.Notifications.Mode == "shared" && owner == nil {
+		return nil, fmt.Errorf("connect the qualified shared reporting owner before activation")
+	}
+	if owner != nil {
+		if c.Policy.Notifications.Mode == "disabled" {
+			return nil, fmt.Errorf("disabled reporting conflicts with shared notification ownership")
+		}
+		home := strings.TrimSuffix(state.directory, "/.local/state/deploy/backup-worker/state")
+		if c.Paths != nil {
+			if c.Paths.Validate() != nil || c.Paths.State != state.directory {
+				return nil, fmt.Errorf("shared activation state differs from retained layout")
+			}
+			home = c.Paths.Home
+		} else if state.directory != filepath.Join(home, ".local/state/deploy/backup-worker/state") {
+			return nil, fmt.Errorf("shared activation requires canonical backup state")
+		}
+		if err = verifyReports(home, c, state, *owner); err != nil {
+			return nil, err
+		}
+	}
+	if err := notification.ValidateMonitoringChecks(c.Policy.Monitoring); err != nil {
+		return nil, err
+	}
+	c = applyWorkerQualification(c, state)
+	for _, gate := range workerQualificationGates(c, true) {
+		if !c.Qualification[gate] {
+			return nil, fmt.Errorf("activation requires qualification: %s", gate)
+		}
+	}
+	if c.Policy.Notifications.Mode != "disabled" && (c.Policy.Monitoring.BackupPingURLFile == "" || c.Policy.Monitoring.DailyDeliveryPingURLFile == "") {
+		return nil, fmt.Errorf("activation requires separate qualified backup and daily-delivery monitoring checks")
+	}
+	var run WorkerRun
+	if err := state.get("run", &run); err != nil || !run.Complete || run.ConfigHash != c.ConfigHash || run.FinishedAt.IsZero() || run.FinishedAt.After(time.Now()) || time.Since(run.FinishedAt) > time.Hour || len(run.Failures) != 0 {
+		return nil, fmt.Errorf("activation requires a recent successful manual backup pass")
+	}
+	for _, source := range c.Sources {
+		if err := qualifySource(source, c.Policy.Timeouts); err != nil {
+			return nil, err
+		}
+	}
+	return workerPolicyActivationUnits(c, owner != nil), nil
+}
+
 func signalLinkWorker(home, configuration, state, explicitOperation string, newLink bool) error {
 	// The notifier/schema leases held by the caller must belong to the same
 	// installed worker as the fixed managed relay. An alternate state directory
 	// must never bypass that installation's notification ownership fence.
-	if configuration != filepath.Join(home, ".config/deploy/backup-worker/runtime.json") || state != filepath.Join(home, ".local/state/deploy/backup-worker/state") {
+	layout, err := lookupInstalledBackupPaths(home)
+	if err != nil {
+		return err
+	}
+	if configuration != layout.Runtime || state != layout.State {
 		return fmt.Errorf("Signal service maintenance requires the installed worker configuration and state paths")
 	}
-	c, err := loadWorkerInstallation(configuration)
+	c, err := loadInstalledWorker(home)
 	if err != nil {
 		return err
 	}
 	if c.Policy.Notifications.Signal == nil {
 		return fmt.Errorf("Signal is not configured")
 	}
-	dir, err := safefs.Open(filepath.Join(home, ".config/deploy/backup-worker"))
+	dir, err := safefs.Open(layout.Config)
 	if err != nil {
 		return err
 	}
@@ -233,7 +302,10 @@ func signalLinkWorker(home, configuration, state, explicitOperation string, newL
 	if err = deployconfig.PinnedWorkerImage(images["relay"]); err != nil {
 		return fmt.Errorf("no pinned Signal relay image installed")
 	}
-	paths := WorkerUnitPaths{Home: home, Config: configuration, State: state, Archive: c.Policy.Storage.Path, Keys: filepath.Join(home, ".config/deploy/backup-worker/ssh"), RelayState: filepath.Join(home, ".local/share/deploy/backup-worker/signal"), RelaySocket: filepath.Join(home, ".local/state/deploy/backup-worker/relay")}
+	paths, err := layout.UnitPaths(c.Policy.Storage.Path)
+	if err != nil {
+		return err
+	}
 	units, err := renderWorkerUnits(c, paths, images["worker"], images["relay"])
 	if err != nil {
 		return err

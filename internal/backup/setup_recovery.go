@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"errors"
@@ -24,6 +25,10 @@ func installRecoverySupervisor(home string, root, stateRoot *safefs.Directory, j
 }
 
 func installRecoverySupervisorFrom(home string, root, stateRoot *safefs.Directory, journal *WorkerSetupJournal, executable string) error {
+	layout, err := declarationPaths(home, journal.Declaration)
+	if err != nil {
+		return err
+	}
 	source, err := os.Open(executable)
 	if err != nil {
 		return err
@@ -33,11 +38,8 @@ func installRecoverySupervisorFrom(home string, root, stateRoot *safefs.Director
 	if err != nil {
 		return err
 	}
-	release := ".local/lib/deploy/backup-worker/recovery/" + digest
-	if err = root.Mkdir(release); err != nil {
-		return err
-	}
-	dir, err := root.Sub(release)
+	release := filepath.Join(layout.Installation, "recovery", digest)
+	dir, err := safefs.EnsureOwnedDirectory(release)
 	if err != nil {
 		return err
 	}
@@ -56,19 +58,21 @@ func installRecoverySupervisorFrom(home string, root, stateRoot *safefs.Director
 	} else {
 		return err
 	}
-	command := unitQuote(filepath.Join(home, release, "deploy")) + " backup-worker __recover_setup"
+	command := unitQuote(filepath.Join(release, "deploy")) + " backup-worker __recover_setup"
 	units := map[string]string{
 		"deploy-backup-recovery.service": "[Unit]\nDescription=Recover interrupted deploy backup setup\n\n[Service]\nType=oneshot\nExecStart=" + command + "\nTimeoutStartSec=5min\nUMask=0077\n",
 		recoveryTimer:                    "[Unit]\nDescription=Supervise deploy backup setup across disconnect and reboot\n\n[Timer]\nOnBootSec=5s\nOnUnitInactiveSec=15s\nAccuracySec=1s\nUnit=deploy-backup-recovery.service\n\n[Install]\nWantedBy=timers.target\n",
 	}
-	if err = root.Mkdir(".config/systemd/user"); err != nil {
+	unitsDir, err := safefs.EnsureOwnedDirectory(layout.UnitDirectory)
+	if err != nil {
 		return err
 	}
+	unitsDir.Close()
 	for name, body := range units {
-		path := filepath.Join(".config/systemd/user", name)
+		path := layout.OwnedPath(filepath.Join(layout.UnitDirectory, name))
 		// Recover a lost acknowledgement of this supervisor file before staging again.
 		if change, ok := journal.Files[path]; ok {
-			actual, e := safefs.ReadFile(root, path, 8<<20)
+			actual, e := readBackupOwnedFile(root, path, 8<<20)
 			if e == nil && fmt.Sprintf("%x", sha256.Sum256(actual)) == change.AfterHash {
 				journal.OwnedFiles[path] = change.AfterHash
 				delete(journal.Files, path)
@@ -128,7 +132,11 @@ func restoreWorkerHelper(root *safefs.Directory, journal *WorkerSetupJournal) er
 	if journal.BeforeHelper == nil {
 		return nil
 	}
-	dir, err := root.Sub(".local/lib/deploy/backup-worker")
+	layout, err := declarationPaths(root.File().Name(), journal.Declaration)
+	if err != nil {
+		return err
+	}
+	dir, err := safefs.Open(layout.Installation)
 	if err != nil {
 		return err
 	}
@@ -167,6 +175,9 @@ func restoreWorkerHelper(root *safefs.Directory, journal *WorkerSetupJournal) er
 }
 
 func rollbackWorkerInstallation(root, stateRoot *safefs.Directory, journal *WorkerSetupJournal, state *backupState, a *backupArchive) error {
+	if err := checkSetupTelegramRotation(*journal, nil, true); err != nil {
+		return err
+	}
 	if err := requireWorkerSetupOwner(state, journal); err != nil {
 		return err
 	}
@@ -203,6 +214,9 @@ func rollbackWorkerInstallation(root, stateRoot *safefs.Directory, journal *Work
 }
 
 func finishWorkerRollback(stateRoot *safefs.Directory, journal *WorkerSetupJournal, state *backupState) error {
+	if err := checkSetupTelegramRotation(*journal, nil, true); err != nil {
+		return err
+	}
 	if err := requireWorkerSetupOwner(state, journal); err != nil {
 		return err
 	}
@@ -229,10 +243,17 @@ func finishWorkerRollback(stateRoot *safefs.Directory, journal *WorkerSetupJourn
 	completed.BeforeInstallation = ""
 	completed.CandidateHelper = ""
 	completed.EnabledUnits = nil
+	completed.TelegramRotation = nil
+	if completed.SharedPolicyUpdate == nil || !sharedHelperVersion(completed.SharedPolicyUpdate.Version) {
+		completed.SharedPolicyUpdate = nil
+	}
+	completed.SharedPolicyExpansion = nil
 	completed.Stage = "prepared"
 	if completed.Updating {
 		completed.RequestHash = completed.PreviousRequestHash
 		completed.PreviousRequestHash = ""
+		completed.Declaration = completed.PreviousDeclaration
+		completed.PreviousDeclaration = nil
 		completed.Updating = false
 		completed.Stage = "complete"
 	}
@@ -249,19 +270,32 @@ func recoverWorkerSetupLocked(home string, root, stateRoot *safefs.Directory, jo
 	}
 	if !journal.RecoveryNeeded {
 		if journal.Stage == "complete" {
-			return clearInstallationGate(filepath.Join(home, ".local/state/deploy/backup-worker/state"), journal.ID)
+			path, e := installedBackupStatePath(home)
+			if e != nil {
+				return e
+			}
+			return clearInstallationGate(path, journal.ID)
 		}
 		return nil
 	}
 	if ((journal.Schema != 1 || journal.Shared != nil) && (journal.Schema != 2 || journal.Shared == nil)) || !config.WorkerAbsolutePath(journal.ArchivePath) {
 		return fmt.Errorf("invalid recovery journal")
 	}
+	if journal.Declaration != nil && journal.Declaration.Paths != nil {
+		layout, e := declarationPaths(home, journal.Declaration)
+		if e != nil {
+			return e
+		}
+		if e = requireBackupManagerLayout(context.Background(), layout, cutoverCommand); e != nil {
+			return e
+		}
+	}
 	if journal.Updating {
 		if err := stopWorkerUnitsFor(journal.Shared != nil); err != nil {
 			return err
 		}
 	}
-	state, err := openBackupStateWithLease(filepath.Join(home, ".local/state/deploy/backup-worker/state"), false, false, true)
+	state, err := openInstalledBackupStateWithLease(home, false, false, true)
 	if err != nil {
 		return err
 	}
@@ -332,7 +366,11 @@ func prepareWorkerRecovery(root, stateRoot *safefs.Directory, journal *WorkerSet
 			return err
 		}
 		var helper deployhelper.HelperArtifactManifest
-		if err := root.ReadJSON(".local/lib/deploy/backup-worker/artifact.json", &helper); err != nil {
+		layout, err := declarationPaths(root.File().Name(), journal.Declaration)
+		if err != nil {
+			return err
+		}
+		if err := readBackupOwnedJSON(root, layout.OwnedPath(filepath.Join(layout.Installation, "artifact.json")), &helper); err != nil {
 			return err
 		}
 		journal.BeforeHelper = &helper

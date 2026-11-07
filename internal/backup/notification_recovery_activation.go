@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/dryaf/deploy/internal/notification/install"
 	notify "github.com/dryaf/deploy/internal/notification/protocol"
@@ -30,7 +29,7 @@ func runBackupRecoveryActivation(ctx context.Context, home string, c WorkerInsta
 	}
 	defer setup.Close()
 	var installed WorkerInstallation
-	if err = root.ReadJSON(".config/deploy/backup-worker/runtime.json", &installed); err != nil {
+	if err = readInstalledWorkerJSON(root, &installed); err != nil {
 		return err
 	}
 	if notify.Hash(installed) != spec.ConfigHash {
@@ -104,7 +103,7 @@ func runBackupRecoveryActivation(ctx context.Context, home string, c WorkerInsta
 	err = deps.Managed(ctx, request, func(session install.ManagedProducerSession) error {
 		m := session.Manifest()
 		proofSession, ok := session.(install.ManagedRecoveryProducerSession)
-		if !ok || m.DeliveryRecovery == nil || m.UnitDirectory != filepath.Join(home, ".config/systemd/user") || m.Mode != "delivery" {
+		if !ok || m.DeliveryRecovery == nil || m.UnitDirectory != backupCutoverPaths(home, c).unitDirectory() || m.Mode != "delivery" {
 			return fmt.Errorf("recovered reporting requires the exact managed recovered gateway")
 		}
 		var e error

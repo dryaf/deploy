@@ -147,6 +147,16 @@ func verifyLEDMappingOutput(ctx context.Context, api LEDAPI, v ledMappingIntent)
 	}
 	retained := map[string]bool{}
 	for _, b := range ledLayoutOutputs(v.After) {
+		if v.LEDOutputDisabled {
+			base := ledBindingNamespace(v.After.Worker, b.ID)
+			if _, ok := owned[base+".baseline"]; ok {
+				return fmt.Errorf("disabled LED baseline remains")
+			}
+			if _, ok := owned[base+".healthy"]; ok {
+				return fmt.Errorf("disabled LED healthy lease remains")
+			}
+			continue
+		}
 		want := ledBaseline(v.After.Worker, b)
 		got, ok := owned[want.ID]
 		if !ok || protocol.Hash(got) != protocol.Hash(want) {

@@ -63,10 +63,19 @@ func markSharedDeliveryOutage(tx *sql.Tx, now time.Time) error {
 // Runs only after a journaled handoff has installed a matching shared owner.
 // The canonical gateway still grants every messenger attempt independently.
 func runSharedBackupReport(ctx context.Context, c WorkerInstallation, state *backupState) error {
-	return runSharedBackupReportWith(ctx, c, state, backupReportDependencies{Clock: reportHostClock, Heartbeat: notification.Heartbeat})
+	return runSharedBackupReportScheduledWith(ctx, c, state, backupReportDependencies{Clock: reportHostClock, Heartbeat: notification.Heartbeat}, StepSharedCommandReceiver)
+}
+
+func runSharedBackupReportScheduledWith(ctx context.Context, c WorkerInstallation, state *backupState, deps backupReportDependencies, step func(context.Context, string, string) error) error {
+	commandErr := runScheduledSharedCommands(ctx, state, step)
+	reportErr := runSharedBackupReportWith(ctx, c, state, deps)
+	return errors.Join(commandErr, reportErr)
 }
 
 func runSharedBackupReportWith(ctx context.Context, c WorkerInstallation, state *backupState, deps backupReportDependencies) error {
+	if c.Policy.Notifications.Mode == "disabled" {
+		return fmt.Errorf("reporting is disabled for this installation")
+	}
 	if deps.Clock == nil || deps.Heartbeat == nil {
 		return fmt.Errorf("report dependencies missing")
 	}

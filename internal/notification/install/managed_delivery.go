@@ -18,11 +18,15 @@ type ManagedDeliveryActivation struct {
 }
 
 type deliveryAdmission struct {
-	Version       int                         `json:"version"`
-	Operation     string                      `json:"operation"`
-	BeforeHash    string                      `json:"before_hash"`
-	Qualification QualificationRecord         `json:"qualification"`
-	Owner         worker.ManagedDeliveryOwner `json:"owner"`
+	ProviderOperation string                      `json:"provider_operation,omitempty"`
+	ProviderHash      string                      `json:"provider_hash,omitempty"`
+	PauseOperation    string                      `json:"pause_operation,omitempty"`
+	PauseHash         string                      `json:"pause_hash,omitempty"`
+	Version           int                         `json:"version"`
+	Operation         string                      `json:"operation"`
+	BeforeHash        string                      `json:"before_hash"`
+	Qualification     QualificationRecord         `json:"qualification"`
+	Owner             worker.ManagedDeliveryOwner `json:"owner"`
 }
 
 func validateDeliveryJournal(j managedJournal) error {
@@ -31,6 +35,9 @@ func validateDeliveryJournal(j managedJournal) error {
 		return fmt.Errorf("invalid delivery lifecycle intent")
 	}
 	b := *i.Before
+	if i.Operation == "pause-delivery" && (b.RecoveryCommitHash != "" || b.Commands != nil && b.Commands.Mode != "drain" || i.Supersedes != nil) {
+		return fmt.Errorf("disable commands before pausing an unrecovered delivery owner")
+	}
 	want := b
 	if i.Operation == "activate-delivery" {
 		if b.Mode != "verification" || i.After.Mode != "delivery" || i.Supersedes != nil || i.After.DeliveryActivation.Operation != i.ID {
@@ -90,7 +97,11 @@ func deliveryOwner(m ManagedManifest, c Runtime) worker.ManagedDeliveryOwner {
 	if m.DeliveryRecovery != nil {
 		return m.DeliveryRecovery.Owner
 	}
-	return worker.ManagedDeliveryOwner{Version: 1, Root: m.Root, Installation: m.Installation, Identity: m.Identity, ConfigHash: protocol.Hash(c.Worker)}
+	hash := m.DeliveryOwnerConfigHash
+	if hash == "" {
+		hash = protocol.Hash(c.Worker)
+	}
+	return worker.ManagedDeliveryOwner{Version: 1, Root: m.Root, Installation: m.Installation, Identity: m.Identity, ConfigHash: hash}
 }
 
 func requireDeliveryOwner(s *worker.Store, m ManagedManifest, c Runtime) error {
@@ -114,6 +125,11 @@ func deliveryPolicyWithSuccessor(m ManagedManifest, c Runtime, successor *Signal
 	if len(c.Providers) == 0 && c.LEDSocket == "" {
 		return fmt.Errorf("delivery activation requires qualified output")
 	}
+	if m.FreshSignal != nil {
+		if _, err := validateFreshSignalGateway(context.Background(), *m.FreshSignal, m.Root, m.Paths.State, m.UnitDirectory, c, false); err != nil {
+			return err
+		}
+	}
 	if m.SignalVerification != nil || m.SignalProfiles != nil || c.Signal != nil {
 		if _, err := signalDeliveryServicePolicy(m, c, successor); err != nil {
 			return err
@@ -122,11 +138,11 @@ func deliveryPolicyWithSuccessor(m ManagedManifest, c Runtime, successor *Signal
 	if m.Mode == "delivery" && m.RecoveryCommitHash != "" && c.Telegram != nil && m.TelegramRenewalID == "" {
 		return fmt.Errorf("recovered interactive Telegram delivery requires a retained renewal")
 	}
-	if deliveryOwner(m, c).ConfigHash != protocol.Hash(c.Worker) {
+	if m.DeliveryOwnerConfigHash == "" && deliveryOwner(m, c).ConfigHash != protocol.Hash(c.Worker) {
 		return fmt.Errorf("delivery ownership configuration changed")
 	}
 	for _, p := range c.Providers {
-		if p.Kind != "telegram" && !(p.Kind == "signal" && c.Signal != nil) {
+		if p.Kind != "telegram" && !(p.Kind == "signal" && (c.Signal != nil || m.FreshSignal != nil)) {
 			return fmt.Errorf("unsupported delivery activation provider")
 		}
 	}
@@ -145,9 +161,10 @@ func readDeliveryAdmission(d *safefs.Directory, m ManagedManifest, c Runtime) (o
 	if err = (managedJournal{Intent: intent, Phase: "complete"}).validate(); err != nil {
 		return
 	}
-	activationManifest := m
-	activationManifest.Commands = nil
-	activationManifest.CommandHistoryHash = intent.After.CommandHistoryHash
+	activationManifest, err := deliveryPolicyAncestor(d, m, protocol.Hash(intent.After))
+	if err != nil {
+		return out, before, err
+	}
 	if intent.Operation != "activate-delivery" || intent.Before == nil || protocol.Hash(intent.After) != protocol.Hash(activationManifest) {
 		return out, before, fmt.Errorf("delivery activation intent changed")
 	}
@@ -155,8 +172,11 @@ func readDeliveryAdmission(d *safefs.Directory, m ManagedManifest, c Runtime) (o
 	if err = d.ReadJSON(base+"delivery-admission.json", &out); err != nil {
 		return
 	}
-	if out.Version != 1 || out.Operation != intent.ID || protocol.Hash(out) != m.DeliveryActivation.Hash || out.BeforeHash != protocol.Hash(before) || out.Owner != deliveryOwner(m, c) || protocol.Hash(out.Owner) != m.DeliveryOwnerHash || out.Qualification.Report.validate() != nil || protocol.Hash(out.Qualification.Report.Binding.Manifest) != protocol.Hash(before) {
+	if (out.Version != 1 && out.Version != 2 && out.Version != 3) || out.Operation != intent.ID || protocol.Hash(out) != m.DeliveryActivation.Hash || out.BeforeHash != protocol.Hash(before) || out.Owner != deliveryOwner(m, c) || protocol.Hash(out.Owner) != m.DeliveryOwnerHash || out.Qualification.Report.validate() != nil || protocol.Hash(out.Qualification.Report.Binding.Manifest) != protocol.Hash(before) {
 		return out, before, fmt.Errorf("delivery admission evidence changed")
+	}
+	if _, e := deliveryPausePredecessor(d, out, before); e != nil {
+		return out, before, e
 	}
 	err = deliveryPolicy(m, c)
 	return
@@ -185,6 +205,15 @@ func checkDeliveryQualification(d *safefs.Directory, before ManagedManifest, c R
 			return fmt.Errorf("delivery Telegram identity or credentials changed")
 		}
 	}
+	if before.FreshSignal != nil {
+		service, err := validateFreshSignalGateway(context.Background(), *before.FreshSignal, before.Root, before.Paths.State, before.UnitDirectory, c, false)
+		if err != nil {
+			return err
+		}
+		if record.Report.Environment.SignalCLISHA256 != service.Spec.CLISHA256 {
+			return fmt.Errorf("Signal qualification does not bind the admitted native CLI")
+		}
+	}
 	if c.Signal != nil {
 		service, err := signalDeliveryService(before, c)
 		if err != nil {
@@ -211,6 +240,17 @@ func checkDeliveryAdmission(d *safefs.Directory, m ManagedManifest, c Runtime, n
 }
 
 func (i managedInstaller) probeDelivery(ctx context.Context, d *safefs.Directory, m ManagedManifest) error {
+	if m.CommandHistoryHash != "" {
+		required, err := worker.ManagedCommandGrantsRequired(m.Paths.State)
+		if err != nil {
+			return err
+		}
+		if required {
+			if err = i.probeCommandPolicy(ctx, d, m, true, true); err != nil {
+				return err
+			}
+		}
+	}
 	if m.DeliveryOwnerHash == "" {
 		return nil
 	}
@@ -330,6 +370,8 @@ func (i managedInstaller) deliveryState(ctx context.Context, d *safefs.Directory
 		} else {
 			err = requireDeliveryOwner(s, j.Intent.After, c)
 		}
+	} else if base.DeliveryOwnerHash != "" {
+		err = requireDeliveryOwner(s, j.Intent.After, c)
 	} else {
 		err = s.EnrollManagedDelivery(deliveryOwner(j.Intent.After, c))
 	}
@@ -341,7 +383,7 @@ func (i managedInstaller) deliveryState(ctx context.Context, d *safefs.Directory
 
 func (i managedInstaller) prepareDelivery(ctx context.Context, operation, root, manifestHash, qualificationHash string, dry bool) (ManagedManifest, error) {
 	var zero ManagedManifest
-	if !managedPath(root) || !safefs.DigestPattern.MatchString(manifestHash) || operation != "activate-delivery" && operation != "deactivate-delivery" || operation == "activate-delivery" && !safefs.DigestPattern.MatchString(qualificationHash) {
+	if !managedPath(root) || !safefs.DigestPattern.MatchString(manifestHash) || operation != "activate-delivery" && operation != "deactivate-delivery" && operation != "pause-delivery" || operation == "activate-delivery" && !safefs.DigestPattern.MatchString(qualificationHash) {
 		return zero, fmt.Errorf("delivery lifecycle requires exact manifest/qualification pins")
 	}
 	d, err := privateManagedDir(root, true)
@@ -401,7 +443,7 @@ func (i managedInstaller) prepareDelivery(ctx context.Context, operation, root, 
 	if protocol.Hash(before) != manifestHash {
 		return zero, fmt.Errorf("delivery request manifest changed; inspect current operation")
 	}
-	if operation == "activate-delivery" && before.Mode != "verification" || operation == "deactivate-delivery" && before.Mode != "delivery" {
+	if operation == "activate-delivery" && before.Mode != "verification" || (operation == "deactivate-delivery" || operation == "pause-delivery") && before.Mode != "delivery" {
 		return zero, fmt.Errorf("delivery request is not valid for current mode")
 	}
 	c, err := verifyManagedArtifacts(d, before)
@@ -438,6 +480,13 @@ func (i managedInstaller) prepareDelivery(ctx context.Context, operation, root, 
 			return zero, fmt.Errorf("delivery requires exact latest qualification hash")
 		}
 		record = h.Records[len(h.Records)-1]
+		_, priorQualification, e := qualificationPause(d, before, c)
+		if e != nil {
+			return zero, e
+		}
+		if qualificationHash == priorQualification {
+			return zero, fmt.Errorf("delivery renewal requires fresh qualification observations after its pause")
+		}
 		if err = checkDeliveryQualification(d, before, c, record, time.Now().UTC()); err != nil {
 			return zero, err
 		}
@@ -453,6 +502,19 @@ func (i managedInstaller) prepareDelivery(ctx context.Context, operation, root, 
 	var proof deliveryAdmission
 	if operation == "activate-delivery" {
 		proof = deliveryAdmission{Version: 1, Operation: id, BeforeHash: manifestHash, Qualification: record, Owner: deliveryOwner(before, c)}
+		if j.Intent.Operation == "pause-delivery" {
+			if j.Phase != "complete" || !preservesManagedDeliveryOwner(j) || protocol.Hash(j.Intent.After) != manifestHash {
+				return zero, fmt.Errorf("delivery renewal lost its completed pause")
+			}
+			proof.Version, proof.PauseOperation, proof.PauseHash = 2, j.Intent.ID, protocol.Hash(j.Intent)
+		} else if isPausedRuntimeChange(j.Intent.Operation) {
+			pause, e := deliveryProviderPause(d, j, c)
+			if e != nil {
+				return zero, e
+			}
+			proof.Version, proof.ProviderOperation, proof.ProviderHash = 3, j.Intent.ID, protocol.Hash(j.Intent)
+			proof.PauseOperation, proof.PauseHash = pause.Intent.ID, protocol.Hash(pause.Intent)
+		}
 		after.Mode = "delivery"
 		after.DeliveryOwnerHash = protocol.Hash(proof.Owner)
 		after.DeliveryActivation = &ManagedDeliveryActivation{Operation: id, Hash: protocol.Hash(proof)}
@@ -492,10 +554,15 @@ func (i managedInstaller) prepareDelivery(ctx context.Context, operation, root, 
 	if operation == "activate-delivery" {
 		inspection.DeliveryOwnerHash = after.DeliveryOwnerHash
 	}
-	if err = i.inspectDelivery(ctx, inspection, operation == "deactivate-delivery"); err != nil {
+	if operation == "pause-delivery" || operation == "activate-delivery" && before.DeliveryOwnerHash != "" && before.RecoveryCommitHash == "" {
+		if err = i.probeDeliveryPause(ctx, d, after); err != nil {
+			return zero, err
+		}
+	}
+	if err = i.inspectDelivery(ctx, inspection, operation == "deactivate-delivery" || operation == "pause-delivery"); err != nil {
 		return zero, err
 	}
-	if err = limitManagedHistoryFor(d, operation == "deactivate-delivery"); err != nil {
+	if err = limitManagedHistoryFor(d, operation == "deactivate-delivery" || operation == "pause-delivery"); err != nil {
 		return zero, err
 	}
 	intent := managedIntent{Version: managedVersion, ID: id, Operation: operation, Before: &before, After: after, BeforeUnit: string(unit), AfterUnit: body, Supersedes: supersedes}

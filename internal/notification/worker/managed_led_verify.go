@@ -59,6 +59,9 @@ func PreflightManagedLEDBindings(ctx context.Context, path string, before, after
 			return fmt.Errorf("LED mapping history budget exhausted")
 		}
 		v := ledMappingIntent{Before: desiredLEDLayout(before, identity.Worker, os.Getuid()), After: desiredLEDLayout(after, identity.Worker, os.Getuid())}
+		if err := pinLEDMappingOutput(ctx, s, tx, &v); err != nil {
+			return err
+		}
 		return checkLEDMappingPrerequisites(ctx, s, tx, v)
 	})
 }

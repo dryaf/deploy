@@ -20,6 +20,7 @@ const maxManagedBinary = 128 << 20
 // ManagedSpec is an explicit local installation request. State must already be
 // initialized by `init`; installation never initializes or replaces a database.
 type ManagedSpec struct {
+	FreshSignal         *FreshSignalReference                   `json:"fresh_signal,omitempty"`
 	SignalConversations map[string]SignalConversationEnrollment `json:"signal_conversations,omitempty"`
 	SignalVerification  *SignalVerificationReference            `json:"signal_verification,omitempty"`
 	RecoveryCommitHash  string                                  `json:"recovery_commit_hash,omitempty"`
@@ -33,42 +34,52 @@ type ManagedSpec struct {
 	DeniedPaths         []string                                `json:"denied_paths,omitempty"`
 }
 
+type ManagedReportCredentialHistory struct {
+	Operation string `json:"operation"`
+	Hash      string `json:"hash"`
+}
+
 type ManagedManifest struct {
-	CommandHistoryHash string                          `json:"command_history_hash,omitempty"`
-	Commands           *ManagedCommandAdmission        `json:"commands,omitempty"`
-	DeliveryRecovery   *worker.ManagedDeliveryRecovery `json:"delivery_recovery,omitempty"`
-	DeliveryOwnerHash  string                          `json:"delivery_owner_hash,omitempty"`
-	DeliveryActivation *ManagedDeliveryActivation      `json:"delivery_activation,omitempty"`
-	SignalProfiles     *ManagedSignalProfiles          `json:"signal_profiles,omitempty"`
-	SignalVerification *ManagedSignalBinding           `json:"signal_verification,omitempty"`
-	TelegramRenewalID  string                          `json:"telegram_renewal_id,omitempty"`
-	RecoveryCommitHash string                          `json:"recovery_commit_hash,omitempty"`
-	Version            int                             `json:"version"`
-	Installation       string                          `json:"installation"`
-	Revision           string                          `json:"revision"`
-	Root               string                          `json:"root"`
-	UnitDirectory      string                          `json:"unit_directory"`
-	Paths              ServicePaths                    `json:"paths"`
-	Identity           protocol.Identity               `json:"identity"`
-	RuntimeHash        string                          `json:"runtime_hash"`
-	ConfigHash         string                          `json:"config_hash"`
-	BinaryHash         string                          `json:"binary_hash"`
-	HelperRevision     string                          `json:"helper_revision,omitempty"`
-	HelperHash         string                          `json:"helper_hash"`
-	UnitHash           string                          `json:"unit_hash"`
-	Schema             int                             `json:"schema"`
-	Mode               string                          `json:"mode"` // verification or uninstalled; never production authority.
+	ReportCredentialHistory *ManagedReportCredentialHistory `json:"report_credential_history,omitempty"`
+	LEDOutput               *ManagedLEDOutput               `json:"led_output,omitempty"`
+	FreshSignal             *FreshSignalReference           `json:"fresh_signal,omitempty"`
+	CommandHistoryHash      string                          `json:"command_history_hash,omitempty"`
+	Commands                *ManagedCommandAdmission        `json:"commands,omitempty"`
+	DeliveryRecovery        *worker.ManagedDeliveryRecovery `json:"delivery_recovery,omitempty"`
+	DeliveryOwnerConfigHash string                          `json:"delivery_owner_config_hash,omitempty"`
+	DeliveryOwnerHash       string                          `json:"delivery_owner_hash,omitempty"`
+	DeliveryActivation      *ManagedDeliveryActivation      `json:"delivery_activation,omitempty"`
+	SignalProfiles          *ManagedSignalProfiles          `json:"signal_profiles,omitempty"`
+	SignalVerification      *ManagedSignalBinding           `json:"signal_verification,omitempty"`
+	TelegramRenewalID       string                          `json:"telegram_renewal_id,omitempty"`
+	RecoveryCommitHash      string                          `json:"recovery_commit_hash,omitempty"`
+	Version                 int                             `json:"version"`
+	Installation            string                          `json:"installation"`
+	Revision                string                          `json:"revision"`
+	Root                    string                          `json:"root"`
+	UnitDirectory           string                          `json:"unit_directory"`
+	Paths                   ServicePaths                    `json:"paths"`
+	Identity                protocol.Identity               `json:"identity"`
+	RuntimeHash             string                          `json:"runtime_hash"`
+	ConfigHash              string                          `json:"config_hash"`
+	BinaryHash              string                          `json:"binary_hash"`
+	HelperRevision          string                          `json:"helper_revision,omitempty"`
+	HelperHash              string                          `json:"helper_hash"`
+	UnitHash                string                          `json:"unit_hash"`
+	Schema                  int                             `json:"schema"`
+	Mode                    string                          `json:"mode"` // verification or uninstalled; never production authority.
 }
 
 type managedIntent struct {
-	Version    int
-	ID         string
-	Operation  string
-	Before     *ManagedManifest
-	After      ManagedManifest
-	BeforeUnit string
-	AfterUnit  string
-	Supersedes *managedIntent `json:"supersedes,omitempty"` // One unfinished setup/update; never a recursive cancellation chain.
+	DeliveryProvider *deliveryProviderTransition `json:"delivery_provider,omitempty"`
+	Version          int
+	ID               string
+	Operation        string
+	Before           *ManagedManifest
+	After            ManagedManifest
+	BeforeUnit       string
+	AfterUnit        string
+	Supersedes       *managedIntent `json:"supersedes,omitempty"` // One unfinished setup/update; never a recursive cancellation chain.
 }
 
 type managedTelegramRequest struct {
@@ -90,6 +101,12 @@ func managedPath(p string) bool {
 func managedWithin(path, root string) bool { return path == root || strings.HasPrefix(path, root+"/") }
 
 func (s ManagedSpec) validate() error {
+	if s.FreshSignal != nil {
+		if !managedPath(s.FreshSignal.Root) || !safefs.DigestPattern.MatchString(s.FreshSignal.ManifestHash) || s.SignalVerification != nil || len(s.SignalConversations) != 0 || s.RecoveryCommitHash != "" {
+			return fmt.Errorf("fresh Signal enrollment excludes recovered-account authority")
+		}
+	}
+
 	if len(s.SignalConversations) > 32 {
 		return fmt.Errorf("too many Signal conversation enrollments")
 	}
@@ -155,6 +172,23 @@ func managedHelperName(m ManagedManifest) string {
 }
 
 func (m ManagedManifest) validate() error {
+	if m.LEDOutput != nil && !safefs.ValidID(m.LEDOutput.Operation, "n") {
+		return fmt.Errorf("invalid managed LED output operation")
+	}
+	if m.FreshSignal != nil {
+		if !managedPath(m.FreshSignal.Root) || !safefs.DigestPattern.MatchString(m.FreshSignal.ManifestHash) || m.SignalVerification != nil || m.SignalProfiles != nil || m.RecoveryCommitHash != "" {
+			return fmt.Errorf("fresh Signal manifest carries incompatible ownership")
+		}
+		for _, root := range append([]string{m.Root, m.Paths.State, m.UnitDirectory}, m.Paths.DeniedPaths...) {
+			if managedWithin(m.FreshSignal.Root, root) || managedWithin(root, m.FreshSignal.Root) {
+				return fmt.Errorf("fresh Signal service overlaps gateway authority")
+			}
+		}
+	}
+
+	if h := m.ReportCredentialHistory; h != nil && (!safefs.ValidID(h.Operation, "n") || !safefs.DigestPattern.MatchString(h.Hash)) {
+		return fmt.Errorf("invalid report credential history pin")
+	}
 	if m.CommandHistoryHash != "" && !safefs.DigestPattern.MatchString(m.CommandHistoryHash) {
 		return fmt.Errorf("invalid command history pin")
 	}
@@ -163,6 +197,9 @@ func (m ManagedManifest) validate() error {
 	}
 	if m.Commands != nil && (m.Mode != "delivery" || m.Commands.validate() != nil) {
 		return fmt.Errorf("invalid managed command admission")
+	}
+	if m.DeliveryOwnerConfigHash != "" && (m.DeliveryOwnerHash == "" || !safefs.DigestPattern.MatchString(m.DeliveryOwnerConfigHash)) {
+		return fmt.Errorf("invalid original delivery configuration pin")
 	}
 	if m.DeliveryOwnerHash != "" && !safefs.DigestPattern.MatchString(m.DeliveryOwnerHash) {
 		return fmt.Errorf("invalid delivery ownership binding")
@@ -239,13 +276,28 @@ func (m ManagedManifest) validate() error {
 
 func (j managedJournal) validate() error {
 	i := j.Intent
+	if isPausedRuntimeChange(i.Operation) {
+		return validateDeliveryProviderJournal(j)
+	}
+	if i.Before == nil && i.After.DeliveryOwnerConfigHash != "" || i.Before != nil && i.Before.DeliveryOwnerConfigHash != i.After.DeliveryOwnerConfigHash {
+		return fmt.Errorf("transition changed original delivery configuration")
+	}
+	if i.Before == nil && i.After.ReportCredentialHistory != nil || i.Before != nil && protocol.Hash(i.Before.ReportCredentialHistory) != protocol.Hash(i.After.ReportCredentialHistory) {
+		return fmt.Errorf("installation transition changed retained credential exclusions")
+	}
+	if i.DeliveryProvider != nil {
+		return fmt.Errorf("unexpected provider transition evidence")
+	}
+	if i.Operation == "set-led-output" {
+		return validateLEDOutputJournal(j)
+	}
 	if i.Operation == "enable-commands" || i.Operation == "disable-commands" || isManagedCommandPolicyOperation(i.Operation) {
 		return validateCommandJournal(j)
 	}
-	if i.Operation == "activate-delivery" || i.Operation == "deactivate-delivery" {
+	if i.Operation == "activate-delivery" || i.Operation == "deactivate-delivery" || i.Operation == "pause-delivery" {
 		return validateDeliveryJournal(j)
 	}
-	if i.Version != managedVersion || !safefs.ValidID(i.ID, "n") || i.After.validate() != nil || (i.Operation != "setup" && i.Operation != "update" && i.Operation != "uninstall" && i.Operation != "migrate-schema" && i.Operation != "migrate-led" && i.Operation != "adopt-recovery" && i.Operation != "renew-telegram" && i.Operation != "upgrade-helper" && i.Operation != "adopt-signal" && i.Operation != "supervise-signal" && i.Operation != "migrate-signal-profiles") {
+	if i.Version != managedVersion || !safefs.ValidID(i.ID, "n") || i.After.validate() != nil || (!isManagedPolicyOperation(i.Operation) && i.Operation != "enroll-bootstrap" && i.Operation != "setup" && i.Operation != "update" && i.Operation != "uninstall" && i.Operation != "migrate-schema" && i.Operation != "migrate-led" && i.Operation != "adopt-recovery" && i.Operation != "renew-telegram" && i.Operation != "upgrade-helper" && i.Operation != "adopt-signal" && i.Operation != "supervise-signal" && i.Operation != "migrate-signal-profiles") {
 		return fmt.Errorf("invalid installation operation")
 	}
 	if i.Supersedes != nil {
@@ -267,6 +319,9 @@ func (j managedJournal) validate() error {
 		return nil
 	}
 	if i.Before == nil {
+		if i.After.LEDOutput != nil {
+			return fmt.Errorf("setup carries LED output history")
+		}
 		if i.After.CommandHistoryHash != "" || i.After.Commands != nil {
 			return fmt.Errorf("setup carries command authority")
 		}
@@ -278,6 +333,15 @@ func (j managedJournal) validate() error {
 		}
 	} else {
 		b := i.Before
+		if protocol.Hash(b.LEDOutput) != protocol.Hash(i.After.LEDOutput) {
+			return fmt.Errorf("LED output changes require explicit lifecycle")
+		}
+		if b.LEDOutput != nil && (b.ConfigHash != i.After.ConfigHash && !isManagedPolicyOperation(i.Operation) && i.Operation != "enroll-bootstrap" && i.Operation != "migrate-led" || b.Identity != i.After.Identity) {
+			return fmt.Errorf("LED output history requires an explicit configuration handoff")
+		}
+		if protocol.Hash(b.FreshSignal) != protocol.Hash(i.After.FreshSignal) {
+			return fmt.Errorf("managed operation changed fresh Signal service ownership")
+		}
 		nextSignal := i.Operation == "adopt-recovery" && b.SignalVerification != nil && i.After.SignalVerification != nil && i.After.SignalVerification.Operation == i.ID
 		if nextSignal && (b.SignalVerification.ServiceRoot == "" || i.After.SignalVerification.ServiceRoot == "" || b.SignalVerification.Root == i.After.SignalVerification.Root || b.ConfigHash == i.After.ConfigHash || b.RuntimeHash == i.After.RuntimeHash) {
 			return fmt.Errorf("invalid next Signal endpoint transition")
@@ -338,7 +402,7 @@ func (j managedJournal) validate() error {
 				return fmt.Errorf("invalid managed Telegram renewal")
 			}
 		}
-		if b.validate() != nil || i.Operation == "setup" || b.Installation != i.After.Installation || b.Root != i.After.Root || b.Paths.State != i.After.Paths.State || b.UnitDirectory != i.After.UnitDirectory || (i.Operation != "adopt-recovery" && (b.Identity != i.After.Identity || b.RecoveryCommitHash != i.After.RecoveryCommitHash)) || (i.Operation != "migrate-led" && i.Operation != "adopt-signal" && !nextSignal && b.ConfigHash != i.After.ConfigHash) {
+		if b.validate() != nil || i.Operation == "setup" || b.Installation != i.After.Installation || b.Root != i.After.Root || b.Paths.State != i.After.Paths.State || b.UnitDirectory != i.After.UnitDirectory || (i.Operation != "adopt-recovery" && (b.Identity != i.After.Identity || b.RecoveryCommitHash != i.After.RecoveryCommitHash)) || (!isManagedPolicyOperation(i.Operation) && i.Operation != "enroll-bootstrap" && i.Operation != "migrate-led" && i.Operation != "adopt-signal" && !nextSignal && b.ConfigHash != i.After.ConfigHash) {
 			return fmt.Errorf("managed operation changed pinned authority")
 		}
 		if b.RecoveryCommitHash != "" && (i.Operation == "migrate-schema" || i.Operation == "migrate-led") {
@@ -351,6 +415,10 @@ func (j managedJournal) validate() error {
 		} else if i.Operation == "migrate-schema" {
 			if b.Schema != 9 || i.After.Schema != 10 || b.Mode != "verification" || i.After.HelperRevision != i.After.Revision || i.After.HelperHash != i.After.BinaryHash {
 				return fmt.Errorf("invalid managed schema migration")
+			}
+		} else if isManagedPolicyOperation(i.Operation) || i.Operation == "enroll-bootstrap" {
+			if b.Mode != "verification" || b.RecoveryCommitHash != "" || b.DeliveryOwnerHash != "" || b.Schema != i.After.Schema || b.ConfigHash == i.After.ConfigHash || i.After.HelperRevision != i.After.Revision || i.After.HelperHash != i.After.BinaryHash {
+				return fmt.Errorf("invalid managed bootstrap enrollment")
 			}
 		} else if i.Operation == "migrate-led" {
 			if b.Schema != i.After.Schema || b.Mode != "verification" || b.ConfigHash == i.After.ConfigHash || i.After.HelperRevision != i.After.Revision || i.After.HelperHash != i.After.BinaryHash {
@@ -413,6 +481,9 @@ func renderManagedUnit(m ManagedManifest) (string, error) {
 	if m.Mode == "delivery" {
 		body = strings.Replace(body, "Description=Verify staged deploy notification worker", "Description=Qualified deploy Telegram delivery worker", 1)
 		body = strings.Replace(body, "RestrictAddressFamilies=AF_UNIX\n", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n", 1)
+	}
+	if m.FreshSignal != nil {
+		body = strings.Replace(body, "[Unit]\n", "[Unit]\nRequires="+freshSignalUnit+"\nAfter="+freshSignalUnit+"\n", 1)
 	}
 	if m.SignalVerification != nil && m.SignalVerification.ServiceRoot != "" {
 		body = strings.Replace(body, "[Unit]\n", "[Unit]\nRequires="+signalServiceUnit+"\nAfter="+signalServiceUnit+"\n", 1)

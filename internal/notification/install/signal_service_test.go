@@ -359,7 +359,7 @@ func TestSignalServiceBoundStagingCannotBeRecreated(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Simulate crash after publishing the endpoint binding but before journal advancement.
-			if err = d.WriteJSON("lifecycle.json", signalServiceJournal{m.ManifestHash, "prepared"}, true); err != nil {
+			if err = d.WriteJSON("lifecycle.json", signalServiceJournal{ManifestHash: m.ManifestHash, Phase: "prepared"}, true); err != nil {
 				t.Fatal(err)
 			}
 			if err = os.Remove(filepath.Join(s.Root, name)); err != nil {

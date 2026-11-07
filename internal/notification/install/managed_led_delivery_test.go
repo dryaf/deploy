@@ -43,10 +43,16 @@ func (a deliveryTestLED) Status(ctx context.Context) (led.DaemonStatus, error) {
 }
 
 func managedLEDDeliveryFixture(t *testing.T) (ManagedSpec, managedInstaller, *fakeDeliveryServices, Runtime, ManagedManifest, QualificationRecord) {
+	return managedLEDDeliveryFixtureUsing(t, nil, false)
+}
+func managedLEDDeliveryFixtureUsing(t *testing.T, configure func(*Runtime), disabled bool) (ManagedSpec, managedInstaller, *fakeDeliveryServices, Runtime, ManagedManifest, QualificationRecord) {
 	t.Helper()
 	spec, i, f, _ := managedFixture(t)
 	qualificationFixtureInputs(t, spec.RuntimeFile)
 	c := rawManagedRuntime(t, spec.RuntimeFile)
+	if configure != nil {
+		configure(&c)
+	}
 	c.LEDSocket = "/private/fixture-led.sock"
 	writeRuntime(t, spec.RuntimeFile, c)
 	m, err := i.prepare(context.Background(), "setup", spec)
@@ -60,6 +66,13 @@ func managedLEDDeliveryFixture(t *testing.T) (ManagedSpec, managedInstaller, *fa
 	m, err = i.prepare(context.Background(), "migrate-led", spec)
 	if err != nil {
 		t.Fatal(err)
+	}
+	i.ledOutputProbe = func(context.Context, *safefs.Directory, string, string) error { return nil }
+	if disabled {
+		m, err = i.prepareLEDOutput(context.Background(), spec.Root, protocol.Hash(m), true)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	var out bytes.Buffer
 	if err = runQualificationCLI([]string{"qualification-template", "--local", "--root", spec.Root}, &out); err != nil {

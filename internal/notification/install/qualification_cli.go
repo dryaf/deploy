@@ -183,22 +183,6 @@ func runQualificationCLI(args []string, out io.Writer) error {
 	default:
 		return fmt.Errorf("unknown qualification operation")
 	}
-	status := QualificationStatus{Pending: h.Pending, Reason: "no qualification evidence recorded"}
-	if len(h.Records) > 0 {
-		record := h.Records[len(h.Records)-1]
-		status.Record = &record
-		status.RecordHash = protocol.Hash(record)
-		matchErr := record.Report.matches(b, c, now)
-		status.BindingMatches = matchErr == nil && !now.Before(record.RecordedAt)
-		status.EvidenceComplete = !h.Pending && status.BindingMatches && record.Report.evidenceComplete(c)
-		status.Reason = "operator evidence; service activation and producer admission are separate"
-		if h.Pending {
-			status.Reason = "audit acknowledgement pending; retry the exact report"
-		} else if matchErr != nil {
-			status.Reason = matchErr.Error()
-		} else if now.Before(record.RecordedAt) {
-			status.Reason = "qualification clock moved backward"
-		}
-	}
+	status := qualificationStatusAt(h, b, c, now)
 	return json.NewEncoder(out).Encode(status)
 }

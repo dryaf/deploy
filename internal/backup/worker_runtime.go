@@ -18,6 +18,7 @@ import (
 )
 
 type WorkerInstallation struct {
+	Paths         *InstallationPaths          `json:"paths,omitempty"`
 	Image         string                      `json:"image"`
 	RelayImage    string                      `json:"relay_image,omitempty"`
 	Schema        int                         `json:"schema"`
@@ -56,6 +57,14 @@ func validateWorkerInstallation(c WorkerInstallation) error {
 	if c.Schema != 1 || !safefs.ValidID(c.WorkerID, "w") || !safefs.ValidID(c.ArchiveID, "a") || !safefs.DigestPattern.MatchString(c.ConfigHash) {
 		return fmt.Errorf("unsupported worker installation")
 	}
+	if c.Paths != nil {
+		if err := c.Paths.Validate(); err != nil {
+			return err
+		}
+		if _, err := c.Paths.UnitPaths(c.Policy.Storage.Path); err != nil {
+			return err
+		}
+	}
 	if _, err := config.NormalizeWorker(c.Policy); err != nil {
 		return err
 	}
@@ -78,6 +87,9 @@ func validateWorkerInstallation(c WorkerInstallation) error {
 }
 
 func runBackupPass(ctx context.Context, c WorkerInstallation, state *backupState, archive *backupArchive) error {
+	if err := requireBackupActivityReady(state); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(ctx, config.Budget(c.Policy.MaxRunTime, "40m"))
 	defer cancel()
 	stateDir, err := safefs.Open(state.directory)
@@ -107,6 +119,9 @@ func runBackupPass(ctx context.Context, c WorkerInstallation, state *backupState
 	var control ArchiveControl
 	if err = state.get("control", &control); err != nil {
 		return err
+	}
+	if control.ReportingDisabled != (c.Policy.Notifications.Mode == "disabled") || control.SharedRequired != (c.Policy.Notifications.Mode == "shared") {
+		return fmt.Errorf("reporting policy differs from retained archive control")
 	}
 	if err = archive.checkWriter(control); err != nil {
 		return err

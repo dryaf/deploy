@@ -63,6 +63,15 @@ func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.St
 		if protocol.Hash(runtime) != protocol.Hash(effective) {
 			return fmt.Errorf("effective delivery runtime changed")
 		}
+		if m.FreshSignal != nil {
+			err := checkFreshSignalGatewayHealth(ctx, m, 0)
+			if observeSignal != nil {
+				observeSignal(err)
+			}
+			if err != nil {
+				return err
+			}
+		}
 		if m.SignalVerification != nil {
 			if _, err := readManagedSignalBinding(d, m); err != nil {
 				return err
@@ -109,6 +118,11 @@ func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.St
 	if err := check(ctx); err != nil {
 		return err
 	}
+	if m.FreshSignal != nil {
+		if err := s.BindFreshSignalService(m.FreshSignal.ManifestHash); err != nil {
+			return err
+		}
+	}
 	if m.SignalVerification != nil {
 		if err := s.BindSignalVerification(m.SignalVerification.ManifestHash); err != nil {
 			return err
@@ -123,7 +137,7 @@ func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.St
 	}
 	if sender == nil {
 		adapter := provider.Adapter{Profiles: effective.Providers}
-		if c.Signal != nil {
+		if c.Signal != nil || m.FreshSignal != nil {
 			transport, closeTransport, err := managedSignalTransport(m, check, fail)
 			if err != nil {
 				return err
@@ -144,7 +158,7 @@ func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.St
 			return err
 		}
 	}
-	if m.SignalVerification != nil {
+	if m.SignalVerification != nil || m.FreshSignal != nil {
 		observeSignal, err = s.MonitorRuntimeLoop("signal-verification")
 		if err != nil {
 			return err
@@ -159,7 +173,7 @@ func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.St
 	observe(nil)
 	adapter := admittedDeliverySender{check: check, fail: fail, sender: sender}
 	if c.LEDSocket != "" && m.RecoveryCommitHash != "" {
-		api := admittedLEDClient{api: led.Client{Socket: c.LEDSocket, Budget: 2 * time.Second}, check: check, fail: fail}
+		api := admittedLEDClient{api: led.Client{Socket: c.LEDSocket, Budget: 2 * time.Second, Endpoint: c.LEDEndpoint}, check: check, fail: fail}
 		if err := s.BindManagedLEDRecovery(api, check); err != nil {
 			return err
 		}
@@ -192,7 +206,7 @@ func serveManagedDelivery(ctx context.Context, d *safefs.Directory, s *worker.St
 		return err
 	}
 	if c.LEDSocket != "" {
-		services = append(services, managedLEDService(s, c.LEDSocket, check, fail, nil))
+		services = append(services, managedLEDService(s, c.LEDSocket, check, fail, led.Client{Socket: c.LEDSocket, Budget: 2 * time.Second, Endpoint: c.LEDEndpoint}))
 	}
 	return runRuntimeGroup(ctx, append(services, commands...))
 }

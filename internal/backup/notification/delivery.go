@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dryaf/deploy/internal/config"
@@ -41,7 +42,7 @@ func ReadWorkerSecret(file string) (string, error) {
 		return "", fmt.Errorf("provider credential unavailable")
 	}
 	defer dir.Close()
-	f, err := dir.Open(filepath.Base(file), os.O_RDONLY, 0)
+	f, err := dir.Open(filepath.Base(file), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", fmt.Errorf("provider credential unavailable")
 	}
