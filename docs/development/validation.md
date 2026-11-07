@@ -891,3 +891,42 @@ incapable-executable refusal tests passed three consecutive runs in 4.167s
 (`/tmp/deploy-command-renewal-fixture-fix.log`). Package vet also passed
 (`/tmp/deploy-command-renewal-fixture-vet.log`). A full post-fix regular gate
 remains pending. No race or live checks were run for this repair.
+
+## Ordinary YAML step 49: notification budgets with disabled commands
+
+Limits-only changes on unrecovered Telegram gateways preserve disabled command
+history, original receiver/reporting ownership, queued commands, saved results,
+reply destinations and LED output disposition. Receipt versions 31/36 pin the
+exact disabled command history and retained LED output where applicable. Both
+installed executables must support this migration. Reduced budgets are checked
+against retained message and storage usage before the delivery pause. Derived
+producer message limits follow their global budget. Delivery is qualified again
+and command intake remains disabled until explicitly enabled in YAML.
+
+Focused coordinator, installer and storage checks passed in
+`/tmp/deploy-yaml-command-limits-final-focused.log` (1.826s, 2.656s and 0.283s,
+respectively). They cover repeated changes, lost pause/migration/scope/renewal
+replies, changed retry declarations, lost receiver authority, read-only durable
+receipts, permission/enrollment retention, saved results/replies, LED output and
+foreign clients. SQLite read-only preflight may create coordination sidecars;
+its durable database and ownership/history records remain unchanged.
+
+Both compiled CLI modes passed in the resumed offline run
+`/tmp/deploy-yaml-command-limits-native-resume.log` (307.491s total). Further
+receiver rechecks and derived-budget handling were then covered by focused tests
+and by the integrated regular gate against final source, which runs those CLI
+scenarios again. They exercise two budget changes, narrower permissions, explicit
+re-enable and both workers' apply/resume/status/plan commands.
+
+`GOCACHE=dist/test-go-cache make test` passed after integration, including
+`go vet ./...`, in `/tmp/deploy-yaml-step49-integrated-regular.log`. The worker
+coordinator package reported 1942.693s. This gate also covers step 48 and the
+conversation-rotation fixture repair. The regular package timeout is now 35
+minutes to accommodate the expanded compiled SSH scenarios; successful tests
+finish normally and caching remains enabled. Documentation/reference checks
+passed. No race tests or live qualification were run.
+
+Logs and the integrated-file hash inventory are retained in
+`dist/workspaces/yaml-step49-evidence/`. Step 49's workspace is retained for
+reference; its code has been integrated and must not be copied over the root
+again. Work is paused after step 49.

@@ -396,24 +396,18 @@ scope. A configurable field is not a promise that every live change is supported
     receiver. Read and mutation modes use the same workflow. Recovered and legacy
     Signal qualification remain separate.
 
-## In progress: step 49 — notification budgets with disabled commands
+49. **Notification budgets with disabled commands:** unrecovered Telegram gateways
+    with already admitted backup commands can disable intake, apply limits-only
+    edits, qualify and apply to resume delivery. Original receiver ownership,
+    permission restrictions, queued requests, saved results, reporting and LED
+    disposition remain. Both read and mutation modes support repeated changes,
+    interruption/resume and later independent qualification renewals. Global
+    limits update derived producer message limits; command queue budgets remain
+    separate. Re-enable intake explicitly in YAML and apply afterward.
 
-Step 49 is integrated. The full regular `make test` gate is running against the
-integrated source; work will pause after that gate and the final checkpoint.
-
-- [x] Implement storage and installer transitions with exact command-history pins.
-- [x] Pass focused storage, saved-result/reply, installer interruption, LED/foreign
-  client retention and helper capability checks.
-- [x] Finish coordinator checks for interrupted/repeated changes, changed retry
-  declarations, retained receiver authority and subsequent renewal/re-enable.
-- [x] Complete the resumed compiled read- and mutation-mode CLI scenarios.
-- [x] Update the worker guide and configuration reference, then integrate the
-  reviewed changes while preserving the earlier fixture repair.
-- [ ] Complete regular tests and vet against the integrated source. This final
-  gate includes the compiled scenarios again after the last receiver and
-  derived-producer-limit refinements.
-
-Race and live qualification remain deferred.
+Step 49 is integrated and its regular tests and vet passed. Work is paused at the
+user's request after this step. The [progress checkpoint](../progress.md) records
+the final source and evidence; race and live qualification remain deferred.
 
 ## Next: finish ordinary YAML workflows
 
