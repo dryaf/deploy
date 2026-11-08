@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -40,12 +41,26 @@ func (f *commandBudgetFixture) fail(at string) error {
 	return nil
 }
 func newCommandBudgetFixture(t *testing.T, mode string) *commandBudgetFixture {
+	return newCommandPolicyFixture(t, mode, "command-limits")
+}
+func newCommandPolicyFixture(t *testing.T, mode, kind string) *commandBudgetFixture {
 	t.Helper()
 	if os.Getuid() == 0 {
 		t.Skip("rootless coordinator")
 	}
 	m := newMappingFixtureWithOptions(t, mappingFixtureOptions{configure: func(r *ControlRequest) {
 		declareFixtureReadCommands(t, r)
+		if kind == "command-freshness" || kind == "command-producer" || kind == "command-report-route-declaration" {
+			r.Desired.Notification.Producers = map[string]config.ProducerDeclaration{"backup-worker": {Routes: []string{"alerts"}, MaxMessages: 1000, MaxSilenceSeconds: 120, MaxEvidenceSeconds: 93600, PolicyHealth: true}}
+		}
+		if reportRoutePolicy(kind) {
+			r.Desired.Notification.Routes = map[string]config.NotificationRoute{"alerts": {Primary: "telegram"}, "audit": {Primary: "telegram"}}
+		}
+		if kind == "command-report-route-declaration" {
+			p := r.Desired.Notification.Producers["backup-worker"]
+			p.Routes = []string{"alerts", "audit"}
+			r.Desired.Notification.Producers["backup-worker"] = p
+		}
 		r.Desired.Notification.Commands.Mode = mode
 		if mode == "mutation" {
 			r.Desired.Notification.Commands.Permissions[0].Permissions = []string{"read", "incident.manage"}
@@ -146,7 +161,7 @@ func newCommandBudgetFixture(t *testing.T, mode string) *commandBudgetFixture {
 	f.toggle(t, false)
 	_, _, err = reconcileCommandActivity(ctx, f.r, f.paths, f.commands)
 	testutil.Must(t, err)
-	f.provider = deliveryProviderLifecycle{kind: "command-limits", inspect: f.inspect, delivery: delivery, scopeInspect: inspectScope,
+	f.provider = deliveryProviderLifecycle{kind: kind, inspect: f.inspect, delivery: delivery, scopeInspect: inspectScope,
 		inputs: func(context.Context, ControlRequest, ResolvedPaths, *safefs.Directory, OperationJournal) error {
 			return nil
 		},
@@ -175,7 +190,26 @@ func newCommandBudgetFixture(t *testing.T, mode string) *commandBudgetFixture {
 			}
 			paused := f.o.Manifest
 			paused.Mode, paused.DeliveryActivation, paused.Commands = "verification", nil, nil
-			if err = install.ValidatePausedCommandDeliveryLimits(paused, before, after); err != nil {
+			validate := install.ValidatePausedCommandDeliveryLimits
+			if f.provider.kind == "command-provider" {
+				validate = install.ValidatePausedCommandDeliveryProviders
+			}
+			if f.provider.kind == "command-destination" {
+				validate = install.ValidatePausedCommandDeliveryDestination
+			}
+			if f.provider.kind == "command-routes" {
+				validate = install.ValidatePausedCommandDeliveryRoutes
+			}
+			if f.provider.kind == "command-freshness" || f.provider.kind == "command-derived-freshness" {
+				validate = install.ValidatePausedCommandDeliveryFreshness
+			}
+			if f.provider.kind == "command-producer" || f.provider.kind == "command-report-route" {
+				validate = install.ValidatePausedCommandDeliveryProducerPolicy
+			}
+			if isDeliveryDeclaration(f.provider.kind) {
+				validate = install.ValidateCommandDeliveryDeclaration
+			}
+			if err = validate(paused, before, after); err != nil {
 				return install.DeliveryProviderReview{}, err
 			}
 			paths := []string{runtime.Providers["telegram"].TokenFile, runtime.Providers["telegram"].ChatFile}
@@ -214,6 +248,9 @@ func newCommandBudgetFixture(t *testing.T, mode string) *commandBudgetFixture {
 			}
 			m := &f.o.Manifest
 			m.Revision = testutil.ID(t, "n")
+			if commandProviderPolicy(f.provider.kind) {
+				m.ReportCredentialHistory = &install.ManagedReportCredentialHistory{Operation: m.Revision, Hash: protocol.Hash("credential history")}
+			}
 			m.ConfigHash, m.RuntimeHash, m.UnitHash = protocol.Hash(after), inputDigest(raw), protocol.Hash("budget unit")
 			if m.DeliveryOwnerConfigHash == "" {
 				m.DeliveryOwnerConfigHash = protocol.Hash(runtime.Worker)
@@ -265,156 +302,192 @@ func (f *commandBudgetFixture) budget(t *testing.T, value int) {
 }
 
 func TestCommandBudgetsResumeAndRetainReceiver(t *testing.T) {
-	for _, mode := range []string{"read", "mutation"} {
-		for _, at := range []string{"delivery-provider-intent", "delivery-provider-paused", "delivery-provider-rotated", "pause-reply", "migration-reply", "scope-reply"} {
-			t.Run(mode+"/"+at, func(t *testing.T) {
-				ctx := context.Background()
-				f := newCommandBudgetFixture(t, mode)
-				originalReceiver := protocol.Hash(f.receiver)
-				originalOwner := f.o.Manifest.DeliveryOwnerHash
-				for cycle := range 2 {
-					f.budget(t, 900-cycle*100)
-					f.boundary, f.fired = at, false
-					_, handled, err := reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
-					if !handled || err == nil || !f.fired {
-						t.Fatal("missed boundary", handled, err)
-					}
-					retained := f.journal(t)
-					effects := f.pauses + f.rotations
-					for _, damage := range []string{"helper", "backup", "limits", "receiver"} {
-						r := f.r
-						switch damage {
-						case "helper":
-							r.HelperSHA256 = protocol.Hash("changed helper")
-						case "backup":
-							b := *r.Desired.Backup
-							b.Schedule = "weekly"
-							r.Desired.Backup = &b
-						case "limits":
-							n := *r.Desired.Notification
-							n.Limits.MaxMessages++
-							r.Desired.Notification = &n
-							r.DesiredHash, _ = r.Desired.NotificationFingerprint()
-						case "receiver":
-							f.receiverChanged = true
+	for _, kind := range []string{"command-limits", "command-freshness", "command-producer", "command-routes", "command-derived-freshness", "command-report-route", "command-provider", "command-destination"} {
+		t.Run(kind, func(t *testing.T) {
+
+			for _, mode := range []string{"read", "mutation"} {
+				for _, at := range []string{"delivery-provider-intent", "delivery-provider-paused", "delivery-provider-rotated", "pause-reply", "migration-reply", "scope-reply"} {
+					t.Run(mode+"/"+at, func(t *testing.T) {
+						ctx := context.Background()
+						f := newCommandPolicyFixture(t, mode, kind)
+						originalReceiver := protocol.Hash(f.receiver)
+						originalOwner := f.o.Manifest.DeliveryOwnerHash
+						for cycle := range 2 {
+							f.policyUpdate(t, kind, 900-cycle*100)
+							f.boundary, f.fired = at, false
+							_, handled, err := reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
+							if !handled || err == nil || !f.fired {
+								t.Fatal("missed boundary", handled, err)
+							}
+							retained := f.journal(t)
+							effects := f.pauses + f.rotations
+							for _, damage := range []string{"helper", "backup", "limits", "timing", "receiver"} {
+								r := f.r
+								switch damage {
+								case "helper":
+									r.HelperSHA256 = protocol.Hash("changed helper")
+								case "backup":
+									b := *r.Desired.Backup
+									b.Schedule = "weekly"
+									r.Desired.Backup = &b
+								case "limits":
+									n := *r.Desired.Notification
+									n.Limits.MaxMessages++
+									r.Desired.Notification = &n
+									r.DesiredHash, _ = r.Desired.NotificationFingerprint()
+								case "timing":
+									r.Desired.Notification = new(config.NotificationDeclaration)
+									*r.Desired.Notification = *f.r.Desired.Notification
+									r.Desired.Notification.Producers = map[string]config.ProducerDeclaration{}
+									for k, p := range f.r.Desired.Notification.Producers {
+										p.MaxSilenceSeconds++
+										r.Desired.Notification.Producers[k] = p
+									}
+									if len(r.Desired.Notification.Producers) == 0 {
+										r.Desired.Notification.Producers["backup-worker"] = config.ProducerDeclaration{MaxSilenceSeconds: 180}
+									}
+									r.DesiredHash, _ = r.Desired.NotificationFingerprint()
+								case "receiver":
+									f.receiverChanged = true
+								}
+								_, _, err = reconcileDeliveryProviders(ctx, r, f.paths, "/helper", f.provider)
+								f.receiverChanged = false
+								if err == nil || f.journal(t).Digest() != retained.Digest() || effects != f.pauses+f.rotations {
+									t.Fatal("changed retry accepted", damage, err)
+								}
+							}
+							f.boundary = ""
+							_, handled, err = reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
+							testutil.Must(t, err)
+							if !handled {
+								t.Fatal("unhandled budgets")
+							}
+							testutil.Must(t, verifyDeliveryProviderReceipt(f.d, f.journal(t), f.o.Manifest, f.provider.scopeInspect))
+							receiver, err := retainedCommandReceiver(ctx, f.d, f.journal(t), f.commands.notificationCommandLifecycle)
+							testutil.Must(t, err)
+							if protocol.Hash(receiver) != originalReceiver || f.o.Manifest.DeliveryOwnerHash != originalOwner || f.o.Manifest.Commands != nil {
+								t.Fatal("changed ownership")
+							}
+							f.ready = false
+							result, handled, err := reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
+							testutil.Must(t, err)
+							if !handled || result.State != "needs_qualification" {
+								t.Fatal("invented qualification", result)
+							}
+							f.ready = true
+							_, _, err = reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
+							testutil.Must(t, err)
+							testutil.Must(t, verifyCommandRenewalReceipt(ctx, f.d, f.journal(t), f.o.Manifest, f.renewal))
+							f.toggle(t, true)
+							_, _, err = reconcileCommandActivity(ctx, f.r, f.paths, f.commands)
+							testutil.Must(t, err)
+							f.toggle(t, false)
+							_, _, err = reconcileCommandActivity(ctx, f.r, f.paths, f.commands)
+							testutil.Must(t, err)
 						}
-						_, _, err = reconcileDeliveryProviders(ctx, r, f.paths, "/helper", f.provider)
-						f.receiverChanged = false
-						if err == nil || f.journal(t).Digest() != retained.Digest() || effects != f.pauses+f.rotations {
-							t.Fatal("changed retry accepted", damage, err)
+						if f.pauses != 2 || f.rotations != 2 {
+							t.Fatal("replayed domain effects", f.pauses, f.rotations)
 						}
-					}
-					f.boundary = ""
-					_, handled, err = reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
-					testutil.Must(t, err)
-					if !handled {
-						t.Fatal("unhandled budgets")
-					}
-					testutil.Must(t, verifyDeliveryProviderReceipt(f.d, f.journal(t), f.o.Manifest, f.provider.scopeInspect))
-					receiver, err := retainedCommandReceiver(ctx, f.d, f.journal(t), f.commands.notificationCommandLifecycle)
-					testutil.Must(t, err)
-					if protocol.Hash(receiver) != originalReceiver || f.o.Manifest.DeliveryOwnerHash != originalOwner || f.o.Manifest.Commands != nil {
-						t.Fatal("changed ownership")
-					}
-					f.ready = false
-					result, handled, err := reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
-					testutil.Must(t, err)
-					if !handled || result.State != "needs_qualification" {
-						t.Fatal("invented qualification", result)
-					}
-					f.ready = true
-					_, _, err = reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
-					testutil.Must(t, err)
-					testutil.Must(t, verifyCommandRenewalReceipt(ctx, f.d, f.journal(t), f.o.Manifest, f.renewal))
-					f.toggle(t, true)
-					_, _, err = reconcileCommandActivity(ctx, f.r, f.paths, f.commands)
-					testutil.Must(t, err)
-					f.toggle(t, false)
-					_, _, err = reconcileCommandActivity(ctx, f.r, f.paths, f.commands)
-					testutil.Must(t, err)
+					})
 				}
-				if f.pauses != 2 || f.rotations != 2 {
-					t.Fatal("replayed domain effects", f.pauses, f.rotations)
-				}
-			})
-		}
+			}
+
+		})
 	}
 }
 
 func TestCommandBudgetReceiptsAreReadOnlyAndRequireReceiver(t *testing.T) {
-	ctx := context.Background()
-	f := newCommandBudgetFixture(t, "read")
-	f.budget(t, 900)
-	_, handled, err := reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
-	testutil.Must(t, err)
-	if !handled {
-		t.Fatal("unhandled budgets")
-	}
-	j := f.journal(t)
-	tree := planTree(t, f.paths.Control)
-	for range 2 {
-		testutil.Must(t, verifyDeliveryProviderReceipt(f.d, j, f.o.Manifest, f.provider.scopeInspect))
-		_, err = retainedCommandReceiver(ctx, f.d, j, f.commands.notificationCommandLifecycle)
-		testutil.Must(t, err)
-	}
-	if !reflect.DeepEqual(tree, planTree(t, f.paths.Control)) {
-		t.Fatal("receipt inspection changed evidence")
-	}
-	f.receiverChanged = true
-	_, _, err = reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
-	if err == nil || f.o.Manifest.Mode != "verification" || !reflect.DeepEqual(tree, planTree(t, f.paths.Control)) {
-		t.Fatal("qualification accepted changed receiver", err)
+	for _, kind := range []string{"command-limits", "command-freshness", "command-producer", "command-routes", "command-derived-freshness", "command-report-route", "command-provider", "command-destination"} {
+		t.Run(kind, func(t *testing.T) {
+
+			ctx := context.Background()
+			f := newCommandPolicyFixture(t, "read", kind)
+			f.policyUpdate(t, kind, 900)
+			_, handled, err := reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
+			testutil.Must(t, err)
+			if !handled {
+				t.Fatal("unhandled budgets")
+			}
+			j := f.journal(t)
+			tree := planTree(t, f.paths.Control)
+			for range 2 {
+				testutil.Must(t, verifyDeliveryProviderReceipt(f.d, j, f.o.Manifest, f.provider.scopeInspect))
+				_, err = retainedCommandReceiver(ctx, f.d, j, f.commands.notificationCommandLifecycle)
+				testutil.Must(t, err)
+			}
+			if !reflect.DeepEqual(tree, planTree(t, f.paths.Control)) {
+				t.Fatal("receipt inspection changed evidence")
+			}
+			f.receiverChanged = true
+			_, _, err = reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
+			if err == nil || f.o.Manifest.Mode != "verification" || !reflect.DeepEqual(tree, planTree(t, f.paths.Control)) {
+				t.Fatal("qualification accepted changed receiver", err)
+			}
+
+		})
 	}
 }
 
 func TestCommandBudgetsResumeLostDeliveryAndConnectReplies(t *testing.T) {
-	for _, boundary := range []string{"delivery-reply", "connect-reply"} {
-		t.Run(boundary, func(t *testing.T) {
-			ctx := context.Background()
-			f := newCommandBudgetFixture(t, "mutation")
-			f.budget(t, 900)
-			_, _, err := reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
-			testutil.Must(t, err)
-			f.ready = true
-			f.boundary, f.fired = boundary, false
-			_, handled, err := reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
-			if !handled || err == nil || !f.fired {
-				t.Fatal("missed lost renewal reply", handled, err)
+	for _, kind := range []string{"command-limits", "command-freshness", "command-producer", "command-routes", "command-derived-freshness", "command-report-route", "command-provider", "command-destination"} {
+		t.Run(kind, func(t *testing.T) {
+
+			for _, boundary := range []string{"delivery-reply", "connect-reply"} {
+				t.Run(boundary, func(t *testing.T) {
+					ctx := context.Background()
+					f := newCommandPolicyFixture(t, "mutation", kind)
+					f.policyUpdate(t, kind, 900)
+					_, _, err := reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
+					testutil.Must(t, err)
+					f.ready = true
+					f.boundary, f.fired = boundary, false
+					_, handled, err := reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
+					if !handled || err == nil || !f.fired {
+						t.Fatal("missed lost renewal reply", handled, err)
+					}
+					after := f.renewals
+					f.boundary = ""
+					for range 2 {
+						result, handled, err := reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
+						testutil.Must(t, err)
+						if !handled || result.State != "commands_disabled" || f.renewals != after {
+							t.Fatal("renewal replayed or enabled commands", result)
+						}
+						testutil.Must(t, verifyCommandRenewalReceipt(ctx, f.d, f.journal(t), f.o.Manifest, f.renewal))
+					}
+				})
 			}
-			after := f.renewals
-			f.boundary = ""
-			for range 2 {
-				result, handled, err := reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
-				testutil.Must(t, err)
-				if !handled || result.State != "commands_disabled" || f.renewals != after {
-					t.Fatal("renewal replayed or enabled commands", result)
-				}
-				testutil.Must(t, verifyCommandRenewalReceipt(ctx, f.d, f.journal(t), f.o.Manifest, f.renewal))
-			}
+
 		})
 	}
 }
 
 func TestCommandBudgetsRefuseMissingRetainedIntent(t *testing.T) {
-	ctx := context.Background()
-	f := newCommandBudgetFixture(t, "read")
-	f.budget(t, 900)
-	f.boundary = "delivery-provider-paused"
-	_, _, err := reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
-	if err == nil {
-		t.Fatal("missed pause")
-	}
-	j := f.journal(t)
-	name := filepath.Join(f.paths.Control, "delivery-providers-"+j.Children[0].Operation+".json")
-	testutil.Must(t, os.Remove(name))
-	tree := planTree(t, f.paths.Control)
-	effects := f.pauses + f.rotations
-	f.provider.review = func(context.Context, string, string, []byte) (install.DeliveryProviderReview, error) {
-		return install.DeliveryProviderReview{}, errors.New("gateway already paused")
-	}
-	_, _, err = reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
-	if err == nil || f.pauses+f.rotations != effects || !reflect.DeepEqual(tree, planTree(t, f.paths.Control)) {
-		t.Fatal("lost intent repeated effects", err)
+	for _, kind := range []string{"command-limits", "command-freshness", "command-producer", "command-routes", "command-derived-freshness", "command-report-route", "command-provider", "command-destination"} {
+		t.Run(kind, func(t *testing.T) {
+
+			ctx := context.Background()
+			f := newCommandPolicyFixture(t, "read", kind)
+			f.policyUpdate(t, kind, 900)
+			f.boundary = "delivery-provider-paused"
+			_, _, err := reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
+			if err == nil {
+				t.Fatal("missed pause")
+			}
+			j := f.journal(t)
+			name := filepath.Join(f.paths.Control, "delivery-providers-"+j.Children[0].Operation+".json")
+			testutil.Must(t, os.Remove(name))
+			tree := planTree(t, f.paths.Control)
+			effects := f.pauses + f.rotations
+			f.provider.review = func(context.Context, string, string, []byte) (install.DeliveryProviderReview, error) {
+				return install.DeliveryProviderReview{}, errors.New("gateway already paused")
+			}
+			_, _, err = reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
+			if err == nil || f.pauses+f.rotations != effects || !reflect.DeepEqual(tree, planTree(t, f.paths.Control)) {
+				t.Fatal("lost intent repeated effects", err)
+			}
+
+		})
 	}
 }
 
@@ -440,25 +513,127 @@ func TestCommandBudgetsPreserveEnrollmentAndDerivedProducerLimit(t *testing.T) {
 }
 
 func TestCommandBudgetsAllowLaterIndependentRenewal(t *testing.T) {
+	for _, kind := range []string{"command-limits", "command-freshness", "command-producer", "command-routes", "command-derived-freshness", "command-report-route", "command-provider", "command-destination"} {
+		t.Run(kind, func(t *testing.T) {
+
+			ctx := context.Background()
+			f := newCommandPolicyFixture(t, "read", kind)
+			f.policyUpdate(t, kind, 900)
+			_, _, err := reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
+			testutil.Must(t, err)
+			f.ready = true
+			_, _, err = reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
+			testutil.Must(t, err)
+			f.r.Action = "qualify-begin"
+			result, handled, err := reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
+			testutil.Must(t, err)
+			if !handled || result.State != "needs_qualification" {
+				t.Fatal("independent renewal did not pause")
+			}
+			f.r.Action = "apply"
+			result, handled, err = reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
+			testutil.Must(t, err)
+			if !handled || result.State != "commands_disabled" {
+				t.Fatal("independent renewal changed intake")
+			}
+			testutil.Must(t, verifyCommandRenewalReceipt(ctx, f.d, f.journal(t), f.o.Manifest, f.renewal))
+
+		})
+	}
+}
+
+func (f *commandBudgetFixture) policyUpdate(t *testing.T, kind string, value int) {
+	t.Helper()
+	if commandProviderPolicy(kind) {
+		n := *f.r.Desired.Notification
+		f.r.Desired.Notification = &n
+		n.Providers = maps.Clone(n.Providers)
+		p := n.Providers["telegram"]
+		if p.ChatIDFile == "" {
+			rt, err := install.ReadRuntime(filepath.Join(f.paths.Config, "consumers/runtime.json"))
+			testutil.Must(t, err)
+			p.ChatIDFile = rt.Providers["telegram"].ChatFile
+		}
+		p.TokenInput, p.ChatIDInput = "", ""
+		f.r.Inputs = nil
+		dir := t.TempDir()
+		p.TokenFile = filepath.Join(dir, "token")
+		testutil.Must(t, os.WriteFile(p.TokenFile, []byte("123:rotated-token"), 0600))
+		if kind == "command-destination" {
+			p.ChatIDFile = filepath.Join(dir, "chat")
+			testutil.Must(t, os.WriteFile(p.ChatIDFile, []byte(fmt.Sprint(value)), 0600))
+		}
+		n.Providers["telegram"] = p
+		f.r.DesiredHash, _ = f.r.Desired.NotificationFingerprint()
+		return
+	}
+	if kind == "command-routes" {
+		n := *f.r.Desired.Notification
+		f.r.Desired.Notification = &n
+		n.Routes = maps.Clone(n.Routes)
+		n.Routes[fmt.Sprint("audit", value)] = config.NotificationRoute{Primary: "telegram"}
+		f.r.DesiredHash, _ = f.r.Desired.NotificationFingerprint()
+		return
+	}
+	if kind == "command-derived-freshness" || kind == "command-report-route" {
+		b := *f.r.Desired.Backup
+		f.r.Desired.Backup = &b
+		if kind == "command-derived-freshness" {
+			b.Freshness = fmt.Sprintf("%dh", 26+value/100)
+		} else if value%200 == 100 {
+			b.Notifications.Route = "audit"
+		} else {
+			b.Notifications.Route = "alerts"
+		}
+		f.r.DesiredHash, _ = f.r.Desired.NotificationFingerprint()
+		return
+	}
+
+	if kind == "command-limits" {
+		f.budget(t, value)
+		return
+	}
+	n := *f.r.Desired.Notification
+	f.r.Desired.Notification = &n
+	n.Producers = map[string]config.ProducerDeclaration{}
+	// Read retained policy from the current declaration; change timing only.
+	current, err := readCommandDeclaration(f.d, f.journal(t))
+	testutil.Must(t, err)
+	for k, p := range current.Notification.Producers {
+		n.Producers[k] = p
+	}
+	p := n.Producers["backup-worker"]
+	if kind == "command-producer" {
+		p.MaxMessages = value
+	} else {
+		p.MaxSilenceSeconds, p.MaxEvidenceSeconds = value, value*200
+	}
+	n.Producers["backup-worker"] = p
+	f.r.DesiredHash, err = f.r.Desired.NotificationFingerprint()
+	testutil.Must(t, err)
+}
+
+func TestCommandDeliveryTimingAlternatesWithBudgets(t *testing.T) {
 	ctx := context.Background()
-	f := newCommandBudgetFixture(t, "read")
-	f.budget(t, 900)
-	_, _, err := reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
-	testutil.Must(t, err)
-	f.ready = true
-	_, _, err = reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
-	testutil.Must(t, err)
-	f.r.Action = "qualify-begin"
-	result, handled, err := reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
-	testutil.Must(t, err)
-	if !handled || result.State != "needs_qualification" {
-		t.Fatal("independent renewal did not pause")
+	f := newCommandPolicyFixture(t, "mutation", "command-freshness")
+	owner, receiver := f.o.Manifest.DeliveryOwnerHash, protocol.Hash(f.receiver)
+	for cycle, kind := range []string{"command-freshness", "command-limits", "command-freshness"} {
+		f.provider.kind = kind
+		f.policyUpdate(t, kind, 600+cycle*100)
+		_, handled, err := reconcileDeliveryProviders(ctx, f.r, f.paths, "/helper", f.provider)
+		testutil.Must(t, err)
+		if !handled {
+			t.Fatal("unhandled policy change", kind)
+		}
+		f.ready = true
+		_, _, err = reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
+		testutil.Must(t, err)
+		testutil.Must(t, verifyCommandRenewalReceipt(ctx, f.d, f.journal(t), f.o.Manifest, f.renewal))
+		if f.o.Manifest.DeliveryOwnerHash != owner || protocol.Hash(f.receiver) != receiver || f.o.Manifest.Commands != nil {
+			t.Fatal("alternating policy changed authority")
+		}
 	}
-	f.r.Action = "apply"
-	result, handled, err = reconcileCommandRequalification(ctx, f.r, f.paths, f.renewal)
+	f.toggle(t, true)
+	_, _, err := reconcileCommandActivity(ctx, f.r, f.paths, f.commands)
 	testutil.Must(t, err)
-	if !handled || result.State != "commands_disabled" {
-		t.Fatal("independent renewal changed intake")
-	}
-	testutil.Must(t, verifyCommandRenewalReceipt(ctx, f.d, f.journal(t), f.o.Manifest, f.renewal))
 }

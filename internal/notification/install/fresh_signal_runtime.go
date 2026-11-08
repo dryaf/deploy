@@ -103,7 +103,12 @@ func serveFreshSignal(ctx context.Context, root, operation string) error {
 	}
 	defer cli.Close()
 	config := relay.Config{StateDir: m.Spec.AccountState, Socket: m.Spec.socket(), AccountFile: filepath.Join(root, "account"), RecipientFile: filepath.Join(root, "recipient")}
-	execution := relay.FreshExecution{Account: account, Inbox: inbox, Check: check, Health: func(ctx context.Context) (any, error) {
+	execution := relay.FreshExecution{Account: account, Inbox: inbox, Check: check, Recipient: func(ctx context.Context, hash, destination string) (string, error) {
+		if err := check(ctx); err != nil {
+			return "", err
+		}
+		return freshSignalRecipient(m, hash, destination)
+	}, Health: func(ctx context.Context) (any, error) {
 		if err := check(ctx); err != nil {
 			return nil, err
 		}

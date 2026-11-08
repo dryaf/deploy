@@ -28,6 +28,12 @@ func validateDeliveryProviderPair(before, after Runtime, enrollment bool) error 
 			}
 			return fmt.Errorf("retain provider names")
 		}
+		if old.Kind == "signal" && protocol.Hash(old) != protocol.Hash(next) {
+			if err := validateSignalDeliveryProfileChange(old, next, true); err != nil {
+				return err
+			}
+			changed = changed || old.Destination != next.Destination
+		}
 		if old.Kind == "telegram" {
 			for _, p := range []provider.Profile{old, next} {
 				if err := provider.CheckTelegramProfile(p); err != nil {

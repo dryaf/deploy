@@ -40,6 +40,7 @@ type ManagedReportCredentialHistory struct {
 }
 
 type ManagedManifest struct {
+	ActivityRestoration     *ManagedActivityRestoration     `json:"activity_restoration,omitempty"`
 	ReportCredentialHistory *ManagedReportCredentialHistory `json:"report_credential_history,omitempty"`
 	LEDOutput               *ManagedLEDOutput               `json:"led_output,omitempty"`
 	FreshSignal             *FreshSignalReference           `json:"fresh_signal,omitempty"`
@@ -71,6 +72,7 @@ type ManagedManifest struct {
 }
 
 type managedIntent struct {
+	ActivityPrevious *activityPrevious           `json:"activity_previous,omitempty"`
 	DeliveryProvider *deliveryProviderTransition `json:"delivery_provider,omitempty"`
 	Version          int
 	ID               string
@@ -172,6 +174,9 @@ func managedHelperName(m ManagedManifest) string {
 }
 
 func (m ManagedManifest) validate() error {
+	if r := m.ActivityRestoration; r != nil && (!safefs.ValidID(r.Operation, "n") || !safefs.DigestPattern.MatchString(r.Before)) {
+		return fmt.Errorf("invalid shared activity restoration anchor")
+	}
 	if m.LEDOutput != nil && !safefs.ValidID(m.LEDOutput.Operation, "n") {
 		return fmt.Errorf("invalid managed LED output operation")
 	}
@@ -276,14 +281,25 @@ func (m ManagedManifest) validate() error {
 
 func (j managedJournal) validate() error {
 	i := j.Intent
+	if sharedActivityOperation(i.Operation) {
+		return validateSharedActivityJournal(j)
+	}
+	if i.ActivityPrevious != nil {
+		return fmt.Errorf("unexpected shared activity evidence")
+	}
 	if isPausedRuntimeChange(i.Operation) {
 		return validateDeliveryProviderJournal(j)
+	}
+	if i.Before == nil && i.After.ActivityRestoration != nil || i.Before != nil && protocol.Hash(i.Before.ActivityRestoration) != protocol.Hash(i.After.ActivityRestoration) {
+		return fmt.Errorf("transition changed shared activity restoration history")
 	}
 	if i.Before == nil && i.After.DeliveryOwnerConfigHash != "" || i.Before != nil && i.Before.DeliveryOwnerConfigHash != i.After.DeliveryOwnerConfigHash {
 		return fmt.Errorf("transition changed original delivery configuration")
 	}
 	if i.Before == nil && i.After.ReportCredentialHistory != nil || i.Before != nil && protocol.Hash(i.Before.ReportCredentialHistory) != protocol.Hash(i.After.ReportCredentialHistory) {
-		return fmt.Errorf("installation transition changed retained credential exclusions")
+		if !validStagedProviderCredentialHistory(i) {
+			return fmt.Errorf("installation transition changed retained credential exclusions")
+		}
 	}
 	if i.DeliveryProvider != nil {
 		return fmt.Errorf("unexpected provider transition evidence")

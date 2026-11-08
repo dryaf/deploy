@@ -362,6 +362,7 @@ func applyControlWithLinkOutput(ctx context.Context, r ControlRequest, linkOutpu
 		return result, fmt.Errorf("target XDG paths changed since inspection")
 	}
 	disabling := r.Worker == "notification-worker" && r.Desired.Notification != nil && !config.WorkerEnabled(r.Desired.Notification.Enabled) || r.Worker == "backup-worker" && r.Desired.Backup != nil && !config.WorkerEnabled(r.Desired.Backup.Enabled)
+	disabling = disabling || sharedActivityStopping(r.Desired, r.Server)
 	if !r.Facts.UserManager || (r.Action == "apply" || r.Action == "resume") && !disabling && !r.Facts.Linger {
 		return result, fmt.Errorf("target user manager and lingering are required")
 	}
@@ -371,6 +372,21 @@ func applyControlWithLinkOutput(ctx context.Context, r ControlRequest, linkOutpu
 	}
 	if err = VerifyArtifact(Artifact{executable, r.HelperSHA256}, r.Facts.Arch, true); err != nil {
 		return result, err
+	}
+	if r.Desired.Notification != nil && r.Desired.Backup != nil && r.Desired.Backup.Notifications.Worker == r.Server && (r.Worker == "notification-worker" || r.Action == "apply" || r.Action == "resume" || r.Action == "status" || r.Action == "plan") {
+		sharedRequest := r
+		sharedRequest.Worker, sharedRequest.DesiredScope = "notification-worker", 1
+		sharedRequest.DesiredHash, err = r.Desired.NotificationFingerprint()
+		if err != nil {
+			return result, err
+		}
+		sharedPaths, e := ResolvePaths("notification-worker", r.Desired.Notification.Paths, r.Facts)
+		if e != nil {
+			return result, e
+		}
+		if shared, handled, e := reconcileSharedActivity(ctx, sharedRequest, sharedPaths, defaultSharedActivity()); handled || e != nil {
+			return shared, e
+		}
 	}
 	if r.Worker == "backup-worker" {
 		if r.Action == "import" {
@@ -412,6 +428,16 @@ func applyControlWithLinkOutput(ctx context.Context, r ControlRequest, linkOutpu
 		return importNotificationControl(ctx, r, paths, install.InspectPolicyReview)
 	}
 	if (r.Action == "apply" || r.Action == "resume") && config.WorkerEnabled(r.Desired.Notification.Enabled) {
+		for _, lifecycle := range []deliveryProviderLifecycle{
+			defaultCommandDeliveryProviders(executable, true), defaultCommandDeliveryProviders(executable, false),
+			defaultDeliveryReportRoute(executable, false, true), defaultDeliveryReportRoute(executable, false, false),
+			defaultDeliveryReportRoute(executable, true, true), defaultDeliveryReportRoute(executable, true, false),
+			defaultCommandDeliveryRoutes(executable), defaultCommandDerivedFreshness(executable),
+		} {
+			if policy, handled, e := reconcileDeliveryProviders(ctx, r, paths, executable, lifecycle); handled || e != nil {
+				return policy, e
+			}
+		}
 		if policy, handled, e := reconcileDeliveryProviders(ctx, r, paths, executable, defaultDeliveryDerivedFreshness(executable)); handled || e != nil {
 			return policy, e
 		}
@@ -427,7 +453,16 @@ func applyControlWithLinkOutput(ctx context.Context, r ControlRequest, linkOutpu
 		if policy, handled, e := reconcileDeliveryProviders(ctx, r, paths, executable, defaultDeliveryProviders(executable)); handled || e != nil {
 			return policy, e
 		}
+		if policy, handled, e := reconcileDeliveryProviders(ctx, r, paths, executable, defaultCommandDeliveryDeclaration(executable)); handled || e != nil {
+			return policy, e
+		}
+		if policy, handled, e := reconcileDeliveryProviders(ctx, r, paths, executable, defaultCommandDeliveryProducer(executable)); handled || e != nil {
+			return policy, e
+		}
 		if policy, handled, e := reconcileDeliveryProviders(ctx, r, paths, executable, defaultCommandDeliveryLimits(executable)); handled || e != nil {
+			return policy, e
+		}
+		if policy, handled, e := reconcileDeliveryProviders(ctx, r, paths, executable, defaultCommandDeliveryFreshness(executable)); handled || e != nil {
 			return policy, e
 		}
 		if policy, handled, e := reconcileDeliveryLimits(ctx, r, paths, executable, defaultDeliveryLimits(executable)); handled || e != nil {
@@ -674,10 +709,22 @@ func applyNotificationBootstrapWithSignal(ctx context.Context, r ControlRequest,
 		}
 		if protocol.Hash(input.Providers) != selectedProviders {
 			for field, path := range map[string]string{"token": input.Providers["telegram"].TokenFile, "chat_id": input.Providers["telegram"].ChatFile} {
+				if path == "" {
+					delete(secrets, field)
+					continue
+				}
 				secrets[field], err = ReadCredentialInput(path)
 				if err != nil {
 					return result, err
 				}
+			}
+		}
+		// The bootstrap proof retains its original native private inputs even
+		// after a provider receipt selects another approved recipient.
+		for field, path := range extraInputs {
+			secrets[field], err = ReadCredentialInput(path)
+			if err != nil {
+				return result, err
 			}
 		}
 		step := &notificationBootstrapStep{paths: paths, input: input, secrets: secrets, extraInputs: extraInputs}
@@ -996,7 +1043,7 @@ func inspectNotificationControl(ctx context.Context, r ControlRequest, paths Res
 			return result, e
 		}
 	}
-	if commandLimitsJournal(record) {
+	if commandDeliveryPolicyJournal(record) || commandDeclarationJournal(record) {
 		if _, err = retainedCommandReceiver(ctx, d, record, defaultNotificationCommands()); err != nil {
 			return result, err
 		}

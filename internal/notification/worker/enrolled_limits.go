@@ -60,25 +60,25 @@ func ValidateEnrolledLimitsChange(before, after Config) error {
 func (v enrolledLimits) digest() string { return protocol.Hash(v.Receipt) }
 func (v enrolledLimits) validate() error {
 	r := v.Receipt
-	if (r.Version < 1 || r.Version > 10 && r.Version != 11 && r.Version != 16 && r.Version != 12 && r.Version != 17 && r.Version != 13 && r.Version != 18 && r.Version != 21 && r.Version != 26 && r.Version != 24 && r.Version != 29 && r.Version != 23 && r.Version != 28 && r.Version != 25 && r.Version != 30 && r.Version != 31 && r.Version != 36) || !safefs.ValidID(r.Operation, "n") || !r.Identity.Valid() || r.Previous != "" && !safefs.DigestPattern.MatchString(r.Previous) || r.Version != 5 && r.Version != 10 && r.Version != 25 && r.Version != 30 && protocol.Hash(r.Before) == protocol.Hash(r.After) {
+	if (r.Version < 1 || r.Version > 10 && r.Version != 11 && r.Version != 16 && r.Version != 12 && r.Version != 17 && r.Version != 13 && r.Version != 18 && r.Version != 21 && r.Version != 26 && r.Version != 24 && r.Version != 29 && r.Version != 23 && r.Version != 28 && r.Version != 25 && r.Version != 30 && r.Version != 31 && r.Version != 36 && r.Version != 32 && r.Version != 37 && r.Version != 33 && r.Version != 38 && r.Version != 34 && r.Version != 39 && r.Version != 35 && r.Version != 40) || !safefs.ValidID(r.Operation, "n") || !r.Identity.Valid() || r.Previous != "" && !safefs.DigestPattern.MatchString(r.Previous) || r.Version != 5 && r.Version != 10 && r.Version != 25 && r.Version != 30 && r.Version != 35 && r.Version != 40 && protocol.Hash(r.Before) == protocol.Hash(r.After) {
 		return fmt.Errorf("invalid enrolled limits intent")
 	}
 	version := r.Version
-	commandLimits := version == 31 || version == 36
-	if commandLimits {
+	commandPolicy := version == 31 || version == 36 || version == 32 || version == 37 || version == 33 || version == 38 || version == 34 || version == 39 || version == 35 || version == 40
+	if commandPolicy {
 		if !safefs.DigestPattern.MatchString(r.CommandHistoryHash) || r.Before.Interaction == nil || r.After.Interaction == nil || r.DeliveryOwner == nil || r.DeliveryOwner.validate() != nil || r.DeliveryOwner.Identity != r.Identity {
-			return fmt.Errorf("command budget migration lost retained authority")
+			return fmt.Errorf("command policy migration lost retained authority")
 		}
 		version -= 30
 	} else if r.CommandHistoryHash != "" {
-		return fmt.Errorf("unexpected command authority in budget migration")
+		return fmt.Errorf("unexpected command authority in policy migration")
 	}
 	if version == 21 || version == 26 || version == 24 || version == 29 || version == 23 || version == 28 || version == 25 || version == 30 {
 		if r.DeliveryOwner == nil || r.DeliveryOwner.validate() != nil || r.DeliveryOwner.Identity != r.Identity || r.Before.Interaction != nil || r.After.Interaction != nil {
 			return fmt.Errorf("production limits require unchanged direct-alert delivery ownership")
 		}
 		version -= 20
-	} else if !commandLimits && r.DeliveryOwner != nil {
+	} else if !commandPolicy && r.DeliveryOwner != nil {
 		return fmt.Errorf("unexpected delivery ownership on verification policy")
 	}
 	if version > 5 && version != 11 && version != 12 && version != 13 {
@@ -333,16 +333,16 @@ func migrateEnrolledPolicy(ctx context.Context, state string, id protocol.Identi
 		return zero, err
 	}
 	wanted := enrolledLimits{Receipt: EnrolledLimitsReceipt{Version: version, Operation: operation, Identity: id, Before: before, After: after}}
-	if version == 31 {
+	if version == 31 || version == 32 || version == 33 || version == 34 || version == 35 {
 		if len(commandHistory) != 1 || !safefs.DigestPattern.MatchString(commandHistory[0]) {
-			return zero, fmt.Errorf("command budget migration requires its exact retained command head")
+			return zero, fmt.Errorf("command policy migration requires its exact retained command head")
 		}
 		wanted.Receipt.CommandHistoryHash = commandHistory[0]
 	} else if len(commandHistory) != 0 {
-		return zero, fmt.Errorf("unexpected command budget authority")
+		return zero, fmt.Errorf("unexpected command policy authority")
 	}
 
-	if version == 21 || version == 24 || version == 23 || version == 25 || version == 31 {
+	if version == 21 || version == 24 || version == 23 || version == 25 || version == 31 || version == 32 || version == 33 || version == 34 || version == 35 {
 		owner, err := InspectManagedDeliveryOwner(state)
 		if err != nil {
 			return zero, err
@@ -390,7 +390,7 @@ func migrateEnrolledPolicy(ctx context.Context, state string, id protocol.Identi
 				}
 			}
 			if current.Receipt.CommandHistoryHash != "" {
-				if err = checkDeliveryCommandBudgetHead(s, current.Receipt.CommandHistoryHash); err != nil {
+				if err = checkDisabledDeliveryCommandHead(s, current.Receipt.CommandHistoryHash); err != nil {
 					s.Close()
 					return zero, err
 				}
@@ -427,8 +427,8 @@ func migrateEnrolledPolicy(ctx context.Context, state string, id protocol.Identi
 					return zero, err
 				}
 			}
-			if version == 31 {
-				if err = checkDeliveryCommandBudgetHead(s, wanted.Receipt.CommandHistoryHash); err != nil {
+			if version == 31 || version == 32 || version == 33 || version == 34 || version == 35 {
+				if err = checkDisabledDeliveryCommandHead(s, wanted.Receipt.CommandHistoryHash); err != nil {
 					s.Close()
 					return zero, err
 				}
@@ -489,7 +489,7 @@ func migrateEnrolledPolicy(ctx context.Context, state string, id protocol.Identi
 		return nil
 	}
 	if current.Receipt.CommandHistoryHash != "" {
-		if err = checkDeliveryCommandBudgetHead(s, current.Receipt.CommandHistoryHash); err != nil {
+		if err = checkDisabledDeliveryCommandHead(s, current.Receipt.CommandHistoryHash); err != nil {
 			return current.Receipt, err
 		}
 	}

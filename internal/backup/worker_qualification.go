@@ -260,6 +260,9 @@ func validateWorkerActivation(c WorkerInstallation, state *backupState, verifyRe
 	if err := state.get("run", &run); err != nil || !run.Complete || run.ConfigHash != c.ConfigHash || run.FinishedAt.IsZero() || run.FinishedAt.After(time.Now()) || time.Since(run.FinishedAt) > time.Hour || len(run.Failures) != 0 {
 		return nil, fmt.Errorf("activation requires a recent successful manual backup pass")
 	}
+	if err := requireSharedActivityRun(state, run); err != nil {
+		return nil, err
+	}
 	for _, source := range c.Sources {
 		if err := qualifySource(source, c.Policy.Timeouts); err != nil {
 			return nil, err

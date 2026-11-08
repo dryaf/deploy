@@ -77,10 +77,10 @@ func commandRenewalPredecessor(d *safefs.Directory, j OperationJournal) (Operati
 			return prior, fmt.Errorf("command pause intent changed")
 		}
 	} else {
-		if (!commandPauseJournal(prior) && !commandLimitsJournal(prior)) || !validDigest(j.Pins.Artifacts["qualification"]) || j.Pins.Artifacts["qualification"] == prior.Pins.Artifacts["qualification"] {
+		if (!commandPauseJournal(prior) && !commandDeliveryPolicyJournal(prior)) || !validDigest(j.Pins.Artifacts["qualification"]) || j.Pins.Artifacts["qualification"] == prior.Pins.Artifacts["qualification"] {
 			return prior, fmt.Errorf("command renewal requires fresh pinned qualification")
 		}
-		if commandLimitsJournal(prior) {
+		if commandDeliveryPolicyJournal(prior) {
 			if _, err := readDeliveryProviderIntent(d, prior); err != nil {
 				return prior, err
 			}
@@ -97,11 +97,12 @@ func commandRenewalPredecessor(d *safefs.Directory, j OperationJournal) (Operati
 
 type commandRequalificationLifecycle struct {
 	requalificationLifecycle
-	commands commandActivityLifecycle
+	commands           commandActivityLifecycle
+	policyScopeInspect func(string, string, string, string) (string, bool, error)
 }
 
 func defaultCommandRequalification(helper string) commandRequalificationLifecycle {
-	l := commandRequalificationLifecycle{defaultRequalification(helper), defaultCommandActivity()}
+	l := commandRequalificationLifecycle{requalificationLifecycle: defaultRequalification(helper), commands: defaultCommandActivity(), policyScopeInspect: backup.InspectRetainedCommandPolicyScope}
 	l.inputs = func(ctx context.Context, r ControlRequest, p ResolvedPaths, d *safefs.Directory, _ OperationJournal) error {
 		if err := verifyLEDOutputInputs(r, p, d, r.Desired); err != nil {
 			return err
@@ -161,7 +162,7 @@ func reconcileCommandRequalification(ctx context.Context, r ControlRequest, p Re
 	} else if err != nil {
 		return result, true, err
 	}
-	retry := commandLimitsJournal(current) || commandPauseJournal(current) || commandDeliveryJournal(current)
+	retry := commandDeliveryPolicyJournal(current) || commandPauseJournal(current) || commandDeliveryJournal(current)
 	if !retry && (r.Action != "qualify-begin" || !admittedCommandHistory(current)) {
 		return result, false, nil
 	}
@@ -180,13 +181,13 @@ func reconcileCommandRequalification(ctx context.Context, r ControlRequest, p Re
 	if err != nil {
 		return result, true, err
 	}
-	if (commandLimitsJournal(current) || commandPauseJournal(current) || commandDeliveryJournal(current) && !current.Complete) && full != current.Pins.Artifacts["command-backup-policy"] {
+	if (commandDeliveryPolicyJournal(current) || commandPauseJournal(current) || commandDeliveryJournal(current) && !current.Complete) && full != current.Pins.Artifacts["command-backup-policy"] {
 		return result, true, fmt.Errorf("resume command qualification with its retained backup declaration")
 	}
 	if !retry && !current.Complete {
 		return result, true, fmt.Errorf("finish command activity before qualification")
 	}
-	if retry && !commandLimitsJournal(current) {
+	if retry && !commandDeliveryPolicyJournal(current) {
 		if _, err = commandRenewalPredecessor(d, current); err != nil {
 			return result, true, err
 		}
@@ -221,6 +222,8 @@ func reconcileCommandRequalification(ctx context.Context, r ControlRequest, p Re
 			err = verifyCommandActivityReceipt(ctx, d, current, observed.Manifest, l.commands)
 		} else if deliveryOutputJournal(current) {
 			err = verifyDeliveryOutputReceipt(d, current, observed.Manifest, l.commands.scopeInspect)
+		} else if commandDeclarationJournal(current) {
+			err = verifyDeliveryProviderReceipt(d, current, observed.Manifest, l.commandPolicyScopeInspector())
 		} else if commandDeliveryJournal(current) {
 			err = verifyCommandRenewalReceipt(ctx, d, current, observed.Manifest, l)
 		} else {
@@ -259,11 +262,11 @@ func reconcileCommandRequalification(ctx context.Context, r ControlRequest, p Re
 			return result, true, err
 		}
 	}
-	if commandLimitsJournal(current) {
+	if commandDeliveryPolicyJournal(current) {
 		if !current.Complete {
-			return result, true, fmt.Errorf("finish notification budget changes before qualification")
+			return result, true, fmt.Errorf("finish notification policy changes before qualification")
 		}
-		if err = verifyMappingScope(d, current, l.commands.scopeInspect); err != nil {
+		if err = verifyMappingScope(d, current, l.commandPolicyScopeInspector()); err != nil {
 			return result, true, err
 		}
 	} else if _, err = commandRenewalPredecessor(d, current); err != nil {
@@ -359,4 +362,11 @@ func verifyCommandRenewalReceipt(ctx context.Context, d *safefs.Directory, j Ope
 	}
 	_, err = retainedCommandReceiver(ctx, d, j, l.commands.notificationCommandLifecycle)
 	return err
+}
+
+func (l commandRequalificationLifecycle) commandPolicyScopeInspector() func(string, string, string, string) (string, bool, error) {
+	if l.policyScopeInspect != nil {
+		return l.policyScopeInspect
+	}
+	return l.commands.scopeInspect
 }

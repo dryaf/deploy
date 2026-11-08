@@ -239,7 +239,7 @@ func (c CLI) run(ctx context.Context, kind string, args []string, defaults Optio
 	if v.Operation == "configure" {
 		return c.configure(ctx, kind, v, inv)
 	}
-	if kind == "notification-worker" && (v.Operation == "apply" || v.Operation == "resume") && config.WorkerEnabled(inv.Servers[v.Server].Desired.Notification.Enabled) && len(inv.Servers[v.Server].Desired.Notification.Providers) > 0 {
+	if kind == "notification-worker" && (v.Operation == "apply" || v.Operation == "resume") && config.WorkerEnabled(inv.Servers[v.Server].Desired.Notification.Enabled) && len(inv.Servers[v.Server].Desired.Notification.Providers) > 0 && !sharedActivityStopping(*inv.Servers[v.Server].Desired, v.Server) {
 		if err = directNotificationSupport(*inv.Servers[v.Server].Desired); err != nil {
 			return err
 		}
@@ -310,7 +310,7 @@ func (c CLI) run(ctx context.Context, kind string, args []string, defaults Optio
 				c.Controller = SSHController{}
 			}
 			r := ControlRequest{Version: 1, Worker: kind, Server: v.Server, Action: "status", Facts: facts, Desired: *inv.Servers[v.Server].Desired, DesiredScope: p.DesiredScope, DesiredHash: p.DesiredHash}
-			if kind == "backup-worker" && (r.Desired.Backup.Notifications.Worker == "" || !config.WorkerEnabled(r.Desired.Backup.Enabled) || !config.WorkerEnabled(r.Desired.Backup.Notifications.Enabled)) {
+			if kind == "backup-worker" && (r.Desired.Backup.Notifications.Worker == "") {
 				r.Desired.Notification = nil
 			}
 			if kind == "backup-worker" {
@@ -373,7 +373,7 @@ func (c CLI) run(ctx context.Context, kind string, args []string, defaults Optio
 			_ = PrintPlan(c.Out, p, v.Options.JSON)
 			return fmt.Errorf("missing_input: resolve target prerequisites and artifact inputs before applying")
 		}
-		if config.WorkerEnabled(inv.Servers[v.Server].Desired.Notification.Enabled) {
+		if config.WorkerEnabled(inv.Servers[v.Server].Desired.Notification.Enabled) && !sharedActivityStopping(*inv.Servers[v.Server].Desired, v.Server) {
 			if err = directNotificationSupport(*inv.Servers[v.Server].Desired); err != nil {
 				return err
 			}

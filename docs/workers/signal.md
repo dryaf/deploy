@@ -127,5 +127,12 @@ resume manager`. Both old/new Telegram inputs and the retained native authority
 are checked before completion. A missing provider intent or native receipt must
 be restored; retry does not recreate it or relink Signal. An independently stopped
 native service may use its existing explicit restart lifecycle after those checks.
-Changing the Signal account/recipient itself or an already enrolled gateway still
+Changing the Signal account itself or its service/artifact lifetime still
 requires the remaining migration work.
+
+Owned direct Signal gateways with an enrolled local backup can change private
+references and recipients through the [shared provider workflow](README.md#owned-signal-recipient-and-reference-changes).
+Keep the same account bytes, native service, inbox, socket and executables, and
+retain old files. Production changes pause for fresh qualification; immutable
+recipient approvals and reporting exclusions retain the original authority.
+Command intake, recovered variants and account/service replacement stay separate.

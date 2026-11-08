@@ -50,12 +50,16 @@ func backupQualificationBinding(j WorkerSetupJournal, c WorkerInstallation) (str
 		}
 		inputs[name] = notify.Hash(value)
 	}
-	return notify.Hash(struct {
+	binding := notify.Hash(struct {
 		Setup        string
 		Declaration  *SetupDeclaration
 		Runtime      WorkerInstallation
 		Keys, Inputs map[string]string
-	}{j.ID, j.Declaration, c, j.SourceKeys, inputs}), nil
+	}{j.ID, j.Declaration, c, j.SourceKeys, inputs})
+	if j.Activity != nil && j.Activity.Version == 2 && j.Activity.Setup == j.RequestHash {
+		binding = notify.Hash(struct{ Policy, Activity string }{binding, notify.Hash(*j.Activity)})
+	}
+	return binding, nil
 }
 
 // QualifyDeclaredWorker records operator observations only. The target creates

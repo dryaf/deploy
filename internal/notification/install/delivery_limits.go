@@ -9,12 +9,22 @@ import (
 )
 
 func isPausedRuntimeChange(operation string) bool {
-	return operation == "change-command-delivery-limits" || operation == "rotate-delivery-provider" || operation == "change-delivery-limits" || operation == "change-delivery-producer" || operation == "change-delivery-routes" || operation == "change-delivery-destination" || operation == "change-delivery-provider-enrollment"
+	return operation == "rotate-command-delivery-provider" || operation == "change-command-delivery-destination" || operation == "change-command-delivery-routes" || operation == "change-command-delivery-producer" || operation == "change-command-delivery-freshness" || operation == "change-command-delivery-limits" || operation == "rotate-delivery-provider" || operation == "change-delivery-limits" || operation == "change-delivery-producer" || operation == "change-delivery-routes" || operation == "change-delivery-destination" || operation == "change-delivery-provider-enrollment"
 }
 func pausedRuntimeOperation(kind string) string {
 	switch kind {
 	case "":
 		return "rotate-delivery-provider"
+	case "command-provider":
+		return "rotate-command-delivery-provider"
+	case "command-destination":
+		return "change-command-delivery-destination"
+	case "command-routes":
+		return "change-command-delivery-routes"
+	case "command-producer":
+		return "change-command-delivery-producer"
+	case "command-freshness":
+		return "change-command-delivery-freshness"
 	case "command-limits":
 		return "change-command-delivery-limits"
 	case "limits":
@@ -31,6 +41,21 @@ func pausedRuntimeOperation(kind string) string {
 	return ""
 }
 func validatePausedRuntimeChange(m ManagedManifest, before, after Runtime, kind string) error {
+	if kind == "command-routes" {
+		return validatePausedCommandDeliveryRoutes(m, before, after)
+	}
+	if commandProviderKind(kind) {
+		return validatePausedCommandDeliveryProviders(m, before, after, kind == "command-destination")
+	}
+	if kind == "command-producer" {
+		return validatePausedCommandDeliveryProducerPolicy(m, before, after)
+	}
+	if kind == "command-declaration" {
+		return ValidateCommandDeliveryDeclaration(m, before, after)
+	}
+	if kind == "command-freshness" {
+		return validatePausedCommandDeliveryFreshness(m, before, after)
+	}
 	if kind == "command-limits" {
 		return validatePausedCommandDeliveryLimits(m, before, after)
 	}
@@ -79,6 +104,18 @@ func InspectPausedDeliveryLimits(ctx context.Context, spec ManagedSpec, expected
 	return newManagedInstaller().inspectPausedRuntimeChange(ctx, spec, expected, "limits")
 }
 func (i managedInstaller) probePausedRuntimeChange(ctx context.Context, d *safefs.Directory, m ManagedManifest, kind string) error {
+	if commandProviderKind(kind) {
+		return i.probeCommandDeliveryProviders(ctx, d, m)
+	}
+	if kind == "command-routes" {
+		return i.probeCommandDeliveryRoutes(ctx, d, m)
+	}
+	if kind == "command-producer" || kind == "command-declaration" {
+		return i.probeCommandDeliveryProducerPolicy(ctx, d, m)
+	}
+	if kind == "command-freshness" {
+		return i.probeCommandDeliveryFreshness(ctx, d, m)
+	}
 	if kind == "command-limits" {
 		return i.probeCommandDeliveryLimits(ctx, d, m)
 	}
@@ -119,6 +156,21 @@ func ValidatePausedDeliveryProducerPolicy(m ManagedManifest, before, after Runti
 	return validatePausedRuntimeChange(m, before, after, "producer")
 }
 func preflightDeliveryPolicy(ctx context.Context, m ManagedManifest, before, after Runtime, kind string) error {
+	if commandProviderKind(kind) {
+		return worker.PreflightCommandDeliveryProviders(ctx, m.Paths.State, m.Identity, before.Worker, after.Worker, m.CommandHistoryHash)
+	}
+	if kind == "command-routes" {
+		return worker.PreflightCommandDeliveryRoutes(ctx, m.Paths.State, m.Identity, before.Worker, after.Worker, m.CommandHistoryHash)
+	}
+	if kind == "command-producer" {
+		return worker.PreflightCommandDeliveryProducerPolicy(ctx, m.Paths.State, m.Identity, before.Worker, after.Worker, m.CommandHistoryHash)
+	}
+	if kind == "command-declaration" {
+		return worker.PreflightCommandDeliveryDeclaration(ctx, m.Paths.State, m.Identity, before.Worker, m.CommandHistoryHash)
+	}
+	if kind == "command-freshness" {
+		return worker.PreflightCommandDeliveryFreshness(ctx, m.Paths.State, m.Identity, before.Worker, after.Worker, m.CommandHistoryHash)
+	}
 	if kind == "command-limits" {
 		return worker.PreflightCommandDeliveryLimits(ctx, m.Paths.State, m.Identity, before.Worker, after.Worker, m.CommandHistoryHash)
 	}

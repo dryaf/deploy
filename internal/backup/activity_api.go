@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dryaf/deploy/internal/config"
 	notify "github.com/dryaf/deploy/internal/notification/protocol"
@@ -21,17 +22,19 @@ const backupSetupFile = ".local/state/deploy/backup-worker/setup.json"
 // The setup journal carries the durable intent; the database carries the
 // execution fence and completion. Missing either authority is never adoption.
 type declaredBackupActivity struct {
-	Version     int                   `json:"version"`
-	Operation   string                `json:"operation"`
-	Previous    string                `json:"previous,omitempty"`
-	Setup       string                `json:"setup"`
-	Runtime     string                `json:"runtime"`
-	Helper      string                `json:"helper"`
-	DesiredHash string                `json:"desired_hash"`
-	Desired     config.DesiredWorkers `json:"desired"`
-	Disabled    bool                  `json:"disabled"`
-	Complete    bool                  `json:"complete"`
-	Units       []backupActivityUnit  `json:"units"`
+	CreatedAt   *time.Time             `json:"created_at,omitempty"`
+	Shared      *SharedActivityRequest `json:"shared,omitempty"`
+	Version     int                    `json:"version"`
+	Operation   string                 `json:"operation"`
+	Previous    string                 `json:"previous,omitempty"`
+	Setup       string                 `json:"setup"`
+	Runtime     string                 `json:"runtime"`
+	Helper      string                 `json:"helper"`
+	DesiredHash string                 `json:"desired_hash"`
+	Desired     config.DesiredWorkers  `json:"desired"`
+	Disabled    bool                   `json:"disabled"`
+	Complete    bool                   `json:"complete"`
+	Units       []backupActivityUnit   `json:"units"`
 }
 type backupActivityUnit struct {
 	Name       string `json:"name"`
@@ -51,15 +54,25 @@ func (e ActivityPendingError) Error() string { return e.Cause.Error() }
 func (e ActivityPendingError) Unwrap() error { return e.Cause }
 
 type backupActivityDependencies struct {
+	setup    func(context.Context, *safefs.Directory, string) (SetupObservation, error)
 	inspect  func(context.Context, string, []backupActivityUnit) (bool, error)
 	stop     func(context.Context, string, []backupActivityUnit) error
 	boundary func(string) error
+	shared   *SharedActivityRequest
+	gateway  func() error
 }
 
 func (a declaredBackupActivity) validate() error {
 	h, err := a.Desired.Fingerprint()
-	if err != nil || a.Version != 1 || !safefs.ValidID(a.Operation, "n") || a.Desired.Backup == nil || h != a.DesiredHash || a.Disabled == config.WorkerEnabled(a.Desired.Backup.Enabled) || len(a.Units) == 0 {
+	if err != nil || (a.Version != 1 && a.Version != 2) || !safefs.ValidID(a.Operation, "n") || a.Desired.Backup == nil || h != a.DesiredHash || len(a.Units) == 0 {
 		return fmt.Errorf("invalid backup activity authority")
+	}
+	if a.Version == 1 {
+		if a.Shared != nil || a.Disabled == config.WorkerEnabled(a.Desired.Backup.Enabled) {
+			return fmt.Errorf("invalid standalone activity")
+		}
+	} else if a.CreatedAt == nil || a.CreatedAt.IsZero() || a.CreatedAt.Location() != time.UTC || a.Shared == nil || a.Shared.validate() != nil || a.Operation != a.Shared.Operation || a.Disabled != config.SharedActivityDisabled(a.Desired) {
+		return fmt.Errorf("invalid shared backup activity")
 	}
 	for _, h := range []string{a.Setup, a.Runtime, a.Helper, a.DesiredHash} {
 		if !safefs.DigestPattern.MatchString(h) {
@@ -132,8 +145,8 @@ func inspectBackupActivity(tx *sql.Tx, j WorkerSetupJournal, c WorkerInstallatio
 	if e != nil {
 		return e
 	}
-	if a.Runtime != notify.Hash(c) || a.Helper != j.Declaration.HelperSHA256 || !reflect.DeepEqual(a.Units, units) {
-		return fmt.Errorf("backup activity installation pins changed")
+	if a.Runtime != notify.Hash(c) || a.Helper != j.Declaration.HelperSHA256 || !reflect.DeepEqual(a.Units, units) && !sharedActivityCapturedReportUnits(tx, j, a, units) {
+		return fmt.Errorf("backup activity installation pins changed (runtime %t, helper %t, owned units %d, retained units %d)", a.Runtime == notify.Hash(c), a.Helper == j.Declaration.HelperSHA256, len(units), len(a.Units))
 	}
 	observed.DesiredHash = a.DesiredHash
 	if !a.Complete {
@@ -222,6 +235,12 @@ func reconcileDeclaredActivity(ctx context.Context, home string, desired config.
 		return out, err
 	}
 	disabled := !config.WorkerEnabled(desired.Backup.Enabled)
+	if deps.shared != nil {
+		if err = deps.shared.validate(); err != nil {
+			return out, err
+		}
+		disabled = config.SharedActivityDisabled(desired)
+	}
 	root, err := safefs.Open(home)
 	if err != nil {
 		return out, err
@@ -259,16 +278,20 @@ func reconcileDeclaredActivity(ctx context.Context, home string, desired config.
 			err = ActivityPendingError{Cause: err}
 		}
 	}()
-	if !disabled && j.Activity == nil {
+	if deps.shared == nil && !disabled && (j.Activity == nil || j.Activity.Version == 2 && j.Activity.Complete && !j.Activity.Disabled) {
 		return out, nil
 	}
 	if !disabled && j.Activity != nil && j.Activity.Complete && !j.Activity.Disabled && (j.Activity.Setup != j.RequestHash || j.Activity.DesiredHash != hash || j.Activity.Helper != helper) {
 		return out, nil
 	}
 	out.Handled = true
-	observed, err := inspectSetupLocked(ctx, root, home)
+	inspectSetup := deps.setup
+	if inspectSetup == nil {
+		inspectSetup = inspectSetupLocked
+	}
+	observed, err := inspectSetup(ctx, root, home)
 	if err != nil {
-		return out, err
+		return out, fmt.Errorf("inspect backup before activity: %w", err)
 	}
 	if j.Declaration == nil || j.Declaration.HelperSHA256 != helper || (observed.Stage != "complete" && observed.Stage != "activity_pending") || j.Declaration.Desired == nil || j.Updating || j.RecoveryNeeded {
 		return out, fmt.Errorf("backup activity requires unchanged completed declarative setup")
@@ -294,7 +317,7 @@ func reconcileDeclaredActivity(ctx context.Context, home string, desired config.
 	if err = readInstalledWorkerJSON(root, &c); err != nil {
 		return out, err
 	}
-	if c.Policy.Notifications.Mode == "shared" || j.Producer != nil || j.Shared != nil || j.Declaration.NotificationRoot != "" {
+	if deps.shared == nil && (c.Policy.Notifications.Mode == "shared" || j.Producer != nil || j.Shared != nil || j.Declaration.NotificationRoot != "") {
 		return out, fmt.Errorf("shared backup activity requires coordinated producer fencing")
 	}
 	s, err := openInstalledBackupState(home, false)
@@ -305,7 +328,14 @@ func reconcileDeclaredActivity(ctx context.Context, home string, desired config.
 	if err = requireNoPendingDeclaredActivation(s); err != nil {
 		return out, err
 	}
-	if owner, e := currentSharedBackupOwner(s); e != nil || owner != nil {
+	if deps.shared != nil {
+		if c.Policy.Notifications.Mode != "shared" || j.Declaration.NotificationRoot != deps.shared.GatewayRoot || j.NotificationScope != nil || j.SourceExpansion != nil || j.SourceRetirement != nil {
+			return out, fmt.Errorf("shared activity requires unchanged completed shared setup")
+		}
+		if err = reviewSharedActivityOwner(s, j); err != nil {
+			return out, err
+		}
+	} else if owner, e := currentSharedBackupOwner(s); e != nil || owner != nil {
 		return out, fmt.Errorf("backup notification ownership requires activity migration")
 	}
 	units, err := backupActivityUnits(j)
@@ -314,6 +344,12 @@ func reconcileDeclaredActivity(ctx context.Context, home string, desired config.
 	}
 	a := j.Activity
 	retry := a != nil && a.Setup == j.RequestHash && a.DesiredHash == hash
+	if retry && (deps.shared == nil) != (a.Shared == nil) {
+		return out, fmt.Errorf("activity family changed")
+	}
+	if retry && deps.shared != nil && !reflect.DeepEqual(a.Shared, deps.shared) {
+		return out, fmt.Errorf("shared activity operation changed")
+	}
 	if !retry {
 		if a != nil && !a.Complete {
 			return out, fmt.Errorf("resume pending backup activity with its original YAML")
@@ -322,22 +358,31 @@ func reconcileDeclaredActivity(ctx context.Context, home string, desired config.
 		if before == nil || before.Backup == nil {
 			return out, fmt.Errorf("backup activity policy history missing")
 		}
-		next := *before
-		b := *before.Backup
-		next.Backup = &b
-		b.Enabled = desired.Backup.Enabled
-		nextHash, e := next.Fingerprint()
-		if e != nil || nextHash != hash || config.WorkerEnabled(before.Backup.Enabled) == !disabled {
-			return out, fmt.Errorf("apply backup_worker.enabled separately from other policy changes")
-		}
-		if !disabled && (a == nil || !a.Complete || !a.Disabled || a.Setup != j.RequestHash) {
-			return out, fmt.Errorf("re-enable requires retained YAML disable authority")
+		if deps.shared != nil {
+			if e := config.ValidateSharedActivityDeclaration(*before, desired); e != nil {
+				return out, e
+			}
+			if !disabled && (a == nil || a.Version != 2 || !a.Complete || !a.Disabled || a.Setup != j.RequestHash) {
+				return out, fmt.Errorf("shared restoration requires retained YAML disable authority")
+			}
+		} else {
+			next := *before
+			b := *before.Backup
+			next.Backup = &b
+			b.Enabled = desired.Backup.Enabled
+			nextHash, e := next.Fingerprint()
+			if e != nil || nextHash != hash || config.WorkerEnabled(before.Backup.Enabled) == !disabled {
+				return out, fmt.Errorf("apply backup_worker.enabled separately from other policy changes")
+			}
+			if !disabled && (a == nil || !a.Complete || !a.Disabled || a.Setup != j.RequestHash) {
+				return out, fmt.Errorf("re-enable requires retained YAML disable authority")
+			}
 		}
 		var mode string
 		if err = s.get("mode", &mode); err != nil {
 			return out, err
 		}
-		if disabled && mode != "writer" || !disabled && mode != "maintenance" {
+		if (a == nil || !a.Disabled) && mode != "writer" || a != nil && a.Disabled && mode != "maintenance" {
 			return out, fmt.Errorf("backup execution mode requires recovery before activity change")
 		}
 		// Preflight the entire owned set before retaining a new stop intent.
@@ -348,7 +393,16 @@ func reconcileDeclaredActivity(ctx context.Context, home string, desired config.
 		if e != nil {
 			return out, e
 		}
+		if deps.shared != nil {
+			id = deps.shared.Operation
+		}
 		nextActivity := declaredBackupActivity{Version: 1, Operation: id, Setup: j.RequestHash, Runtime: notify.Hash(c), Helper: helper, DesiredHash: hash, Desired: desired, Disabled: disabled, Units: units}
+		if deps.shared != nil {
+			created := time.Now().UTC()
+			nextActivity.CreatedAt = &created
+			nextActivity.Version = 2
+			nextActivity.Shared = deps.shared
+		}
 		if a != nil {
 			nextActivity.Previous = notify.Hash(*a)
 			if err = root.Mkdir(".local/state/deploy/backup-worker/activity-history"); err != nil {
@@ -413,6 +467,11 @@ func reconcileDeclaredActivity(ctx context.Context, home string, desired config.
 		return ActivityResult{Handled: true, State: activityInstallation(disabled)}, nil
 	}
 	if err = backupTransferTx(ctx, s, func(tx *sql.Tx) error {
+		if a.Version == 2 {
+			if e := storeBackupEvaluationMeta(tx, "shared_activity_required", true); e != nil {
+				return e
+			}
+		}
 		if e := storeBackupEvaluationMeta(tx, "declared_activity", *a); e != nil {
 			return e
 		}
@@ -441,6 +500,16 @@ func reconcileDeclaredActivity(ctx context.Context, home string, desired config.
 	}
 	if deps.boundary != nil {
 		if err = deps.boundary("stopped"); err != nil {
+			return out, err
+		}
+	}
+	if deps.gateway != nil {
+		if err = deps.gateway(); err != nil {
+			return out, err
+		}
+	}
+	if deps.boundary != nil {
+		if err = deps.boundary("gateway"); err != nil {
 			return out, err
 		}
 	}
@@ -499,6 +568,10 @@ func requireBackupActivityReady(s *backupState) error {
 	var a declaredBackupActivity
 	err := s.get("declared_activity", &a)
 	if err == sql.ErrNoRows {
+		var required bool
+		if e := s.get("shared_activity_required", &required); e != sql.ErrNoRows {
+			return fmt.Errorf("shared backup activity fence disappeared")
+		}
 		return nil
 	}
 	if err != nil {

@@ -143,8 +143,28 @@ back to `true` and apply to return to staged mode. Timers stay disabled until
 current qualification, a successful manual backup and explicit
 `deploy backup-worker activate manager`. Interrupted activity uses the same
 `resume manager` command and YAML; it does not repeat a confirmed stop.
-Bound gateways and shared backups still require their coordinated activity
-workflow. Do not combine an activity switch with other policy edits.
+For an unrecovered shared gateway and its local backup, changing any of
+`notification_worker.enabled`, `backup_worker.enabled` or
+`backup_worker.notifications.enabled` to `false` stops backup capture and reporting
+before pausing gateway delivery. The gateway service is removed only when its own
+`enabled` is false. Apply either worker. Queues, archives, source keys, the original
+reporting owner and handoff, command history and native Signal service remain.
+Owned LED output is cleared while preserving bindings, incidents and foreign
+clients. Set `commands.enabled: false` and apply separately before activity,
+including any unadmitted command-enable request.
+
+Restore all three activity controls and apply either worker to start verification.
+Record new observations with `deploy notification-worker qualify manager`, then
+apply again to resume shared delivery and reports. Commands stay disabled until
+explicitly enabled. Backup timers stay stopped until separate backup qualification,
+a new successful manual backup and `deploy backup-worker activate manager`.
+Repeat apply/resume with the exact retained YAML after an interruption; no new
+provider, producer or command authority is inferred. Explicit uninstall is not a
+shared activity receipt. Recovered activity awaits its recovery-aware workflow.
+A stop needs the existing user manager and matching helpers; it does not enroll
+sources, require a new backup image or require lingering. Restoration retains its
+normal activation prerequisites. Do not combine an activity switch with other
+policy edits.
 
 The schema reference and current limitations are in
 [worker configuration reference](../reference/worker-configuration.md).
@@ -325,8 +345,30 @@ the producer identity, source keys and backup runtime. With the default producer
 its route permission changes too, so pending messages must settle first. With an
 explicit producer declaration, grant the route in its `routes` list first; selecting
 an already allowed route records the reporting choice without restarting the
-gateway. Qualification and activation remain separate. Activated and recovered
-installations still require their migration workflows.
+gateway. Qualification and activation remain separate. Recovered installations still require their migration workflow. The production
+workflow below also supports already delivering gateways.
+
+For an already delivering, unrecovered gateway, change only
+`backup_worker.notifications.route` to an already applied route, then plan and
+apply either worker. If the producer is explicit, grant that route in a separate
+producer-policy apply first. Settle frozen backup reports before selection. With
+the default producer, settle delivery messages too; the changed route permission
+pauses delivery for notification qualification. If explicit permission already
+allows the route, selection retains the exact runtime and qualification.
+Reporting triggers are fenced during publication. New reports use the selected
+route; frozen messages keep their original routes. The original handoff and
+producer identity stay fixed.
+
+An unrecovered Telegram-only gateway with admitted commands also supports route
+changes and report selection. Disable commands in YAML and apply first. Change
+only `notification_worker.routes` or only the backup report-route selection in
+one apply; declare/apply a destination route and any explicit producer permission
+before selecting it. Route definitions must retain the backup report route and
+producer permissions and require settled delivery messages. They do not change
+the command bot, actors or reply destinations. Queued commands, saved results and
+replies remain retained. Qualify and apply after an effective runtime change,
+then explicitly enable commands in YAML when wanted. Both workers' ordinary
+apply/resume/status/plan commands remain available.
 
 The same pre-activation workflow accepts the existing producer's explicit queue
 quota, requiredness, allowed routes, policy-health setting and context capabilities.
@@ -344,14 +386,35 @@ settle first; the active backup reporting route must remain allowed. The origina
 producer identity, delivery owner, native Signal service and LED disposition stay
 in place. Reporting is fenced while both workers record the revised policy.
 Resume an interrupted apply with the same YAML. Qualification covers the changed
-configuration; it does not refresh old observations. Recovered gateways,
-command-bearing gateways remain separate workflows.
+configuration; it does not refresh old observations. Recovered gateways and Signal command migrations remain separate workflows.
+
+An unrecovered Telegram-only gateway with admitted backup commands can change
+`notification_worker.producers.backup-worker` policy for its existing producer:
+
+1. Disable command intake in YAML and apply, keeping its other policy declared.
+2. Edit only producer policy, then plan and apply the notification worker.
+3. Qualify the revised notification runtime and apply again to resume delivery.
+4. Enable commands in YAML and apply separately when intake is wanted.
+
+Supported settings are message quota, requiredness, allowed routes, policy health,
+context capabilities and heartbeat/evidence timing. The backup report route must
+remain allowed. Quota reductions must fit retained messages; access-policy changes
+require settled delivery messages. Queued commands, saved results/replies, reduced
+receiver permissions, original observations, reporting ownership and LED state
+remain. Context settings cannot grant new receiver rights or subject access.
+Both read and mutation modes support repeated changes, explicit/default producer
+declarations, completed budget changes and independent qualification renewals.
+Both installed helpers must support the migration before delivery can pause.
+Resume an interrupted operation with its exact YAML. Recovered gateways, Signal
+command migrations, new identities, providers and audiences remain separate work.
 
 If an explicit producer declaration exactly matches the current derived policy,
 apply records the declaration in both workers without restarting delivery,
 changing observations, draining the queue or renewing qualification. Removing
 that explicit declaration works the same way when the derived defaults still
-match. `plan` identifies this case. Normalized budget and single-provider route
+match. This also works with admitted Telegram commands after disabling intake
+and applying; it retains the exact command head and receiver. `plan` identifies
+this case. Normalized budget and single-provider route
 defaults already compare equal to their omitted forms. A later effective change
 still follows its pause/qualify/apply workflow.
 
@@ -373,8 +436,13 @@ timing separately. On an unrecovered, command-free gateway with active delivery,
 the same apply also pauses delivery and stages backup capture. Qualify the
 notification worker and apply to resume delivery; complete backup qualification
 and activate separately to restart scheduled capture. Reporting keeps its original
-owner, and unchanged owned Signal and LED settings are retained. Recovered and
-command-bearing installations still need their separate migration workflows.
+owner, and unchanged owned Signal and LED settings are retained. For an unrecovered Telegram-only gateway with admitted commands, disable intake
+and apply first, then change only derived backup freshness through either worker.
+The same transaction stages capture, publishes both backup runtimes and the
+archive checkpoint, and retains the exact receiver, reduced rights, original
+observations and saved results/replies. Notification qualification and backup
+capture qualification/activation remain separate; re-enable commands explicitly
+after delivery resumes. Recovered and Signal command migrations remain pending.
 
 When both workers are declared on the same server, `backup-worker manager`
 reserves the backup producer before source enrollment, applies the notification
@@ -800,9 +868,8 @@ all previous file exclusions. Both installed helpers must support this workflow;
 a helper mismatch is refused before pausing. When Signal is also configured, its
 account, recipient, native artifact, service and inbox stay unchanged. An explicit
 resume can restart its intact stopped service; apply never relinks the account.
-Changed native inputs or damaged rotation records block that restart. Command
-intake, recovered installations and Signal account changes remain separate
-workflows. An explicit `account` or `bot_name` remains a constraint on the selected
+Changed native inputs or damaged rotation records block that restart. Recovered
+installations and Signal account changes remain separate workflows. An explicit `account` or `bot_name` remains a constraint on the selected
 Telegram token; changing those declarations requires its own workflow.
 
 An owned Signal gateway can add or remove its direct Telegram alert profile before
@@ -833,6 +900,38 @@ then remove the provider block in a separate apply. Both changes require a settl
 queue. Reporting, original delivery ownership, LED disposition and every retained
 credential-file exclusion remain. Recovered gateways and explicit account/name
 or command declarations still need their separate workflows.
+
+For a Telegram-only gateway with admitted commands, disable intake and apply it
+separately before changing provider references. Keep the admitted bot account and
+name. Same-bot/same-chat rotations retain queued delivery; a different fixed alert
+chat requires settled delivery messages. The original command conversations,
+cursor, receiver, permission reductions and saved replies remain. Apply the new
+private references, qualify, then apply again. Re-enable commands explicitly in a
+later apply. Changing the alert chat does not redirect command replies. Removing
+the admitted profile, changing account/name or selecting another bot/audience
+requires its separate admission and reply-disposition workflow.
+
+## Owned Signal recipient and reference changes
+
+For an existing owned direct Signal gateway with the local backup producer,
+select new private `account_file` and `recipient_file` paths. Retain the exact
+account-file bytes and all native account, service, socket and executable settings.
+Keep the old files. A recipient change requires settled delivery messages; a
+same-destination reference rotation retains queued delivery.
+
+Run `deploy notification-worker plan manager`, apply the notification worker,
+record real qualification observations, then apply it again. Before production
+activation, apply updates the staged runtime; production changes pause delivery
+for fresh qualification. Both workers subsequently use the retained selection.
+The report service excludes the original and selected private files throughout
+history. The native relay uses an immutable recipient approval while retaining
+its original account, inbox, link, service and running process. Explicit resume
+can repair that same stopped service after checking all retained proofs.
+
+Resume an interruption with the exact YAML and files. Changed file bytes, missing
+approval records or unsupported gateway/helper/native executables stop the update.
+These changes do not enroll Signal commands or replace/relink an account. Native
+account/service/artifact replacement and recovered variants use separate workflows.
 
 ## Standalone Telegram credential updates
 

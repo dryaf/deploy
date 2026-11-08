@@ -49,7 +49,7 @@ func qualifyNotificationControl(ctx context.Context, r ControlRequest, paths Res
 	if validateOperationJournal(record) != nil || !record.Complete || record.Pins.Action != "apply" || record.Pins.DesiredHash != r.DesiredHash || record.Pins.UID != r.Facts.UID || record.Pins.Home != r.Facts.Home || record.Pins.Artifacts["helper"] != r.HelperSHA256 || record.Pins.Installations["notification-worker"] != paths.Installation || !enrolledNotificationJournal(record) {
 		return result, fmt.Errorf("qualification requires the unchanged completed consumer enrollment in verification mode")
 	}
-	if r.Desired.Notification.StatusLEDs.Enabled && len(r.Desired.Notification.StatusLEDs.Bindings) != 0 && !mappingJournal(record) && !enrolledOutputJournal(record) && !sharedLimitsJournal(record) && !requalificationJournal(record) && !commandPauseJournal(record) && !deliveryProviderJournal(record) {
+	if r.Desired.Notification.StatusLEDs.Enabled && len(r.Desired.Notification.StatusLEDs.Bindings) != 0 && !mappingJournal(record) && !enrolledOutputJournal(record) && !sharedLimitsJournal(record) && !requalificationJournal(record) && !commandPauseJournal(record) && !deliveryProviderJournal(record) && !sharedActivityJournal(record) {
 		return result, fmt.Errorf("apply the declared LED bindings before qualification")
 	}
 	if sharedLimitsJournal(record) {
@@ -134,7 +134,7 @@ func (c CLI) qualifyWorker(ctx context.Context, kind string, v Invocation, inv c
 			}
 		}
 	}
-	if kind == "backup-worker" && (r.Desired.Backup.Notifications.Worker == "" || !config.WorkerEnabled(r.Desired.Backup.Notifications.Enabled)) {
+	if kind == "backup-worker" && (r.Desired.Backup.Notifications.Worker == "") {
 		r.Desired.Notification = nil
 	}
 	if kind == "backup-worker" {

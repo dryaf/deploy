@@ -57,7 +57,7 @@ func DeclarationPlan(inv config.ServerInventory, kind, alias, operation string) 
 		if d.Backup == nil {
 			return omittedDeclarationPlan(p, d)
 		}
-		if d.Backup.Notifications.Worker == "" || !config.WorkerEnabled(d.Backup.Enabled) || !config.WorkerEnabled(d.Backup.Notifications.Enabled) {
+		if d.Backup.Notifications.Worker == "" {
 			d.Notification = nil
 		}
 		if !config.WorkerEnabled(d.Backup.Enabled) {
@@ -168,6 +168,7 @@ func ResolvePlan(p Plan, s config.ServerConfig, f TargetFacts, defaultCatalog st
 		p.Missing = append(p.Missing, "target.user_manager")
 	}
 	disabling := p.Worker == "notification-worker" && !config.WorkerEnabled(s.Desired.Notification.Enabled) || p.Worker == "backup-worker" && !config.WorkerEnabled(s.Desired.Backup.Enabled)
+	disabling = disabling || sharedActivityStopping(*s.Desired, p.Server)
 	if !f.Linger && !disabling {
 		p.Missing = append(p.Missing, "target.linger")
 	}

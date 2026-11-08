@@ -21,7 +21,37 @@ func defaultDeliveryLimits(helper string) deliveryProviderLifecycle {
 	return l
 }
 func deliveryProviderKind(j OperationJournal) string {
-	if commandLimitsJournal(j) {
+	if len(j.Children) == 1 {
+		switch j.Children[0].Name {
+		case "notification-command-provider":
+			return "command-provider"
+		case "notification-command-destination":
+			return "command-destination"
+		case "notification-command-routes":
+			return "command-routes"
+		case "notification-command-derived-freshness":
+			return "command-derived-freshness"
+		case "notification-command-report-route":
+			return "command-report-route"
+		case "notification-command-report-route-declaration":
+			return "command-report-route-declaration"
+		case "notification-delivery-report-route":
+			return "report-route"
+		case "notification-delivery-report-route-declaration":
+			return "report-route-declaration"
+		}
+	}
+
+	if commandDeclarationJournal(j) {
+		return "command-declaration"
+	}
+	if commandDeliveryPolicyJournal(j) && j.Children[0].Name == "notification-command-producer" {
+		return "command-producer"
+	}
+	if commandDeliveryPolicyJournal(j) && j.Children[0].Name == "notification-command-freshness" {
+		return "command-freshness"
+	}
+	if commandDeliveryPolicyJournal(j) {
 		return "command-limits"
 	}
 	if deliveryProviderJournal(j) && j.Children[0].Name == "notification-delivery-derived-freshness" {
@@ -53,6 +83,21 @@ func validateDeliveryPolicyDeclaration(before, after config.DesiredWorkers, kind
 	if err != nil {
 		return err
 	}
+	if commandProviderPolicy(kind) {
+		return config.ValidateCommandDeliveryProviderDeclaration(before, after)
+	}
+	if kind == "command-derived-freshness" {
+		return config.ValidateCommandDerivedFreshnessDeclaration(before, after)
+	}
+	if kind == "command-routes" {
+		return config.ValidateCommandDeliveryRoutesDeclaration(before, after)
+	}
+	if reportRoutePolicy(kind) {
+		if isCommandDeliveryPolicy(kind) {
+			return config.ValidateCommandDeliveryReportRouteDeclaration(before, after)
+		}
+		return config.ValidateDeliveryReportRouteDeclaration(before, after)
+	}
 	if kind == "derived-freshness" {
 		return config.ValidateDerivedFreshnessDeclaration(before, after)
 	}
@@ -65,8 +110,14 @@ func validateDeliveryPolicyDeclaration(before, after config.DesiredWorkers, kind
 	if kind == "routes" {
 		return config.ValidateDeliveryRoutesDeclaration(before, after)
 	}
+	if kind == "command-producer" || kind == "command-declaration" {
+		return config.ValidateCommandDeliveryProducerDeclaration(before, after)
+	}
 	if kind == "producer" {
 		return config.ValidateDeliveryProducerDeclaration(before, after)
+	}
+	if kind == "command-freshness" {
+		return config.ValidateCommandDeliveryFreshnessDeclaration(before, after)
 	}
 	if kind == "limits" || kind == "command-limits" {
 		return config.ValidateDeliveryLimitsDeclaration(before, after)
@@ -177,11 +228,14 @@ func defaultDeliveryDeclaration(helper string) deliveryProviderLifecycle {
 }
 
 func deliveryDeclarationJournal(j OperationJournal) bool {
-	return deliveryProviderJournal(j) && j.Children[0].Name == "notification-delivery-declaration"
+	return deliveryProviderJournal(j) && isDeliveryDeclaration(deliveryProviderKind(j))
 }
 
 func reviewDeliveryDeclarationRuntime(r ControlRequest, p ResolvedPaths, d *safefs.Directory, j OperationJournal) (bool, error) {
-	origin, err := requalificationEnrollment(d, j)
+	return reviewPolicyDeclarationRuntime(r, p, d, j, "declaration")
+}
+func reviewPolicyDeclarationRuntime(r ControlRequest, p ResolvedPaths, d *safefs.Directory, j OperationJournal, kind string) (bool, error) {
+	origin, err := deliveryPolicyRuntimeOrigin(d, j, kind)
 	if err != nil {
 		return false, err
 	}
@@ -197,7 +251,11 @@ func reviewDeliveryDeclarationRuntime(r ControlRequest, p ResolvedPaths, d *safe
 	if err = d.ReadJSON("consumer-enrollment.json", &enrollment); err != nil {
 		return false, err
 	}
-	compiled, _, _, err := compileDeliveryLimits(r, p, d, j, input, raw, enrollment.Reservation)
+	compile := compileDeliveryLimits
+	if isCommandDeliveryPolicy(kind) {
+		compile = compileCommandDeliveryProducer
+	}
+	compiled, _, _, err := compile(r, p, d, j, input, raw, enrollment.Reservation)
 	if err != nil {
 		return false, err
 	}

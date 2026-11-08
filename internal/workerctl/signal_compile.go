@@ -1,6 +1,7 @@
 package workerctl
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -32,13 +33,27 @@ func CompileFreshSignalNotification(d config.DesiredWorkers, paths ResolvedPaths
 	if socket == "" {
 		socket = filepath.Join(service.Spec.Root, "api.sock")
 	}
-	if resolved.Account != service.Spec.AccountState || resolved.Inbox != service.Spec.Inbox.State || resolved.Service != service.Spec.Root || resolved.Socket != socket || resolved.AccountFile != service.Spec.AccountFile || resolved.RecipientFile != service.Spec.RecipientFile {
+	if resolved.Account != service.Spec.AccountState || resolved.Inbox != service.Spec.Inbox.State || resolved.Service != service.Spec.Root || resolved.Socket != socket {
 		return zero, fmt.Errorf("fresh Signal service paths differ from declaration")
 	}
-	if inputDigest(secrets["signal_account"]) != service.Spec.AccountSHA256 || inputDigest(secrets["signal_recipient"]) != service.Spec.RecipientSHA256 {
-		return zero, fmt.Errorf("Signal private inputs differ from owned service")
+	var approval *provider.SignalDelivery
+	if resolved.AccountFile != service.Spec.AccountFile || resolved.RecipientFile != service.Spec.RecipientFile || inputDigest(secrets["signal_account"]) != service.Spec.AccountSHA256 || inputDigest(secrets["signal_recipient"]) != service.Spec.RecipientSHA256 {
+		approval = &provider.SignalDelivery{ServiceHash: service.ManifestHash, AccountFile: resolved.AccountFile, AccountHash: inputDigest(secrets["signal_account"]), RecipientFile: resolved.RecipientFile, RecipientHash: inputDigest(secrets["signal_recipient"])}
+		a, r, err := approval.Values()
+		if err != nil {
+			return zero, err
+		}
+		if err = install.InspectFreshSignalDeliveryReferences(context.Background(), install.FreshSignalReference{Root: service.Spec.Root, ManifestHash: service.ManifestHash}, *approval, relay.Destination(a, r)); err != nil {
+			return zero, err
+		}
 	}
-	return compileDirectSignalNotification(d, paths, home, secrets, resolved)
+	input, err := compileDirectSignalNotification(d, paths, home, secrets, resolved)
+	if err == nil {
+		p := input.Providers["signal"]
+		p.SignalDelivery = approval
+		input.Providers["signal"] = p
+	}
+	return input, err
 }
 
 func compileDirectSignalNotification(d config.DesiredWorkers, paths ResolvedPaths, home string, secrets map[string][]byte, resolved ResolvedSignalPaths) (install.RuntimeInput, error) {

@@ -1,7 +1,7 @@
 # Roadmap
 
-Updated 2026-11-07. This is the current list of unfinished work. Implementation
-is paused at the user’s request. [Progress checkpoint](../progress.md) records
+Updated 2026-11-08. This is the current list of unfinished work. Implementation
+resumed after the step-49 checkpoint. [Progress checkpoint](../progress.md) records
 the integrated source, isolated work in progress, test evidence and resume steps.
 Lasting behavior belongs in user guides and design references.
 
@@ -405,15 +405,59 @@ scope. A configurable field is not a promise that every live change is supported
     limits update derived producer message limits; command queue budgets remain
     separate. Re-enable intake explicitly in YAML and apply afterward.
 
-Step 49 is integrated and its regular tests and vet passed. Work is paused at the
-user's request after this step. The [progress checkpoint](../progress.md) records
-the final source and evidence; race and live qualification remain deferred.
+50. **Producer timing with disabled commands:** unrecovered Telegram gateways
+    with admitted local backup commands can change heartbeat/evidence thresholds
+    in an existing explicit backup producer declaration. Disable intake and apply,
+    then change only timing, apply, qualify and apply again. Original observations,
+    receiver permission restrictions, reporting ownership, queued work, saved
+    results/replies and LED disposition remain. Read and mutation modes support
+    repeated updates, exact retries and alternating completed budget changes.
+    New producer declarations, other producer-policy changes, recovered gateways
+    and Signal command intake remain separate work.
+
+51. **Producer policy with disabled commands (SC2):** unrecovered Telegram-only
+    gateways with admitted backup commands support the existing producer's quota,
+    requiredness, allowed routes, health and context capabilities, plus explicit
+    or derived declarations. Disable intake and apply first. Effective updates
+    pause delivery for qualification; equivalent declarations retain the runtime
+    and qualification. Capacity and settled-delivery-queue guards protect retained
+    work; original receiver restrictions, results, observations, reporting and LED
+    ownership remain. Re-enable intake explicitly afterward.
+
+52. **Routing and derived freshness (SC3):** unrecovered Telegram command gateways
+    support route-only edits with intake disabled and delivery messages settled.
+    Unrecovered gateways can select an applied backup report route through either
+    worker; explicit permission already allowing it retains runtime/qualification,
+    while default permission changes need qualification. Frozen reports must
+    settle. The original handoff and receiver remain; only new reports take the
+    selected route. Derived backup freshness also works with disabled commands,
+    staging capture and publishing both backup runtimes/archive evidence before
+    separate notification and backup qualification.
+
+53. **Provider references and destinations (SC4):** disabled Telegram command
+    gateways can rotate same-bot references or change fixed alert destinations,
+    retaining receiver/cursor/results/replies, reporting and LED ownership. Owned
+    direct Signal gateways can select same-account references or recipients while
+    retaining native link/account/inbox/service/artifacts. Production changes
+    pause for qualification; old/new files and immutable approvals remain pinned.
+    Provider retirement and new command authority keep their own admission proofs.
+
+54. **Shared activity (SC5):** both workers coordinate shared gateway, backup and
+    reporting enable controls. Capture and reports stop before gateway pause/removal;
+    queues, command history, source keys, original reporting owner, native Signal
+    service and LED ownership remain. Restoration requires fresh notification
+    qualification; backup qualification, a new manual run and activation stay separate.
+
+Step 54 is integrated. SC5 verification and SC4 verification and the earlier checks are scoped
+in the checkpoint. The [progress checkpoint](../progress.md)
+records the exact check scope and evidence; the full milestone gate, race tests
+and live qualification remain pending.
 
 ## Next: finish ordinary YAML workflows
 
 | Work remaining | Completion means |
 | --- | --- |
-| Shared configuration changes | Policy, provider/destination, freshness and activity changes coordinate the gateway and backup worker while preserving pending work and delivery ownership. |
+| Shared configuration changes | Policy, provider/destination, freshness and activity changes coordinate the gateway and backup worker while preserving pending work and delivery ownership. [Detailed matrix and SC6–SC8 plan](plans/shared-configuration.md); SC1–SC5 planning, producer policy, routing, report selection, derived freshness, bounded provider changes and shared activity are implemented. Recovered and composition workflows remain pending; new command authority and native account/service lifetime changes retain their own workstreams. |
 | Source identity reuse | Reusing retired aliases or source identities has an explicit migration/disposition workflow with archives and history retained. Combined replacement with new aliases and separate add-then-retire are supported. |
 | Command changes | Initial command enrollment on an already activated command-free installation, new permission/scope authority and new/redirected audiences on activated installations work through short commands; receiver capability upgrades, recovered/legacy qualification, Signal intake and interactive alert destinations have their own admission checks. |
 | Production LED changes | Mapping changes, daemon/device replacement and recovered installations work after activation and preserve unresolved incidents and other clients' output. Qualified output-only toggles are supported. |

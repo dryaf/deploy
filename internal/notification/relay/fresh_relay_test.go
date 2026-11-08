@@ -65,7 +65,16 @@ func main(){if len(os.Args)==2 && os.Args[1]=="--version" {fmt.Println("signal-c
 	testutil.Must(t, os.WriteFile(recipient, []byte(fixtureActor), 0600))
 	c := Config{StateDir: accountPath, Socket: filepath.Join(short, "api.sock"), AccountFile: selector, RecipientFile: recipient}
 	var sends atomic.Int32
-	execution := FreshExecution{Account: account, Inbox: inbox, Check: func(context.Context) error { return check() }, Health: func(context.Context) (any, error) { return map[string]bool{"synthetic": true}, check() }, Command: func(_ context.Context, lease *os.File, out io.Writer, args ...string) error {
+	var approved atomic.Bool
+	approved.Store(true)
+	const revisedRecipient = "33333333-3333-4333-8333-333333333333"
+	var lastRecipient atomic.Value
+	execution := FreshExecution{Recipient: func(_ context.Context, hash, destination string) (string, error) {
+		if approved.Load() && hash == strings.Repeat("c", 64) && destination == Destination("+10000000000", revisedRecipient) {
+			return revisedRecipient, nil
+		}
+		return "", fmt.Errorf("unapproved recipient")
+	}, Account: account, Inbox: inbox, Check: func(context.Context) error { return check() }, Health: func(context.Context) (any, error) { return map[string]bool{"synthetic": true}, check() }, Command: func(_ context.Context, lease *os.File, out io.Writer, args ...string) error {
 		if lease == nil {
 			return fmt.Errorf("command lost account lease")
 		}
@@ -79,6 +88,7 @@ func main(){if len(os.Args)==2 && os.Args[1]=="--version" {fmt.Println("signal-c
 			return err
 		case strings.Contains(joined, " send "):
 			sends.Add(1)
+			lastRecipient.Store(args[len(args)-1])
 			return nil
 		}
 		return fmt.Errorf("unexpected synthetic command")
@@ -126,6 +136,29 @@ func main(){if len(os.Args)==2 && os.Args[1]=="--version" {fmt.Println("signal-c
 	}
 	if sends.Load() != 1 {
 		t.Fatal("unmatched destination executed CLI")
+	}
+	for _, test := range []struct {
+		hash, destination string
+		want              int
+	}{{strings.Repeat("c", 64), Destination("+10000000000", revisedRecipient), 200}, {strings.Repeat("d", 64), Destination("+10000000000", revisedRecipient), 409}, {strings.Repeat("c", 64), Destination("+10000000000", fixtureActor), 409}} {
+		body := fmt.Sprintf(`{"id":"revised","message":"synthetic message","policy":%q,"destination":%q}`, test.hash, test.destination)
+		response, err := client.Post("http://localhost/send", "application/json", strings.NewReader(body))
+		testutil.Must(t, err)
+		response.Body.Close()
+		if response.StatusCode != test.want {
+			t.Fatal("recipient approval failed", response.StatusCode)
+		}
+	}
+	if sends.Load() != 2 || lastRecipient.Load() != revisedRecipient {
+		t.Fatal("relay did not use exact approved recipient")
+	}
+	approved.Store(false)
+	body := fmt.Sprintf(`{"id":"lost-approval","message":"synthetic message","policy":%q,"destination":%q}`, strings.Repeat("c", 64), Destination("+10000000000", revisedRecipient))
+	response, err := client.Post("http://localhost/send", "application/json", strings.NewReader(body))
+	testutil.Must(t, err)
+	response.Body.Close()
+	if response.StatusCode != 409 || sends.Load() != 2 {
+		t.Fatal("lost approval executed delivery")
 	}
 	admitted.Store(false)
 	if response, e := client.Get("http://localhost/health"); e == nil {

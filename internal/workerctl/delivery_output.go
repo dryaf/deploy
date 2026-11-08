@@ -37,7 +37,7 @@ func deliveryOutputJournal(j OperationJournal) bool {
 	return j.Pins.Action == "apply" && len(j.Children) == 1 && j.Children[0].Name == "notification-delivery-led-output"
 }
 func admittedCommandHistory(j OperationJournal) bool {
-	return commandDeliveryJournal(j) || commandJournal(j) || commandActivityJournal(j) || deliveryOutputJournal(j) && j.Pins.Artifacts["command-qualification"] != ""
+	return sharedActivityJournal(j) && j.Pins.Artifacts["command-qualification"] != "" || commandDeclarationJournal(j) || commandDeliveryJournal(j) || commandJournal(j) || commandActivityJournal(j) || deliveryOutputJournal(j) && j.Pins.Artifacts["command-qualification"] != ""
 }
 func deliveryOutputCandidate(j OperationJournal) bool {
 	return admittedCommandHistory(j) || deliveryDeclarationJournal(j) || deliveryOutputJournal(j) || j.Pins.Action == "apply" && len(j.Children) == 1 && j.Children[0].Name == "notification-delivery"

@@ -11,29 +11,29 @@ import (
 	"github.com/dryaf/deploy/internal/safefs"
 )
 
-func commandLimitsJournal(j OperationJournal) bool {
-	return j.Pins.Action == "apply" && len(j.Children) == 1 && j.Children[0].Name == "notification-command-limits"
+func commandDeliveryPolicyJournal(j OperationJournal) bool {
+	return j.Pins.Action == "apply" && len(j.Children) == 1 && (j.Children[0].Name == "notification-command-provider" || j.Children[0].Name == "notification-command-destination" || j.Children[0].Name == "notification-command-routes" || j.Children[0].Name == "notification-command-derived-freshness" || j.Children[0].Name == "notification-command-report-route" || j.Children[0].Name == "notification-command-producer" || j.Children[0].Name == "notification-command-limits" || j.Children[0].Name == "notification-command-freshness")
 }
 func deliveryPolicyCandidate(j OperationJournal, kind string) bool {
-	if kind == "command-limits" {
+	if isCommandDeliveryPolicy(kind) {
 		return admittedCommandHistory(j)
 	}
 	return requalificationCandidate(j)
 }
 func validateDeliveryPolicyBefore(m install.ManagedManifest, kind string) error {
-	if kind == "command-limits" {
+	if isCommandDeliveryPolicy(kind) {
 		return validateCommandRequalificationBefore(m)
 	}
 	return validateRequalificationBefore(m)
 }
 func validateDeliveryPolicyPause(b, a install.ManagedManifest, kind string) error {
-	if kind == "command-limits" {
+	if isCommandDeliveryPolicy(kind) {
 		return validateCommandRequalificationManifest(b, a)
 	}
 	return validateRequalificationManifest(b, a)
 }
 func readDeliveryPolicyDeclaration(d *safefs.Directory, j OperationJournal, kind string) (config.DesiredWorkers, error) {
-	if kind == "command-limits" {
+	if isCommandDeliveryPolicy(kind) {
 		return readCommandDeclaration(d, j)
 	}
 	return readDeclaration(d, j.Pins.DesiredHash, j.Pins.DesiredScope)
@@ -50,6 +50,7 @@ func defaultCommandDeliveryLimits(helper string) deliveryProviderLifecycle {
 		}
 		return nil
 	}
+	l.scopeInspect = backup.InspectRetainedCommandPolicyScope
 	l.commandReceiver = func(ctx context.Context, d *safefs.Directory, j OperationJournal) error {
 		_, err := retainedCommandReceiver(ctx, d, j, defaultNotificationCommands())
 		return err
@@ -60,13 +61,13 @@ func defaultCommandDeliveryLimits(helper string) deliveryProviderLifecycle {
 	return l
 }
 func deliveryPolicyRuntimeOrigin(d *safefs.Directory, j OperationJournal, kind string) (OperationJournal, error) {
-	if kind != "command-limits" {
+	if !isCommandDeliveryPolicy(kind) {
 		return requalificationEnrollment(d, j)
 	}
 	for depth := 0; depth < 128; depth++ {
 		var err error
 		switch {
-		case commandLimitsJournal(j):
+		case commandDeliveryPolicyJournal(j) || commandDeclarationJournal(j):
 			return j, nil
 		case commandPauseJournal(j) || commandDeliveryJournal(j):
 			j, err = commandRenewalPredecessor(d, j)
@@ -83,7 +84,7 @@ func deliveryPolicyRuntimeOrigin(d *safefs.Directory, j OperationJournal, kind s
 			return j, err
 		}
 	}
-	return j, fmt.Errorf("command budget runtime history exceeds review bound")
+	return j, fmt.Errorf("command policy runtime history exceeds review bound")
 }
 func compileCommandDeliveryLimits(r ControlRequest, p ResolvedPaths, d *safefs.Directory, j OperationJournal, input install.RuntimeInput, raw []byte, reservation backup.ProducerReservation) (CompiledNotification, *notificationInputPins, *notificationInputPins, error) {
 	compiled, b, a, err := compileDeliveryLimits(r, p, d, j, input, raw, reservation)
@@ -123,13 +124,13 @@ func commandRenewalPausedManifest(d *safefs.Directory, j OperationJournal, curre
 	}
 	paused := current
 	paused.Mode, paused.DeliveryActivation, paused.Commands = "verification", nil, nil
-	if commandLimitsJournal(j) {
+	if commandDeliveryPolicyJournal(j) {
 		v, err := readDeliveryProviderIntent(d, j)
 		if err != nil {
 			return paused, err
 		}
 		if current.Commands != nil {
-			return paused, fmt.Errorf("budget renewal changed command admission")
+			return paused, fmt.Errorf("policy renewal changed command admission")
 		}
 		return paused, validateDeliveryProviderManifest(v, paused)
 	}

@@ -21,6 +21,12 @@ import (
 )
 
 type managedCapabilities struct {
+	SharedActivity              int `json:"shared_activity,omitempty"`
+	SignalDelivery              int `json:"signal_delivery,omitempty"`
+	CommandProviders            int `json:"command_providers,omitempty"`
+	CommandRoutes               int `json:"command_routes,omitempty"`
+	CommandProducer             int `json:"command_producer,omitempty"`
+	CommandFreshness            int `json:"command_freshness,omitempty"`
 	CommandLimits               int `json:"command_limits,omitempty"`
 	CommandPause                int `json:"command_pause,omitempty"`
 	DeliveryLimits              int `json:"delivery_limits,omitempty"`
@@ -196,15 +202,21 @@ func probeManagedCapability(ctx context.Context, d *safefs.Directory, name, hash
 		return err
 	}
 	if c.Version != managedVersion || c.Schema != worker.StorageSchemaVersion() ||
+		(probe == "__managed-shared-activity-probe" && c.SharedActivity != 1) ||
 		(probe == "__managed-delivery-limits-probe" && c.DeliveryLimits != 5) ||
+		(probe == "__managed-signal-delivery-probe" && c.SignalDelivery != 1) ||
 		(probe == "__managed-delivery-providers-probe" && c.DeliveryProviders != 1) ||
 		(probe == "__managed-delivery-pause-probe" && c.DeliveryPause != 1) ||
+		(probe == "__managed-command-providers-probe" && c.CommandProviders != 1) ||
+		(probe == "__managed-command-routes-probe" && c.CommandRoutes != 1) ||
+		(probe == "__managed-command-producer-probe" && c.CommandProducer != 1) ||
+		(probe == "__managed-command-freshness-probe" && c.CommandFreshness != 1) ||
 		(probe == "__managed-command-limits-probe" && c.CommandLimits != 1) ||
 		(probe == "__managed-command-pause-probe" && c.CommandPause != 1) ||
 		(probe == "__fresh-signal-probe" && c.FreshSignal != 1) ||
 		(probe == "__fresh-signal-restart-probe" && c.FreshSignalRestart != 1) ||
 		(probe == "__managed-fresh-signal-probe" && c.FreshSignalGateway != 1) ||
-		(probe == "__managed-enrolled-limits-probe" && c.EnrolledLimits != 12) ||
+		(probe == "__managed-enrolled-limits-probe" && c.EnrolledLimits != 16) ||
 		(probe == "__managed-bootstrap-limits-probe" && c.BootstrapLimits != 3) ||
 		(probe == "__managed-bootstrap-providers-probe" && c.BootstrapProviders != 2) ||
 		(probe == "__managed-bootstrap-probe" && c.Bootstrap != 1) ||
@@ -273,6 +285,9 @@ func verifyManagedArtifactsPendingTelegram(d *safefs.Directory, m ManagedManifes
 	return verifyManagedArtifactsPolicy(d, m, false, id, nil)
 }
 func verifyManagedArtifactsPolicy(d *safefs.Directory, m ManagedManifest, migrationSource bool, pendingTelegram string, successor *SignalVerificationReference) (Runtime, error) {
+	if err := verifySharedActivityRestoration(d, m); err != nil {
+		return Runtime{}, err
+	}
 	var c Runtime
 	if err := m.validate(); err != nil {
 		return c, err
@@ -307,6 +322,14 @@ func verifyManagedArtifactsPolicy(d *safefs.Directory, m ManagedManifest, migrat
 			_, err = validateFreshSignalGateway(context.Background(), *m.FreshSignal, m.Root, m.Paths.State, m.UnitDirectory, c, false)
 		}
 		if err != nil {
+			return c, err
+		}
+	}
+	if c.Providers["signal"].SignalDelivery != nil && m.ReportCredentialHistory == nil {
+		return c, fmt.Errorf("native recipient configuration lost its credential history anchor")
+	}
+	if m.ReportCredentialHistory != nil {
+		if _, err := deliveryCredentialAncestry(d, managedJournal{Intent: managedIntent{After: m}}, c); err != nil {
 			return c, err
 		}
 	}

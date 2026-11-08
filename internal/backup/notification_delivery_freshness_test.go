@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/dryaf/deploy/internal/config"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,9 +19,19 @@ import (
 )
 
 func TestDeliveryDerivedFreshnessResumesPublication(t *testing.T) {
+	testProductionDerivedFreshness(t, 23)
+}
+func TestCommandDerivedFreshnessResumesPublication(t *testing.T) {
+	testProductionDerivedFreshness(t, 25)
+}
+func testProductionDerivedFreshness(t *testing.T, version int) {
 	for _, point := range []string{"scope-intent", "backup-gated", "capture-stopped", "report-stopped", "gateway-complete", "capture-staged", "archive-checkpoint", "runtime-0", "runtime-1", "scope-receipt", "scope-complete"} {
 		t.Run(point, func(t *testing.T) {
 			home, r, before, deps, services, profile := providerScopeFixture(t)
+			if version == 25 {
+				home, r, before, deps, services, profile = providerScopeFixtureWithDeclaration(t, &config.NotificationDeclaration{Providers: config.ProviderDeclarations{"telegram": {TokenFile: "~/.config/old-token", ChatIDFile: "~/.config/old-chat"}}, Commands: config.CommandDeclaration{Mode: "mutation"}}, nil)
+			}
+
 			root, err := safefs.Open(home)
 			testutil.Must(t, err)
 			defer root.Close()
@@ -81,7 +92,7 @@ func TestDeliveryDerivedFreshnessResumesPublication(t *testing.T) {
 				return gateway, nil
 			}
 			lost := errors.New("lost freshness reply")
-			_, err = reconcileNotificationScopeReports(context.Background(), home, r, migrate, 23, deps, func(at string) error {
+			_, err = reconcileNotificationScopeReports(context.Background(), home, r, migrate, version, deps, func(at string) error {
 				if at == point {
 					return lost
 				}
@@ -96,7 +107,7 @@ func TestDeliveryDerivedFreshnessResumesPublication(t *testing.T) {
 				t.Fatal("partial scope completed", done, e)
 			}
 			for range 2 {
-				_, err = reconcileNotificationScopeReports(context.Background(), home, r, migrate, 23, deps)
+				_, err = reconcileNotificationScopeReports(context.Background(), home, r, migrate, version, deps)
 				testutil.Must(t, err)
 			}
 			var after WorkerSetupJournal

@@ -293,13 +293,22 @@ func qualificationPause(d *safefs.Directory, m ManagedManifest, c Runtime) (stri
 	if err != nil {
 		return "", "", err
 	}
-	if j.Intent.Operation != "pause-delivery" && !isPausedRuntimeChange(j.Intent.Operation) {
+	if j.Intent.Operation == "restore-shared-activity" && m.DeliveryOwnerHash == "" {
+		return j.Intent.ID, "", nil
+	}
+	if j.Intent.Operation != "pause-delivery" && !isPausedRuntimeChange(j.Intent.Operation) && j.Intent.Operation != "restore-shared-activity" {
 		return "", "", nil
 	}
 	if j.Phase != "complete" || !preservesManagedDeliveryOwner(j) || protocol.Hash(j.Intent.After) != protocol.Hash(m) {
 		return "", "", fmt.Errorf("qualification requires its exact completed delivery pause")
 	}
 	prior := j
+	if j.Intent.Operation == "restore-shared-activity" {
+		prior, err = sharedActivityPause(d, j)
+		if err != nil {
+			return "", "", err
+		}
+	}
 	if isPausedRuntimeChange(j.Intent.Operation) {
 		prior, err = deliveryProviderPause(d, j, c)
 		if err != nil {

@@ -100,7 +100,14 @@ func prepareSharedWorkerSetupUsing(home string, root, stateRoot *safefs.Director
 	if err = d.ReadJSON(backupCutoverFile, &cutover); err != nil {
 		return err
 	}
-	profile, err := inspect(cutover.Spec.Managed.Root, owner.Binding.Identity, owner.Binding.Producer, owner.Binding.Route)
+	route := owner.Binding.Route
+	if j.Declaration != nil {
+		if err = requireReportRouteOwner(*j, owner); err != nil {
+			return err
+		}
+		route = j.Declaration.NotificationRoute
+	}
+	profile, err := inspect(cutover.Spec.Managed.Root, owner.Binding.Identity, owner.Binding.Producer, route)
 	if err != nil {
 		return err
 	}
@@ -216,7 +223,20 @@ func requireSharedBackupReportUnits(home string, c WorkerInstallation, state *ba
 	if err = d.ReadJSON(backupCutoverFile, &cutover); err != nil {
 		return err
 	}
-	profile, err := install.InspectManagedReportProfile(cutover.Spec.Managed.Root, owner.Binding.Identity, owner.Binding.Producer, owner.Binding.Route)
+	var j WorkerSetupJournal
+	rootForRoute, err := safefs.Open(home)
+	if err != nil {
+		return err
+	}
+	err = rootForRoute.ReadJSON(backupSetupFile, &j)
+	rootForRoute.Close()
+	if err != nil {
+		return err
+	}
+	if err = requireReportRouteOwner(j, owner); err != nil {
+		return err
+	}
+	profile, err := install.InspectManagedReportProfile(cutover.Spec.Managed.Root, owner.Binding.Identity, owner.Binding.Producer, j.Declaration.NotificationRoute)
 	if err != nil {
 		return err
 	}

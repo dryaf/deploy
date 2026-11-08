@@ -8,6 +8,7 @@ import (
 
 	"github.com/dryaf/deploy/internal/config"
 	"github.com/dryaf/deploy/internal/notification/protocol"
+	"github.com/dryaf/deploy/internal/notification/relay"
 
 	"github.com/dryaf/deploy/internal/notification/install"
 	"github.com/dryaf/deploy/internal/safefs"
@@ -21,6 +22,9 @@ func reconcileNotificationProviders(ctx context.Context, r ControlRequest, paths
 // and verified against their original pins throughout the transaction. In-place
 // edits and operator-local reprovisioning cannot prove the previous credential.
 func compileProvidersRuntime(r ControlRequest, paths ResolvedPaths, before install.RuntimeInput, pins notificationInputPins) ([]byte, notificationInputPins, error) {
+	return compileProvidersRuntimePolicy(r, paths, before, pins, false)
+}
+func compileProvidersRuntimePolicy(r ControlRequest, paths ResolvedPaths, before install.RuntimeInput, pins notificationInputPins, signalReferences bool) ([]byte, notificationInputPins, error) {
 	p, hasTelegram := r.Desired.Notification.Providers["telegram"]
 	if (len(r.Desired.Notification.Providers) != 1 && len(r.Desired.Notification.Providers) != 2) || hasTelegram && (p.TokenFile == "" || p.ChatIDFile == "" || p.TokenInput != "" || p.ChatIDInput != "") || len(r.Inputs) != 0 {
 		return nil, pins, fmt.Errorf("provider migration requires saved Telegram target-file references; retain existing files and select new files for changed values")
@@ -44,10 +48,28 @@ func compileProvidersRuntime(r ControlRequest, paths ResolvedPaths, before insta
 				return nil, pins, err
 			}
 		}
-		if pins.Version != 2 || inputDigest(secrets["signal_account"]) != pins.SignalAccount || inputDigest(secrets["signal_recipient"]) != pins.SignalRecipient {
+		if pins.Version != 2 || inputDigest(secrets["signal_account"]) != pins.SignalAccount || !signalReferences && inputDigest(secrets["signal_recipient"]) != pins.SignalRecipient {
 			return nil, pins, fmt.Errorf("retained Signal private inputs changed")
 		}
 		input, err = compileDirectSignalNotification(r.Desired, paths, r.Facts.Home, secrets, resolved)
+		if err == nil {
+			old := before.Providers["signal"]
+			next := input.Providers["signal"]
+			if !signalReferences {
+				next.SignalDelivery = old.SignalDelivery
+			} else if old.SignalDelivery != nil && old.SignalDelivery.AccountFile == resolved.AccountFile && old.SignalDelivery.RecipientFile == resolved.RecipientFile && old.SignalDelivery.AccountHash == inputDigest(secrets["signal_account"]) && old.SignalDelivery.RecipientHash == inputDigest(secrets["signal_recipient"]) {
+				next.SignalDelivery = old.SignalDelivery
+			} else {
+				// Unchanged original declarations retain their original bootstrap proof.
+				original, e := install.ReviewFreshSignalDelivery(context.Background(), resolved.Service, resolved.AccountFile, resolved.RecipientFile, inputDigest(secrets["signal_account"]), inputDigest(secrets["signal_recipient"]))
+				if e != nil {
+					return nil, pins, e
+				}
+				next.SignalDelivery = original
+			}
+			input.Providers["signal"] = next
+			pins.SignalAccount, pins.SignalRecipient = inputDigest(secrets["signal_account"]), inputDigest(secrets["signal_recipient"])
+		}
 	} else {
 		if r.LocalSignal != nil || r.SignalSHA256 != "" {
 			return nil, pins, fmt.Errorf("unrelated native artifact selected")
@@ -89,6 +111,12 @@ func verifyProviderRuntimeInputs(raw []byte, pins notificationInputPins) error {
 	}
 	if len(input.Providers) != expected || !hasTelegram && (pins.Token != inputDigest(nil) || pins.Chat != inputDigest(nil)) {
 		return fmt.Errorf("provider migration contains unreviewed profile authority")
+	}
+	if hasSignal && signal.SignalDelivery != nil {
+		a, r, e := signal.SignalDelivery.Values()
+		if e != nil || signal.SignalDelivery.AccountHash != pins.SignalAccount || signal.SignalDelivery.RecipientHash != pins.SignalRecipient || signal.Destination != relay.Destination(a, r) {
+			return fmt.Errorf("selected Signal input pins changed")
+		}
 	}
 	if hasTelegram {
 		if telegram.Kind != "telegram" || !validDigest(pins.Token) || !validDigest(pins.Chat) {

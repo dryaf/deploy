@@ -532,6 +532,29 @@ func (s *signalSetupStep) reuse(ctx context.Context, wanted OperationPins, paren
 	original := *s
 	original.request.DesiredHash, original.request.DesiredScope = child.Pins.DesiredHash, child.Pins.DesiredScope
 	original.request.HelperSHA256 = child.Pins.Artifacts["helper"]
+	var retained signalSetupPins
+	if err = s.directory.ReadJSON("inputs.json", &retained); err != nil {
+		return false, err
+	}
+	selectedPaths := s.paths
+	selectedPaths.AccountFile, selectedPaths.RecipientFile = retained.Paths.AccountFile, retained.Paths.RecipientFile
+	if selectedPaths != retained.Paths {
+		return false, fmt.Errorf("native Signal service paths changed")
+	}
+	if s.paths != retained.Paths || inputDigest(s.account) != retained.AccountHash || inputDigest(s.recipient) != retained.RecipientHash {
+		if err = install.InspectRetainedFreshSignalDeliverySelection(s.paths.Service, s.paths.AccountFile, s.paths.RecipientFile, inputDigest(s.account), inputDigest(s.recipient)); err != nil {
+			return false, err
+		}
+		original.paths = retained.Paths
+		original.account, err = ReadCredentialInput(retained.Paths.AccountFile)
+		if err != nil {
+			return false, err
+		}
+		original.recipient, err = ReadCredentialInput(retained.Paths.RecipientFile)
+		if err != nil {
+			return false, err
+		}
+	}
 	providerPending := !gateway.Complete && limitsJournal(gateway) && policyJournalKind(gateway) == "providers"
 	// The native child has its own unchanged receipt. Explicit resume repairs
 	// it before gateway inspection, which may itself depend on that child's

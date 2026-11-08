@@ -16,7 +16,7 @@ import (
 )
 
 func backupDesired(d config.DesiredWorkers) config.DesiredWorkers {
-	if d.Backup == nil || !config.WorkerEnabled(d.Backup.Enabled) || !config.WorkerEnabled(d.Backup.Notifications.Enabled) || d.Backup.Notifications.Worker == "" {
+	if d.Backup == nil || d.Backup.Notifications.Worker == "" {
 		d.Notification = nil
 	}
 	return d
@@ -81,7 +81,7 @@ func planNotificationControl(ctx context.Context, r ControlRequest, paths Resolv
 			return result, e
 		}
 	}
-	if commandLimitsJournal(j) {
+	if commandDeliveryPolicyJournal(j) || commandDeclarationJournal(j) {
 		if _, err = retainedCommandReceiver(ctx, d, j, defaultNotificationCommands()); err != nil {
 			return result, err
 		}
@@ -134,6 +134,9 @@ func planNotificationControl(ctx context.Context, r ControlRequest, paths Resolv
 		return result, fmt.Errorf("notification policy comparison requires a completed apply receipt")
 	}
 	before, err := readDeclaration(d, j.Pins.DesiredHash, j.Pins.DesiredScope)
+	if sharedActivityJournal(j) {
+		before, err = readCommandDeclaration(d, j)
+	}
 	if err != nil {
 		return result, err
 	}
@@ -234,11 +237,39 @@ func planNotificationControl(ctx context.Context, r ControlRequest, paths Resolv
 	if admittedCommandHistory(j) && j.Pins.DesiredScope == 1 && r.DesiredScope == 1 && validateCommandActivityPolicy(commandBefore, r.Desired) == nil {
 		result.Next = "apply the reviewed commands.enabled change with other settings unchanged; disabling stops new intake while reporting and saved command results remain; re-enabling requires current delivery qualification"
 	}
+	if observed.Manifest.Mode == "delivery" && admittedCommandHistory(j) && validateCommandRequalificationBefore(observed.Manifest) == nil && config.ValidateCommandDeliveryFreshnessDeclaration(commandBefore, r.Desired) == nil {
+		result.Next = "apply only the existing backup producer heartbeat/evidence timing with commands disabled; original observations, receiver and queued work remain; qualify and apply to resume delivery, then explicitly enable commands"
+	}
 	if admittedCommandHistory(j) && validateCommandEnrollmentPolicy(commandBefore, r.Desired) == nil {
 		result.Next = "apply command enrollment with intake disabled; added rights or redirected audiences are rejected; enable separately after completion"
 	}
 	if admittedCommandHistory(j) && validateCommandPermissionsPolicy(commandBefore, r.Desired) == nil {
 		result.Next = "apply the reviewed permission change with intake disabled and other settings unchanged; reductions and restoration within originally admitted receiver authority are supported; enable separately when ready"
+	}
+	result = sharedConfigurationPlan(result, before, r.Desired, j, observed)
+	if result.State == "planned" && admittedCommandHistory(j) && validateCommandRequalificationBefore(observed.Manifest) == nil && config.ValidateCommandDeliveryProducerDeclaration(commandBefore, r.Desired) == nil {
+		same, e := reviewPolicyDeclarationRuntime(r, paths, d, j, "command-declaration")
+		if e != nil {
+			return result, e
+		}
+		if same {
+			result.Next = "record the equivalent producer declaration in both workers; delivery, qualification, receiver restrictions, queued work and observations remain unchanged; enable commands separately when wanted"
+		}
+	}
+	if result.State == "planned" && observed.Manifest.Mode == "delivery" && config.ValidateDeliveryReportRouteDeclaration(commandBefore, r.Desired) == nil {
+		kind := "report-route-declaration"
+		if admittedCommandHistory(j) {
+			kind = "command-report-route-declaration"
+		}
+		same, e := reviewPolicyDeclarationRuntime(r, paths, d, j, kind)
+		if e != nil {
+			return result, e
+		}
+		if same {
+			result.Next = "record the already allowed backup report route; runtime, delivery and qualification remain; frozen reports must settle and command intake stays disabled"
+		} else {
+			result.Next = "apply the selected backup report route through either worker; settle frozen reports and delivery messages; qualify the revised notification policy and apply; backup capture qualification remains separate"
+		}
 	}
 	if j.Pins.DesiredScope != r.DesiredScope {
 		result.State, result.Code = "needs_action", "policy_scope_conversion_required"
@@ -363,6 +394,7 @@ func planBackupControl(ctx context.Context, r ControlRequest, inspect func(conte
 			result.Next = "apply enrolls added sources with retained keys and unchanged shared producer ownership; keep existing source endpoints, trust, gateway policy and artifacts unchanged, then qualify and reactivate the schedule"
 		}
 	}
+	result = sharedBackupConfigurationPlan(result, *before, r.Desired, observed, r.Server)
 	return result, nil
 }
 

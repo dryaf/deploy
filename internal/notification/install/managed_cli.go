@@ -18,11 +18,47 @@ import (
 )
 
 func runManagedCLI(args []string) error {
+	if args[0] == "__managed-signal-delivery-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), SignalDelivery: 1})
+	}
+	if args[0] == "__managed-command-providers-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("command producer probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), CommandProviders: 1})
+	}
+	if args[0] == "__managed-command-routes-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("command producer probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), CommandRoutes: 1})
+	}
+	if args[0] == "__managed-command-producer-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("command producer probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), CommandProducer: 1})
+	}
+	if args[0] == "__managed-command-freshness-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("command freshness probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), CommandFreshness: 1})
+	}
 	if args[0] == "__managed-command-limits-probe" {
 		if len(args) != 1 {
 			return fmt.Errorf("command limits probe takes no arguments")
 		}
 		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), CommandLimits: 1})
+	}
+	if args[0] == "__managed-shared-activity-probe" {
+		if len(args) != 1 {
+			return fmt.Errorf("probe takes no arguments")
+		}
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), SharedActivity: 1})
 	}
 	if args[0] == "__managed-command-pause-probe" {
 		if len(args) != 1 {
@@ -53,7 +89,7 @@ func runManagedCLI(args []string) error {
 		if len(args) != 1 {
 			return fmt.Errorf("probe takes no arguments")
 		}
-		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), EnrolledLimits: 12})
+		return json.NewEncoder(os.Stdout).Encode(managedCapabilities{Version: managedVersion, Schema: worker.StorageSchemaVersion(), EnrolledLimits: 16})
 	}
 	if args[0] == "__managed-bootstrap-enrollment-commands-probe" {
 		if len(args) != 1 {

@@ -85,7 +85,7 @@ func readInventoryV3(file string, data []byte, doc *yaml.Node) (ServerInventory,
 				return fail(err)
 			}
 			n := &s.Backup.Notifications
-			if WorkerEnabled(n.Enabled) && n.Worker == "" && n.Primary == "" && s.Notification != nil {
+			if n.Worker == "" && n.Primary == "" && s.Notification != nil {
 				n.Worker = name
 			}
 			if n.Enabled == nil {
@@ -120,8 +120,8 @@ func readInventoryV3(file string, data []byte, doc *yaml.Node) (ServerInventory,
 		n := b.Notifications
 		if n.Worker != "" {
 			target, ok := inv.Servers[n.Worker]
-			if !ok || target.Desired.Notification == nil || WorkerEnabled(b.Enabled) && WorkerEnabled(n.Enabled) && !WorkerEnabled(target.Desired.Notification.Enabled) {
-				return inv, fmt.Errorf("servers.%s.backup_worker.notifications.worker: referenced worker is absent or disabled", name)
+			if !ok || target.Desired == nil || target.Desired.Notification == nil {
+				return inv, fmt.Errorf("servers.%s.backup_worker.notifications.worker: referenced worker is absent", name)
 			}
 			if n.Worker != name {
 				return inv, fmt.Errorf("servers.%s.backup_worker.notifications.worker: cross-server notification transport is not supported", name)

@@ -309,6 +309,12 @@ func validateLimitsManifest(v notificationLimitsIntent, m install.ManagedManifes
 	want.Revision, want.UnitHash = m.Revision, m.UnitHash
 	want.Paths.Config, want.Paths.Executable = m.Paths.Config, m.Paths.Executable
 	want.HelperHash, want.HelperRevision = want.BinaryHash, m.Revision
+	if v.Kind == "providers" && input.Providers["signal"].SignalDelivery != nil && protocol.Hash(m.ReportCredentialHistory) != protocol.Hash(v.Before.ReportCredentialHistory) {
+		if err = install.ValidateStagedProviderCredentialHistory(v.Before, m, "bootstrap-providers"); err != nil {
+			return err
+		}
+		want.ReportCredentialHistory = m.ReportCredentialHistory
+	}
 	if m.Mode != "verification" || m.Revision == v.Before.Revision || protocol.Hash(want) != protocol.Hash(m) {
 		return fmt.Errorf("bootstrap policy migration changed retained identity or authority")
 	}

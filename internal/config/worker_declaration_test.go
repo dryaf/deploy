@@ -115,13 +115,10 @@ func TestWorkerDeclarationRejectsUnsafeOrAmbiguousPolicy(t *testing.T) {
 		"path injection":           strings.Replace(minimalWorkers, "sources: [vps-main]", "sources: [vps-main]\n      storage: {path: '~/$HOME/archive'}", 1),
 		"unknown source":           strings.Replace(minimalWorkers, "sources: [vps-main]", "sources: [missing]", 1),
 		"root worker":              strings.Replace(minimalWorkers, "user: deploy", "user: root", 1),
-		"disabled dependency":      strings.Replace(minimalWorkers, "providers: [telegram]", "enabled: false\n      providers: [telegram]", 1) + "",
 		"notification image":       strings.Replace(minimalWorkers, "providers: [telegram]", "providers: [telegram]\n      artifacts: {image: example.invalid/unused@sha256:"+strings.Repeat("a", 64)+"}", 1),
 		"notification relay image": strings.Replace(minimalWorkers, "providers: [telegram]", "providers: [telegram]\n      artifacts: {relay_image: example.invalid/unused@sha256:"+strings.Repeat("a", 64)+"}", 1),
 	}
-	// An explicitly referenced disabled gateway is invalid; a standalone disabled
-	// block alone does not opt backup into a missing delivery mechanism.
-	cases["disabled dependency"] = strings.Replace(cases["disabled dependency"], "sources: [vps-main]", "sources: [vps-main]\n      notifications: {worker: manager}", 1)
+
 	for name, s := range cases {
 		t.Run(name, func(t *testing.T) {
 			_, err := readDesiredFixture(t, s)
@@ -199,8 +196,9 @@ func TestWorkerDeclarationAdvancedBoundsAndCadence(t *testing.T) {
 
 func TestWorkerDeclarationDisablingBothRetainsDependency(t *testing.T) {
 	input := strings.Replace(minimalWorkers, "providers: [telegram]", "enabled: false\n      providers: [telegram]", 1)
-	if _, err := readDesiredFixture(t, input); err == nil {
-		t.Fatal("enabled backup silently lost its gateway")
+	single, err := readDesiredFixture(t, input)
+	if err != nil || single.Servers["manager"].Desired.Backup.Notifications.Worker != "manager" {
+		t.Fatal("shared gateway disable lost dependency", err)
 	}
 	input = strings.Replace(input, "sources: [vps-main]", "enabled: false\n      sources: [vps-main]", 1)
 	inv, err := readDesiredFixture(t, input)

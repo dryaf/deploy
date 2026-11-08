@@ -40,7 +40,7 @@ func defaultDeliveryProviders(helper string) deliveryProviderLifecycle {
 	}}
 }
 func deliveryProviderJournal(j OperationJournal) bool {
-	return j.Pins.Action == "apply" && len(j.Children) == 1 && (j.Children[0].Name == "notification-command-limits" || j.Children[0].Name == "notification-delivery-derived-freshness" || j.Children[0].Name == "notification-delivery-providers" || j.Children[0].Name == "notification-delivery-limits" || j.Children[0].Name == "notification-delivery-producer" || j.Children[0].Name == "notification-delivery-routes" || j.Children[0].Name == "notification-delivery-destination" || j.Children[0].Name == "notification-delivery-provider-enrollment" || j.Children[0].Name == "notification-delivery-declaration")
+	return j.Pins.Action == "apply" && len(j.Children) == 1 && (j.Children[0].Name == "notification-command-provider" || j.Children[0].Name == "notification-command-destination" || j.Children[0].Name == "notification-command-routes" || j.Children[0].Name == "notification-command-derived-freshness" || j.Children[0].Name == "notification-command-report-route" || j.Children[0].Name == "notification-command-report-route-declaration" || j.Children[0].Name == "notification-delivery-report-route" || j.Children[0].Name == "notification-delivery-report-route-declaration" || j.Children[0].Name == "notification-command-producer" || j.Children[0].Name == "notification-command-declaration" || j.Children[0].Name == "notification-command-freshness" || j.Children[0].Name == "notification-command-limits" || j.Children[0].Name == "notification-delivery-derived-freshness" || j.Children[0].Name == "notification-delivery-providers" || j.Children[0].Name == "notification-delivery-limits" || j.Children[0].Name == "notification-delivery-producer" || j.Children[0].Name == "notification-delivery-routes" || j.Children[0].Name == "notification-delivery-destination" || j.Children[0].Name == "notification-delivery-provider-enrollment" || j.Children[0].Name == "notification-delivery-declaration")
 }
 
 type deliveryProviderIntent struct {
@@ -83,14 +83,36 @@ func validateDeliveryProviderIntent(v deliveryProviderIntent) error {
 	}
 	paused := v.Before
 	paused.Mode, paused.DeliveryActivation = "verification", nil
-	if v.Kind == "command-limits" {
+	if isCommandDeliveryPolicy(v.Kind) && isDeliveryDeclaration(v.Kind) {
+		if string(v.BeforeRuntime) != string(v.AfterRuntime) {
+			return fmt.Errorf("command declaration changed retained runtime bytes")
+		}
 		paused.Commands = nil
+		return install.ValidateCommandDeliveryDeclaration(paused, before, after)
+	}
+	if isCommandDeliveryPolicy(v.Kind) {
+		paused.Commands = nil
+		if commandProviderPolicy(v.Kind) {
+			if v.Kind == "command-destination" {
+				return install.ValidatePausedCommandDeliveryDestination(paused, before, after)
+			}
+			return install.ValidatePausedCommandDeliveryProviders(paused, before, after)
+		}
+		if v.Kind == "command-routes" {
+			return install.ValidatePausedCommandDeliveryRoutes(paused, before, after)
+		}
+		if v.Kind == "command-producer" || v.Kind == "command-report-route" {
+			return install.ValidatePausedCommandDeliveryProducerPolicy(paused, before, after)
+		}
+		if v.Kind == "command-freshness" || v.Kind == "command-derived-freshness" {
+			return install.ValidatePausedCommandDeliveryFreshness(paused, before, after)
+		}
 		return install.ValidatePausedCommandDeliveryLimits(paused, before, after)
 	}
 	if v.Kind == "limits" {
 		return install.ValidatePausedDeliveryLimits(paused, before, after)
 	}
-	if v.Kind == "declaration" {
+	if isDeliveryDeclaration(v.Kind) {
 		if string(v.BeforeRuntime) != string(v.AfterRuntime) {
 			return fmt.Errorf("declaration continuation changed retained runtime bytes")
 		}
@@ -105,7 +127,7 @@ func validateDeliveryProviderIntent(v deliveryProviderIntent) error {
 	if v.Kind == "routes" {
 		return install.ValidatePausedDeliveryRoutes(paused, before, after)
 	}
-	if v.Kind == "producer" || v.Kind == "derived-freshness" {
+	if v.Kind == "producer" || v.Kind == "derived-freshness" || v.Kind == "report-route" {
 		return install.ValidatePausedDeliveryProducerPolicy(paused, before, after)
 	}
 	if v.Kind != "" {
@@ -158,7 +180,7 @@ func readDeliveryProviderIntent(d *safefs.Directory, j OperationJournal) (delive
 	return v, nil
 }
 func validateDeliveryProviderManifest(v deliveryProviderIntent, m install.ManagedManifest) error {
-	if v.Kind == "declaration" {
+	if isDeliveryDeclaration(v.Kind) {
 		if protocol.Hash(v.Before) != protocol.Hash(m) {
 			return fmt.Errorf("declaration continuation changed manifest")
 		}
@@ -166,7 +188,7 @@ func validateDeliveryProviderManifest(v deliveryProviderIntent, m install.Manage
 	}
 	want := v.Before
 	want.Mode, want.DeliveryActivation = "verification", nil
-	if v.Kind == "command-limits" {
+	if isCommandDeliveryPolicy(v.Kind) {
 		want.Commands = nil
 	}
 	if v.Kind != "" {
@@ -183,7 +205,7 @@ func validateDeliveryProviderManifest(v deliveryProviderIntent, m install.Manage
 			want.DeliveryOwnerConfigHash = protocol.Hash(config.Worker)
 		}
 	}
-	if v.Kind == "" || v.Kind == "destination" || v.Kind == "provider-enrollment" {
+	if commandProviderPolicy(v.Kind) || v.Kind == "" || v.Kind == "destination" || v.Kind == "provider-enrollment" {
 		want.ReportCredentialHistory = m.ReportCredentialHistory
 		if m.ReportCredentialHistory == nil || m.ReportCredentialHistory.Operation != m.Revision || !validDigest(m.ReportCredentialHistory.Hash) {
 			return fmt.Errorf("provider rotation lost credential exclusion history")
@@ -217,7 +239,7 @@ func verifyDeliveryProviderReceipt(d *safefs.Directory, j OperationJournal, m in
 	if err = validateDeliveryProviderManifest(v, m); err != nil {
 		return err
 	}
-	if v.Kind == "declaration" {
+	if isDeliveryDeclaration(v.Kind) {
 		return verifyMappingScope(d, j, inspect)
 	}
 	var paused install.ManagedManifest
@@ -249,20 +271,39 @@ func reconcileDeliveryProviders(ctx context.Context, r ControlRequest, p Resolve
 	if validateOperationJournal(current) != nil {
 		return result, true, fmt.Errorf("invalid delivery provider coordinator")
 	}
-	if commandLimitsJournal(current) && current.Complete && l.kind == "command-limits" {
+	if commandDeliveryPolicyJournal(current) && current.Complete && isCommandDeliveryPolicy(l.kind) {
 		return result, false, nil
 	}
-	retry := deliveryProviderJournal(current) && !(deliveryDeclarationJournal(current) && current.Complete && current.Pins.DesiredHash != r.DesiredHash)
+	completedDeclarationChanged := deliveryDeclarationJournal(current) && current.Complete && current.Pins.DesiredHash != r.DesiredHash
+	if deliveryDeclarationJournal(current) && current.Complete {
+		full, e := r.Desired.Fingerprint()
+		if e != nil {
+			return result, true, e
+		}
+		retainedFull := current.Pins.Artifacts["command-backup-policy"]
+		if retainedFull == "" {
+			saved, e := readDeclaration(d, current.Pins.DesiredHash, current.Pins.DesiredScope)
+			if e != nil {
+				return result, true, e
+			}
+			retainedFull, e = saved.Fingerprint()
+			if e != nil {
+				return result, true, e
+			}
+		}
+		completedDeclarationChanged = completedDeclarationChanged || full != retainedFull
+	}
+	retry := deliveryProviderJournal(current) && !completedDeclarationChanged
 	if retry && deliveryProviderKind(current) != l.kind {
 		return result, false, nil
 	}
 	if !retry && !deliveryPolicyCandidate(current, l.kind) {
 		return result, false, nil
 	}
-	if retry && l.kind == "command-limits" {
+	if retry && isCommandDeliveryPolicy(l.kind) {
 		full, e := r.Desired.Fingerprint()
 		if e != nil || full != current.Pins.Artifacts["command-backup-policy"] {
-			return result, true, fmt.Errorf("resume command budget changes with their retained backup declaration")
+			return result, true, fmt.Errorf("resume command policy changes with their retained backup declaration")
 		}
 	}
 	prior := current
@@ -276,14 +317,20 @@ func reconcileDeliveryProviders(ctx context.Context, r ControlRequest, p Resolve
 	if err != nil {
 		return result, true, err
 	}
-	if !retry && l.kind == "declaration" && validateDeliveryPolicyDeclaration(before, r.Desired, l.kind) != nil {
+	if !retry && isDeliveryDeclaration(l.kind) && validateDeliveryPolicyDeclaration(before, r.Desired, l.kind) != nil {
 		return result, false, nil
 	}
 	_, explicitProducer := before.Notification.Producers["backup-worker"]
-	if !retry && l.kind == "derived-freshness" && (explicitProducer || before.Backup == nil || r.Desired.Backup == nil || before.Backup.Freshness == r.Desired.Backup.Freshness) {
+	if !retry && l.kind == "command-producer" && validateDeliveryPolicyDeclaration(before, r.Desired, "command-freshness") == nil {
 		return result, false, nil
 	}
-	if !retry && (l.kind == "routes" && reflect.DeepEqual(before.Notification.Routes, r.Desired.Notification.Routes) || l.kind == "producer" && reflect.DeepEqual(before.Notification.Producers, r.Desired.Notification.Producers) || (l.kind == "limits" || l.kind == "command-limits") && before.Notification.Limits == r.Desired.Notification.Limits || (l.kind == "" || l.kind == "destination" || l.kind == "provider-enrollment") && reflect.DeepEqual(before.Notification.Providers, r.Desired.Notification.Providers)) {
+	if !retry && derivedFreshnessPolicy(l.kind) && (explicitProducer || before.Backup == nil || r.Desired.Backup == nil || before.Backup.Freshness == r.Desired.Backup.Freshness) {
+		return result, false, nil
+	}
+	if !retry && ((l.kind == "routes" || l.kind == "command-routes") && reflect.DeepEqual(before.Notification.Routes, r.Desired.Notification.Routes) || (l.kind == "producer" || l.kind == "command-freshness" || l.kind == "command-producer" || l.kind == "command-declaration") && reflect.DeepEqual(before.Notification.Producers, r.Desired.Notification.Producers) || (l.kind == "limits" || l.kind == "command-limits") && before.Notification.Limits == r.Desired.Notification.Limits || (commandProviderPolicy(l.kind) || l.kind == "" || l.kind == "destination" || l.kind == "provider-enrollment") && reflect.DeepEqual(before.Notification.Providers, r.Desired.Notification.Providers)) {
+		return result, false, nil
+	}
+	if !retry && reportRoutePolicy(l.kind) && (before.Backup == nil || r.Desired.Backup == nil || before.Backup.Notifications.Route == r.Desired.Backup.Notifications.Route) {
 		return result, false, nil
 	}
 	if !prior.Complete || r.DesiredScope != 1 || prior.Pins.DesiredScope != 1 || prior.Pins.UID != r.Facts.UID || prior.Pins.Home != r.Facts.Home || prior.Pins.Worker != r.Worker || prior.Pins.Artifacts["helper"] != r.HelperSHA256 || prior.Pins.Installations["notification-worker"] != p.Installation || prior.Pins.Installations["state"] != p.State || prior.Pins.Installations["runtime"] != p.Runtime {
@@ -350,6 +397,14 @@ func reconcileDeliveryProviders(ctx context.Context, r ControlRequest, p Resolve
 		var probe deliveryProviderIntent
 		e := d.ReadJSON("delivery-providers-"+current.Children[0].Operation+".json", &probe)
 		if errors.Is(e, os.ErrNotExist) && !current.Complete && !current.Children[0].Complete {
+			// Runtime/pause evidence is written only after the exact intent.
+			// Its later loss cannot be treated as the pre-intent boundary,
+			// including when an equivalent declaration kept the manifest fixed.
+			for _, name := range []string{"delivery-providers-" + current.Children[0].Operation + "-runtime.json", "delivery-provider-pause-" + current.Children[0].Operation + ".json"} {
+				if _, readErr := safefs.ReadFile(d, name, maxControlFrame); !errors.Is(readErr, os.ErrNotExist) {
+					return result, true, fmt.Errorf("delivery policy intent missing after retained effects; recovery review required")
+				}
+			}
 			retained = false
 		} else if e != nil {
 			return result, true, e
@@ -398,15 +453,27 @@ func reconcileDeliveryProviders(ctx context.Context, r ControlRequest, p Resolve
 		compile := compileSharedProviders
 		if l.kind != "" && l.kind != "destination" && l.kind != "provider-enrollment" {
 			compile = compileDeliveryLimits
-			if l.kind == "command-limits" {
+			if isCommandDeliveryPolicy(l.kind) {
 				compile = compileCommandDeliveryLimits
+				if commandProviderPolicy(l.kind) {
+					compile = compileCommandDeliveryProviders
+				}
+				if l.kind == "command-routes" {
+					compile = compileCommandDeliveryRoutes
+				}
+				if l.kind == "command-freshness" || l.kind == "command-derived-freshness" {
+					compile = compileCommandDeliveryFreshness
+				}
+				if l.kind == "command-producer" || l.kind == "command-declaration" || reportRoutePolicy(l.kind) {
+					compile = compileCommandDeliveryProducer
+				}
 			}
 		}
 		compiled, b, a, e := compile(r, p, d, prior, input, raw, enrollment.Reservation)
 		if e != nil {
 			return result, true, e
 		}
-		if l.kind == "destination" {
+		if l.kind == "destination" || commandProviderPolicy(l.kind) {
 			beforeRuntime, err := input.Resolve()
 			if err != nil {
 				return result, true, err
@@ -417,12 +484,12 @@ func reconcileDeliveryProviders(ctx context.Context, r ControlRequest, p Resolve
 			}
 			changed := false
 			for name, old := range beforeRuntime.Providers {
-				if old.Kind == "telegram" {
+				if old.Kind == "telegram" || old.Kind == "signal" {
 					next, ok := afterRuntime.Providers[name]
 					changed = changed || ok && old.Destination != next.Destination
 				}
 			}
-			if !changed {
+			if changed != (l.kind != "command-provider") {
 				return result, false, nil
 			}
 		}
@@ -431,7 +498,7 @@ func reconcileDeliveryProviders(ctx context.Context, r ControlRequest, p Resolve
 		if e != nil {
 			return result, true, e
 		}
-		if l.kind == "declaration" {
+		if isDeliveryDeclaration(l.kind) {
 			oldRuntime, e := input.Resolve()
 			if e != nil {
 				return result, true, e
@@ -465,7 +532,7 @@ func reconcileDeliveryProviders(ctx context.Context, r ControlRequest, p Resolve
 	if err = retainDeclaration(d, r.Desired, r.DesiredHash, 1); err != nil {
 		return result, true, err
 	}
-	if l.kind == "command-limits" {
+	if isCommandDeliveryPolicy(l.kind) {
 		full, e := r.Desired.Fingerprint()
 		if e != nil {
 			return result, true, e
@@ -488,17 +555,25 @@ func reconcileDeliveryProviders(ctx context.Context, r ControlRequest, p Resolve
 	if l.kind == "destination" {
 		result.Next = "Telegram destination updated; delivery is paused with original ownership and history retained; qualify the selected destination, then apply"
 	}
-	if l.kind == "routes" {
+	if l.kind == "routes" || l.kind == "command-routes" {
 		result.Next = "notification routes updated; delivery is paused with reporting and ownership retained; qualify the configuration, then apply"
 	}
-	if l.kind == "derived-freshness" {
+	if derivedFreshnessPolicy(l.kind) {
 		result.Next = "backup freshness and gateway evidence deadline updated; qualify the notification worker and apply to resume delivery; backup capture remains staged until qualified and activated"
 	}
-	if l.kind == "producer" {
+	if l.kind == "producer" || l.kind == "command-freshness" || l.kind == "command-producer" || l.kind == "command-declaration" {
 		result.Next = "producer policy updated; delivery is paused with original observations and reporting retained; qualify the configuration, then apply"
 	}
 	result.Identity = &step.manifest.Identity
-	if l.kind == "command-limits" {
+	if isCommandDeliveryPolicy(l.kind) && isDeliveryDeclaration(l.kind) {
+		result.State, result.Next = "commands_disabled", "equivalent producer declaration recorded; delivery, qualification, original receiver and pending work remain; enable commands separately when wanted"
+		return result, true, nil
+	}
+	if isCommandDeliveryPolicy(l.kind) {
+		return result, true, nil
+	}
+	if l.kind == "report-route-declaration" {
+		result.State, result.Next = "delivery_admitted", "report route recorded with unchanged runtime and qualification"
 		return result, true, nil
 	}
 	result, err = advanceNotificationDelivery(ctx, r, p, d, completed, result, l.delivery)
@@ -625,7 +700,35 @@ type deliveryProviderStep struct {
 }
 
 func (s *deliveryProviderStep) Name() string {
-	if s.intent.Kind == "command-limits" {
+	switch s.intent.Kind {
+	case "command-provider":
+		return "notification-command-provider"
+	case "command-destination":
+		return "notification-command-destination"
+	case "command-routes":
+		return "notification-command-routes"
+	case "command-derived-freshness":
+		return "notification-command-derived-freshness"
+	case "command-report-route":
+		return "notification-command-report-route"
+	case "command-report-route-declaration":
+		return "notification-command-report-route-declaration"
+	case "report-route":
+		return "notification-delivery-report-route"
+	case "report-route-declaration":
+		return "notification-delivery-report-route-declaration"
+	}
+
+	if s.intent.Kind == "command-declaration" {
+		return "notification-command-declaration"
+	}
+	if s.intent.Kind == "command-producer" {
+		return "notification-command-producer"
+	}
+	if s.intent.Kind == "command-freshness" {
+		return "notification-command-freshness"
+	}
+	if isCommandDeliveryPolicy(s.intent.Kind) {
 		return "notification-command-limits"
 	}
 	if s.intent.Kind == "derived-freshness" {
@@ -693,7 +796,7 @@ func (s *deliveryProviderStep) Inspect(ctx context.Context, op string) (string, 
 		return "", false, err
 	}
 
-	if v.Kind == "declaration" {
+	if isDeliveryDeclaration(v.Kind) {
 		m, e := s.declarationManifest(ctx, v)
 		if e != nil {
 			return "", false, e
@@ -768,7 +871,7 @@ func (s *deliveryProviderStep) Run(ctx context.Context, op string) error {
 			return "", fmt.Errorf("provider rotation changed backup reservation")
 		}
 
-		if v.Kind == "declaration" {
+		if isDeliveryDeclaration(v.Kind) {
 			m, e := s.declarationManifest(ctx, v)
 			if e != nil {
 				return "", e
@@ -824,6 +927,11 @@ func (s *deliveryProviderStep) Run(ctx context.Context, op string) error {
 }
 
 func (s *deliveryProviderStep) declarationManifest(ctx context.Context, v deliveryProviderIntent) (install.ManagedManifest, error) {
+	if isCommandDeliveryPolicy(v.Kind) && isDeliveryDeclaration(v.Kind) {
+		if _, err := s.l.review(ctx, s.p.Installation, protocol.Hash(v.Before), v.AfterRuntime); err != nil {
+			return v.Before, err
+		}
+	}
 	o, err := s.l.inspect(ctx, s.p.Installation)
 	if err != nil {
 		return o.Manifest, err

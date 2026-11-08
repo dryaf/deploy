@@ -149,18 +149,12 @@ func inspectSetupForReviewLocked(ctx context.Context, root *safefs.Directory, ho
 	if err = checkSetupTelegramRotation(j, nil, false); err != nil {
 		return observed, err
 	}
-	if j.Activity != nil && j.Activity.Previous != "" {
-		if !safefs.DigestPattern.MatchString(j.Activity.Previous) {
-			return observed, fmt.Errorf("invalid backup activity history reference")
-		}
-		var previous declaredBackupActivity
-		if err = root.ReadJSON(".local/state/deploy/backup-worker/activity-history/"+j.Activity.Previous+".json", &previous); err != nil {
+	if j.Activity != nil {
+		if err = verifyBackupActivityHistory(root, *j.Activity); err != nil {
 			return observed, err
 		}
-		if previous.validate() != nil || !previous.Complete || notify.Hash(previous) != j.Activity.Previous {
-			return observed, fmt.Errorf("backup activity history unavailable")
-		}
 	}
+
 	if j.Declaration != nil {
 		observed.DesiredHash = j.Declaration.DesiredHash
 		observed.HelperSHA256 = j.Declaration.HelperSHA256
@@ -382,8 +376,18 @@ func inspectSetupForReviewLocked(ctx context.Context, root *safefs.Directory, ho
 			observed.Stage = "ownership_review_required"
 			return observed, nil
 		}
-		if owner.Binding.Producer != j.Producer.Producer || owner.Binding.Generation != j.Producer.Generation || owner.Binding.Route != j.Declaration.NotificationRoute || owner.Binding.Archive != c.ArchiveID || j.Shared != nil && j.Shared.Owner != owner {
+		if owner.Binding.Producer != j.Producer.Producer || owner.Binding.Generation != j.Producer.Generation || !reportRouteOwnerShape(j, owner) || owner.Binding.Archive != c.ArchiveID || j.Shared != nil && j.Shared.Owner != owner {
 			return observed, fmt.Errorf("shared report owner differs from setup reservation")
+		}
+		if e = requireReportRouteOwner(j, owner); e != nil {
+			return observed, e
+		}
+		route, e := effectiveBackupReportRoute(tx, owner.Binding)
+		if e != nil {
+			return observed, e
+		}
+		if route != j.Declaration.NotificationRoute {
+			return observed, fmt.Errorf("applied reporting route differs from retained route authority")
 		}
 		var completed string
 		if e = backupEvaluationMeta(tx, "notification_cutover_complete", &completed); e == sql.ErrNoRows {
@@ -462,7 +466,8 @@ func inspectSetupForReviewLocked(ctx context.Context, root *safefs.Directory, ho
 	}
 	var run WorkerRun
 	if e := backupEvaluationMeta(tx, "run", &run); e == nil {
-		observed.RecentSuccessfulBackup = run.Complete && run.ConfigHash == c.ConfigHash && len(run.Failures) == 0 && !run.FinishedAt.IsZero() && !run.FinishedAt.After(time.Now()) && time.Since(run.FinishedAt) <= time.Hour
+		activityRun := j.Activity == nil || j.Activity.Version != 2 || j.Activity.Setup != j.RequestHash || j.Activity.CreatedAt != nil && !run.StartedAt.Before(*j.Activity.CreatedAt)
+		observed.RecentSuccessfulBackup = activityRun && run.Complete && run.ConfigHash == c.ConfigHash && len(run.Failures) == 0 && !run.FinishedAt.IsZero() && !run.FinishedAt.After(time.Now()) && time.Since(run.FinishedAt) <= time.Hour
 	} else if e != sql.ErrNoRows {
 		return observed, e
 	}

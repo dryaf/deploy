@@ -29,9 +29,18 @@ func ValidateEnrolledFreshnessChange(before, after Config) error {
 	return nil
 }
 func validateEnrolledPolicyChange(version int, before, after Config) error {
-	if version == 31 {
+	if version == 31 || version == 32 || version == 33 || version == 34 || version == 35 {
 		if before.Interaction == nil || after.Interaction == nil {
-			return fmt.Errorf("command budgets require retained enrollment")
+			return fmt.Errorf("command policy changes require retained enrollment")
+		}
+		if version == 33 || version == 35 {
+			return ValidateEnrolledRoutesChange(before, after)
+		}
+		if version == 34 {
+			return ValidateEnrolledProducerPolicyChange(before, after)
+		}
+		if version == 32 {
+			return ValidateEnrolledFreshnessChange(before, after)
 		}
 		return ValidateEnrolledLimitsChange(before, after)
 	}

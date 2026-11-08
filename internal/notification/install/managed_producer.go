@@ -95,17 +95,22 @@ func (s *managedProducerSession) RequireRecoveryCommit(ctx context.Context, proo
 }
 
 type managedProducerSession struct {
-	request  ManagedProducerRequest
-	manifest ManagedManifest
-	runtime  Runtime
-	store    *worker.Store
-	check    func() error
+	credentials []string
+	request     ManagedProducerRequest
+	manifest    ManagedManifest
+	runtime     Runtime
+	store       *worker.Store
+	check       func() error
 }
 
 func (s *managedProducerSession) Manifest() ManagedManifest { return s.manifest }
-func (s *managedProducerSession) CredentialPaths() []string {
+func (s *managedProducerSession) CredentialPaths() []string { return slices.Clone(s.credentials) }
+func directRuntimeCredentialPaths(c Runtime) []string {
 	var out []string
-	for _, p := range s.runtime.Providers {
+	for _, p := range c.Providers {
+		if p.SignalDelivery != nil {
+			out = append(out, p.SignalDelivery.AccountFile, p.SignalDelivery.RecipientFile)
+		}
 		if p.ChatFile != "" {
 			out = append(out, p.ChatFile)
 		}
@@ -371,7 +376,11 @@ func (i managedInstaller) withManagedProducer(ctx context.Context, r ManagedProd
 	if err = check(); err != nil {
 		return err
 	}
-	if err = fn(&managedProducerSession{r, m, c, s, check}); err != nil {
+	credentials, err := retainedDeliveryCredentials(d, j, c)
+	if err != nil {
+		return err
+	}
+	if err = fn(&managedProducerSession{request: r, manifest: m, runtime: c, store: s, check: check, credentials: credentials}); err != nil {
 		return err
 	}
 	if err = check(); err != nil {

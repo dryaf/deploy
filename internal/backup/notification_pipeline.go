@@ -142,6 +142,9 @@ func freezeBackupNotificationPass(tx *sql.Tx, e backupNotificationEvaluation) ([
 	if err != nil {
 		return nil, err
 	}
+	if b.Route, err = effectiveBackupReportRoute(tx, b); err != nil {
+		return nil, err
+	}
 	if err = storeBackupNotificationSnapshot(tx, b, e); err != nil {
 		return nil, err
 	}

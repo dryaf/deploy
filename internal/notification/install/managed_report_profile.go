@@ -42,8 +42,16 @@ func InspectManagedReportProfile(root string, identity protocol.Identity, produc
 		return out, err
 	}
 	m := j.Intent.After
-	if j.Phase != "complete" || m.Root != root || m.Identity != identity || m.DeliveryOwnerHash == "" || m.Mode == "uninstalled" {
+	if j.Phase != "complete" || m.Root != root || m.Identity != identity || m.DeliveryOwnerHash == "" {
 		return out, fmt.Errorf("report gateway installation changed or unfinished")
+	}
+	if m.Mode == "uninstalled" {
+		if j.Intent.Operation != "suspend-shared-activity" {
+			return out, fmt.Errorf("removed gateway has no retained shared activity profile")
+		}
+		if _, err = sharedActivityPause(d, j); err != nil {
+			return out, err
+		}
 	}
 	if err = validateManagedPointer(d, j, true); err != nil {
 		return out, err
@@ -70,7 +78,7 @@ func InspectManagedReportProfile(root string, identity protocol.Identity, produc
 	if err != nil {
 		return out, err
 	}
-	if !present || managedDigest(b) != m.UnitHash {
+	if m.Mode == "uninstalled" && present || m.Mode != "uninstalled" && (!present || managedDigest(b) != m.UnitHash) {
 		return out, fmt.Errorf("report gateway unit changed")
 	}
 	paths, err := retainedDeliveryCredentials(d, j, c)

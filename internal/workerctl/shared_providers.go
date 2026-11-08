@@ -8,6 +8,7 @@ import (
 	"github.com/dryaf/deploy/internal/notification/install"
 	"github.com/dryaf/deploy/internal/notification/protocol"
 	"github.com/dryaf/deploy/internal/safefs"
+	"maps"
 	"reflect"
 )
 
@@ -89,7 +90,26 @@ func compileSharedProviders(r ControlRequest, paths ResolvedPaths, d *safefs.Dir
 		}
 		providerRequest.Inputs[field] = value
 	}
-	generated, next, err := compileProvidersRuntime(providerRequest, paths, input, before)
+	declaration, err := readDeclaration(d, prior.Pins.DesiredHash, prior.Pins.DesiredScope)
+	if err != nil {
+		return zero, nil, nil, err
+	}
+	signalReferences := !reflect.DeepEqual(declaration.Notification.Providers["signal"], r.Desired.Notification.Providers["signal"])
+	if signalReferences {
+		// Signal updates retain Telegram provisioning, including old operator-input
+		// declarations. Compile from their already pinned target-private copies.
+		n := *providerRequest.Desired.Notification
+		n.Providers = maps.Clone(n.Providers)
+		providerRequest.Desired.Notification = &n
+		if p, ok := n.Providers["telegram"]; ok {
+			p.TokenFile, p.ChatIDFile = input.Providers["telegram"].TokenFile, input.Providers["telegram"].ChatFile
+			p.TokenInput, p.ChatIDInput = "", ""
+			n.Providers["telegram"] = p
+			delete(providerRequest.Inputs, "token")
+			delete(providerRequest.Inputs, "chat_id")
+		}
+	}
+	generated, next, err := compileProvidersRuntimePolicy(providerRequest, paths, input, before, signalReferences)
 	if err != nil {
 		return zero, nil, nil, err
 	}
@@ -130,6 +150,22 @@ func validateSharedProviderPins(v notificationSharedLimitsIntent) error {
 	}
 	b, a := *v.BeforeInputs, *v.AfterInputs
 	a.Runtime, a.Token, a.Chat = b.Runtime, b.Token, b.Chat
+	// A typed native reference retains the service and same account, while its
+	// exact selected recipient is pinned independently on both sides.
+	var oldInput, newInput install.RuntimeInput
+	if safefs.DecodeJSON(v.BeforeRuntime, &oldInput, maxControlFrame) != nil || safefs.DecodeJSON(v.AfterRuntime, &newInput, maxControlFrame) != nil {
+		return fmt.Errorf("invalid provider runtime")
+	}
+	if p := newInput.Providers["signal"]; p.SignalDelivery != nil {
+		old := oldInput.Providers["signal"]
+		if p.Socket != old.Socket || p.Kind != old.Kind || p.Conversation != nil || a.SignalAccount != b.SignalAccount || p.SignalDelivery.AccountHash != a.SignalAccount || p.SignalDelivery.RecipientHash != a.SignalRecipient {
+			return fmt.Errorf("native delivery authority changed")
+		}
+		if old.SignalDelivery != nil && old.SignalDelivery.ServiceHash != p.SignalDelivery.ServiceHash {
+			return fmt.Errorf("native service replaced")
+		}
+		a.SignalRecipient = b.SignalRecipient
+	}
 	if protocol.Hash(a) != protocol.Hash(b) {
 		return fmt.Errorf("provider update replaced unrelated credential authority")
 	}
@@ -165,7 +201,7 @@ func retainedProviderReviewRequest(r ControlRequest, before config.DesiredWorker
 func validateSharedProvidersDeclaration(before, after config.DesiredWorkers) error {
 	oldSignal, hadSignal := before.Notification.Providers["signal"]
 	newSignal, hasSignal := after.Notification.Providers["signal"]
-	if hadSignal != hasSignal || !reflect.DeepEqual(oldSignal, newSignal) {
+	if hadSignal != hasSignal || !reflect.DeepEqual(oldSignal, newSignal) && config.ValidateSignalReferenceChange(oldSignal, newSignal) != nil {
 		return fmt.Errorf("retain the exact owned Signal profile during Telegram changes")
 	}
 	oldTelegram, hadTelegram := before.Notification.Providers["telegram"]
@@ -180,7 +216,7 @@ func validateSharedProvidersDeclaration(before, after config.DesiredWorkers) err
 	if hadTelegram != hasTelegram && (!hasSignal || before.Notification.Commands.Enabled || after.Notification.Commands.Enabled || oldTelegram.Account != "" || oldTelegram.BotName != "" || oldTelegram.Conversation != "") {
 		return fmt.Errorf("Telegram profile addition/removal requires an unchanged owned Signal profile and no commands")
 	}
-	if hasTelegram {
+	if hasTelegram && (!hadTelegram || !reflect.DeepEqual(oldTelegram, next)) {
 		if next.TokenFile == "" || next.ChatIDFile == "" || next.TokenInput != "" || next.ChatIDInput != "" {
 			return fmt.Errorf("select private Telegram target-file references for shared updates")
 		}

@@ -8,7 +8,9 @@ import (
 	"github.com/dryaf/deploy/internal/safefs"
 )
 
-func freshnessScope(version int) bool { return version == 14 || version == 23 }
+func productionFreshnessScope(version int) bool { return version == 23 || version == 25 }
+
+func freshnessScope(version int) bool { return version == 14 || productionFreshnessScope(version) }
 
 func ReconcileDeliveryDerivedFreshnessScope(ctx context.Context, home string, r VerificationNotificationScopeChange, credentials []string, migrate func(ProducerReservation) (string, error)) (string, error) {
 	return reconcileReportPolicy(ctx, home, r, credentials, migrate, 23)
@@ -50,7 +52,7 @@ func (v *setupNotificationScope) prepareFreshnessCapture(ctx context.Context, ho
 }
 
 func (v setupNotificationScope) validateFreshnessCapture() error {
-	if v.Version != 23 {
+	if !productionFreshnessScope(v.Version) {
 		if len(v.Freshness.Capture) != 0 {
 			return fmt.Errorf("unexpected production capture intent")
 		}
@@ -116,7 +118,7 @@ func reportingScopeRuntime(root *safefs.Directory, j WorkerSetupJournal, current
 			return current, err
 		}
 		v := receipt.Intent
-		if v.Version == 23 {
+		if productionFreshnessScope(v.Version) {
 			paths, err := declarationPaths(v.Before.Declaration.Home, v.Before.Declaration)
 			if err != nil {
 				return current, err

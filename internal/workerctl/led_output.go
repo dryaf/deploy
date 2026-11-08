@@ -10,6 +10,7 @@ import (
 	"github.com/dryaf/deploy/internal/config"
 	"github.com/dryaf/deploy/internal/notification/install"
 	"github.com/dryaf/deploy/internal/notification/protocol"
+	"github.com/dryaf/deploy/internal/notification/relay"
 	"github.com/dryaf/deploy/internal/safefs"
 )
 
@@ -330,7 +331,9 @@ func readRetainedSignalInputs(r ControlRequest, paths ResolvedPaths, before conf
 	if e = child.ReadJSON("inputs.json", &selected); e != nil {
 		return install.FreshSignalSpec{}, "", e
 	}
-	if selected.Version != 1 || selected.Operation != journal.Children[0].Operation || selected.Paths != resolved || selected.DesiredHash != journal.Pins.DesiredHash || selected.HelperHash != journal.Pins.Artifacts["helper"] || selected.CLIHash != r.SignalSHA256 {
+	originalPaths := resolved
+	originalPaths.AccountFile, originalPaths.RecipientFile = selected.Paths.AccountFile, selected.Paths.RecipientFile
+	if selected.Version != 1 || selected.Operation != journal.Children[0].Operation || selected.Paths != originalPaths || selected.DesiredHash != journal.Pins.DesiredHash || selected.HelperHash != journal.Pins.Artifacts["helper"] || selected.CLIHash != r.SignalSHA256 {
 		return install.FreshSignalSpec{}, "", fmt.Errorf("Signal input authority differs from selected native service")
 	}
 	for field, path := range map[string]string{"signal_account": resolved.AccountFile, "signal_recipient": resolved.RecipientFile} {
@@ -343,16 +346,37 @@ func readRetainedSignalInputs(r ControlRequest, paths ResolvedPaths, before conf
 		}
 		secrets[field] = value
 	}
-	if selected.AccountHash != inputDigest(secrets["signal_account"]) || selected.RecipientHash != inputDigest(secrets["signal_recipient"]) {
+	originalSecrets := map[string][]byte{}
+	for field, path := range map[string]string{"signal_account": originalPaths.AccountFile, "signal_recipient": originalPaths.RecipientFile} {
+		value, err := ReadCredentialInput(path)
+		if err != nil {
+			return install.FreshSignalSpec{}, "", err
+		}
+		originalSecrets[field] = value
+	}
+	if selected.AccountHash != inputDigest(originalSecrets["signal_account"]) || selected.RecipientHash != inputDigest(originalSecrets["signal_recipient"]) {
 		return install.FreshSignalSpec{}, "", fmt.Errorf("Signal input authority changed")
 	}
 	original := r
 	original.DesiredHash, original.DesiredScope = journal.Pins.DesiredHash, journal.Pins.DesiredScope
 	original.HelperSHA256 = journal.Pins.Artifacts["helper"]
-	step := signalSetupStep{request: original, gateway: paths, paths: resolved, directory: child, provider: before.Notification.Providers["signal"], account: secrets["signal_account"], recipient: secrets["signal_recipient"]}
+	step := signalSetupStep{request: original, gateway: paths, paths: originalPaths, directory: child, provider: before.Notification.Providers["signal"], account: originalSecrets["signal_account"], recipient: originalSecrets["signal_recipient"]}
 	record, e := step.record(journal.Children[0].Operation)
 	if e != nil {
 		return install.FreshSignalSpec{}, "", e
+	}
+	if originalPaths != resolved || inputDigest(secrets["signal_recipient"]) != selected.RecipientHash || inputDigest(secrets["signal_account"]) != selected.AccountHash {
+		proposal, err := install.ReviewFreshSignalDelivery(context.Background(), resolved.Service, resolved.AccountFile, resolved.RecipientFile, inputDigest(secrets["signal_account"]), inputDigest(secrets["signal_recipient"]))
+		if err != nil || proposal == nil {
+			return install.FreshSignalSpec{}, "", fmt.Errorf("Signal delivery reference review unavailable: %v", err)
+		}
+		a, r, err := proposal.Values()
+		if err != nil {
+			return install.FreshSignalSpec{}, "", err
+		}
+		if err = install.InspectFreshSignalDeliveryReferences(context.Background(), install.FreshSignalReference{Root: resolved.Service, ManifestHash: proposal.ServiceHash}, *proposal, relay.Destination(a, r)); err != nil {
+			return install.FreshSignalSpec{}, "", err
+		}
 	}
 	return record.Spec, journal.Children[0].Receipt, nil
 }

@@ -12,13 +12,13 @@ import (
 // work. Fresh delivery qualification cannot replace that authority.
 func PreflightCommandDeliveryLimits(ctx context.Context, state string, id protocol.Identity, before, after Config, commandHistory string) error {
 	if !safefs.DigestPattern.MatchString(commandHistory) {
-		return fmt.Errorf("command budgets require an exact command history pin")
+		return fmt.Errorf("command policy changes require an exact command history pin")
 	}
 	if err := validateEnrolledPolicyChange(31, before, after); err != nil {
 		return err
 	}
 	return inspectEnrolledPolicyState(ctx, state, id, before, func(s *Store) error {
-		if err := checkDeliveryCommandBudgetHead(s, commandHistory); err != nil {
+		if err := checkDisabledDeliveryCommandHead(s, commandHistory); err != nil {
 			return err
 		}
 		return checkEnrolledPolicyCapacity(ctx, s, after, 31)
@@ -27,16 +27,16 @@ func PreflightCommandDeliveryLimits(ctx context.Context, state string, id protoc
 func MigrateCommandDeliveryLimits(ctx context.Context, state string, id protocol.Identity, before, after Config, operation, commandHistory string) (EnrolledLimitsReceipt, error) {
 	return migrateEnrolledPolicy(ctx, state, id, before, after, operation, 31, nil, commandHistory)
 }
-func checkDeliveryCommandBudgetHead(s *Store, expected string) error {
+func checkDisabledDeliveryCommandHead(s *Store, expected string) error {
 	if s.config.Interaction == nil {
-		return fmt.Errorf("command budget migration lost enrollment")
+		return fmt.Errorf("command policy migration lost enrollment")
 	}
 	head, err := s.commandSQLHead()
 	if err != nil {
 		return err
 	}
 	if head == nil || head.Mode != "drain" || head.Identity != s.identity || expected != "" && head.Hash != expected {
-		return fmt.Errorf("disable commands and retain their exact authority before changing budgets")
+		return fmt.Errorf("disable commands and retain their exact authority before changing delivery policy")
 	}
 	return s.checkManagedCommandHistory(head.Hash)
 }

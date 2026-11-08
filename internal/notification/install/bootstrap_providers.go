@@ -35,7 +35,9 @@ func ValidateBootstrapProvidersChange(before, after Runtime) error {
 			case "signal":
 				signals++
 				if protocol.Hash(before.Providers[name]) != protocol.Hash(after.Providers[name]) {
-					return fmt.Errorf("provider migration must retain the exact Signal profile")
+					if err := validateSignalDeliveryProfileChange(before.Providers[name], after.Providers[name], true); err != nil {
+						return err
+					}
 				}
 			default:
 				return fmt.Errorf("unsupported provider migration profile")

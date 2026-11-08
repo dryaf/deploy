@@ -26,7 +26,7 @@ type providerScopeDependencies struct {
 // destination are checked by that transition; this function grants no new
 // delivery or producer authority.
 func reportPolicyScope(version int) bool {
-	return version == 16 || version == 17 || version == 18 || version == 19 || version == 20 || version == 21 || version == 23
+	return version == 24 || version == 25 || version == 16 || version == 17 || version == 18 || version == 19 || version == 20 || version == 21 || productionFreshnessScope(version)
 }
 func ReconcileDeliveryLimitsScope(ctx context.Context, home string, r VerificationNotificationScopeChange, credentials []string, migrate func(ProducerReservation) (string, error)) (string, error) {
 	return reconcileReportPolicy(ctx, home, r, credentials, migrate, 17)
@@ -53,13 +53,13 @@ func (v setupNotificationScope) providerReportPaths() WorkerUnitPaths {
 func (v setupNotificationScope) validateProviderReports() error {
 	p := v.Reports
 	b := v.Before
-	if p == nil || b.Declaration == nil || b.Producer == nil || p.Owner.Mode != "shared" || p.Owner.CutoverHash == "" || p.Owner.Binding.Producer != b.Producer.Producer || p.Owner.Binding.Generation != b.Producer.Generation || p.Owner.Binding.Archive != b.ArchiveID || p.Owner.Binding.Route != b.Declaration.NotificationRoute || p.Owner.Binding.Identity != p.BeforeProfile.Identity || p.BeforeProfile.ManifestHash != v.BeforeGateway {
+	if p == nil || b.Declaration == nil || b.Producer == nil || p.Owner.Mode != "shared" || p.Owner.CutoverHash == "" || p.Owner.Binding.Producer != b.Producer.Producer || p.Owner.Binding.Generation != b.Producer.Generation || p.Owner.Binding.Archive != b.ArchiveID || !reportRouteOwnerShape(b, p.Owner) || p.Owner.Binding.Identity != p.BeforeProfile.Identity || p.BeforeProfile.ManifestHash != v.BeforeGateway {
 		return fmt.Errorf("delivery provider scope lost its reporting owner")
 	}
 	if _, err := declarationPaths(b.Declaration.Home, b.Declaration); err != nil {
 		return err
 	}
-	if (v.Version == 17 || v.Version == 18 || v.Version == 19 || v.Version == 23) && !reflect.DeepEqual(p.Credentials, p.BeforeProfile.Credentials) {
+	if (v.Version == 17 || v.Version == 18 || v.Version == 19 || v.Version == 24 || productionFreshnessScope(v.Version)) && !reflect.DeepEqual(p.Credentials, p.BeforeProfile.Credentials) {
 		return fmt.Errorf("budget scope changed report credentials")
 	}
 	return p.validate(v.providerReportInstallation(), v.providerReportPaths())
@@ -75,6 +75,14 @@ func (v *setupNotificationScope) prepareProviderReports(ctx context.Context, roo
 		return err
 	}
 	owner, err := currentSharedBackupOwner(state)
+	if err == nil && v.Version == 24 {
+		var pending int
+		err = state.db.QueryRow("SELECT count(*) FROM notification_exports WHERE state NOT IN ('provider_accepted','expired','superseded','cancelled')").Scan(&pending)
+		if err == nil && pending != 0 {
+			err = fmt.Errorf("settle frozen backup reports before selecting another route")
+		}
+	}
+
 	if err == nil {
 		err = requireCommandScopeOwner(state, v.Before)
 	}
@@ -89,7 +97,7 @@ func (v *setupNotificationScope) prepareProviderReports(ctx context.Context, roo
 	if owner == nil || (activity != "active" && activity != "staged-awaiting-qualification") {
 		return fmt.Errorf("report credential rotation requires completed shared reporting")
 	}
-	profile, err := deps.profile(v.Before.Declaration.NotificationRoot, owner.Binding.Identity, owner.Binding.Producer, owner.Binding.Route)
+	profile, err := deps.profile(v.Before.Declaration.NotificationRoot, owner.Binding.Identity, owner.Binding.Producer, v.Before.Declaration.NotificationRoute)
 	if err != nil {
 		return err
 	}
@@ -142,7 +150,7 @@ func (v setupNotificationScope) providerReportsAfter(j WorkerSetupJournal, gatew
 
 func (v setupNotificationScope) inspectProviderProfile(gateway string, deps *providerScopeDependencies) error {
 	o := v.Reports.Owner
-	profile, err := deps.profile(v.Before.Declaration.NotificationRoot, o.Binding.Identity, o.Binding.Producer, o.Binding.Route)
+	profile, err := deps.profile(v.Before.Declaration.NotificationRoot, o.Binding.Identity, o.Binding.Producer, v.After.Declaration.NotificationRoute)
 	if err != nil {
 		return err
 	}
@@ -218,11 +226,11 @@ func (v setupNotificationScope) finishProviderReports(ctx context.Context, root 
 		lease.Close()
 		return err
 	}
-	if owner == nil || *owner != v.Reports.Owner || (activity != "active" && activity != "staged-awaiting-qualification") || (activity == "active") != (v.Reports.BackupActive && v.Version != 23) {
+	if owner == nil || *owner != v.Reports.Owner || (activity != "active" && activity != "staged-awaiting-qualification") || (activity == "active") != (v.Reports.BackupActive && !productionFreshnessScope(v.Version)) {
 		lease.Close()
 		return fmt.Errorf("reporting owner or activity changed during credential scope")
 	}
-	if v.Version == 23 {
+	if productionFreshnessScope(v.Version) {
 		if e := v.inspectFreshnessCapture(ctx, deps); e != nil {
 			lease.Close()
 			return e
@@ -254,7 +262,7 @@ func (v setupNotificationScope) finishProviderReports(ctx context.Context, root 
 		lease.Close()
 		return err
 	}
-	if err == nil && v.Version == 23 {
+	if err == nil && productionFreshnessScope(v.Version) {
 		err = v.finishFreshnessGate(root)
 	} else if err == nil {
 		err = clearInstallationGate(paths.State, v.Operation)

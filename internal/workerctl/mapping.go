@@ -26,7 +26,7 @@ func mappingJournal(j OperationJournal) bool {
 }
 
 func enrolledNotificationJournal(j OperationJournal) bool {
-	return j.Pins.Action == "apply" && len(j.Children) == 1 && (j.Children[0].Name == "notification-enrollment" || commandPauseJournal(j) || mappingJournal(j) || enrolledOutputJournal(j) || sharedLimitsJournal(j) || requalificationJournal(j) || deliveryProviderJournal(j))
+	return j.Pins.Action == "apply" && len(j.Children) == 1 && (sharedActivityJournal(j) || j.Children[0].Name == "notification-enrollment" || commandPauseJournal(j) || mappingJournal(j) || enrolledOutputJournal(j) || sharedLimitsJournal(j) || requalificationJournal(j) || deliveryProviderJournal(j))
 }
 
 // Enrollment and mapping are separate forward transitions. Keep the original
@@ -324,6 +324,16 @@ func verifyMappingReceiptWithScope(d *safefs.Directory, current OperationJournal
 }
 
 func verifyMappingScope(d *safefs.Directory, current OperationJournal, inspect func(string, string, string, string) (string, bool, error)) error {
+	if sharedActivityJournal(current) {
+		if _, err := readSharedActivityIntent(d, current); err != nil {
+			return err
+		}
+		prior, err := sharedActivityPredecessor(d, current)
+		if err != nil {
+			return err
+		}
+		return verifyMappingScope(d, prior, inspect)
+	}
 	if requalificationJournal(current) {
 		if inspect == nil {
 			inspect = backup.InspectRetainedDeliveryPolicyScope
@@ -373,6 +383,9 @@ func verifyMappingScope(d *safefs.Directory, current OperationJournal, inspect f
 	}
 	if inspect == nil {
 		inspect = backup.InspectRetainedDeliveryPolicyScope
+		if deliveryProviderJournal(current) && isCommandDeliveryPolicy(deliveryProviderKind(current)) {
+			inspect = backup.InspectRetainedCommandPolicyScope
+		}
 	}
 	receipt, done, err := inspect(current.Pins.Home, current.Children[0].Operation, before, current.Pins.DesiredHash)
 	if err != nil {

@@ -57,6 +57,8 @@ var runtimeFieldGroups = []runtimeFieldGroup{
 	{"notification.providers.*.", "token_file chat_file", "YAML Telegram target references or private target files provisioned from operator-local inputs"},
 	{"notification.providers.*.", "socket", "YAML Signal socket override or generated owned native service endpoint"},
 	{"notification.providers.*.", "destination", "Generated fingerprint of the actual provider identity and destination; never plaintext recipient data"},
+	{"notification.providers.*.signal_delivery.", "service_hash account_hash recipient_hash", "Generated immutable native delivery approval bound to the original service and exact private input bytes; never new account/link authority"},
+	{"notification.providers.*.signal_delivery.", "account_file recipient_file", "YAML Signal target references selected by a same-account recipient/reference migration; original setup references remain retained"},
 	{"notification.providers.*.relay_identity.", "worker recovery", "Generated canonical relay/inbox identity from verified service ownership"},
 	{"notification.providers.*.conversation.", "id provider account native_id thread", "YAML referenced command conversation; fixed destination references are excluded"},
 	{"notification.providers.*.conversation.", "generation", "Generated conversation enrollment revision, shared with the admitted interaction policy"},

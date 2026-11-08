@@ -106,12 +106,17 @@ func commandActivityPins(prior OperationJournal, desired config.DesiredWorkers, 
 // Every toggle retains the original receiver, SQL results and delivery ancestor.
 // Walking only these checked records cannot authorize a new mode or broader permissions.
 func retainedCommandReceiver(ctx context.Context, d *safefs.Directory, j OperationJournal, l notificationCommandLifecycle) (backup.CommandReceiverRequest, error) {
-	for depth := 0; commandActivityJournal(j) || deliveryOutputJournal(j) || commandPauseJournal(j) || commandDeliveryJournal(j) || commandLimitsJournal(j); depth++ {
+	for depth := 0; sharedActivityJournal(j) || commandActivityJournal(j) || deliveryOutputJournal(j) || commandPauseJournal(j) || commandDeliveryJournal(j) || commandDeliveryPolicyJournal(j) || commandDeclarationJournal(j); depth++ {
 		if depth >= 128 {
 			return backup.CommandReceiverRequest{}, fmt.Errorf("command history exceeds review bound")
 		}
 		var err error
-		if commandLimitsJournal(j) {
+		if sharedActivityJournal(j) {
+			if _, err = readSharedActivityIntent(d, j); err != nil {
+				return backup.CommandReceiverRequest{}, err
+			}
+			j, err = sharedActivityPredecessor(d, j)
+		} else if commandDeliveryPolicyJournal(j) || commandDeclarationJournal(j) {
 			if _, err = readDeliveryProviderIntent(d, j); err != nil {
 				return backup.CommandReceiverRequest{}, err
 			}

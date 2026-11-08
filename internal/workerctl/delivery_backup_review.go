@@ -19,8 +19,11 @@ func deliveryBackupBefore(before, after config.DesiredWorkers, kind string) (con
 	}
 	next := before
 	b := *after.Backup
-	if kind == "derived-freshness" {
+	if derivedFreshnessPolicy(kind) {
 		b.Freshness = before.Backup.Freshness
+	}
+	if reportRoutePolicy(kind) {
+		b.Notifications.Route = before.Backup.Notifications.Route
 	}
 	next.Backup = &b
 	old, err := before.NotificationFingerprint()

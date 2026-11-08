@@ -39,7 +39,7 @@ func inspectCoordinatedNotificationReservation(root, stateRoot *safefs.Directory
 	}
 	if j.NotificationScope != nil {
 		v := *j.NotificationScope
-		if !freshnessScope(v.Version) && v.Version != 15 {
+		if !freshnessScope(v.Version) && !reportRouteScope(v.Version) && v.Version != 8 && v.Version != 19 {
 			return false, nil
 		}
 		if err := v.validate(); err != nil {
@@ -52,10 +52,11 @@ func inspectCoordinatedNotificationReservation(root, stateRoot *safefs.Directory
 	}
 	derived := config.ValidateDerivedFreshnessDeclaration(*j.Declaration.Desired, *request.Declaration.Desired) == nil
 	reportRoute := config.ValidateSharedReportRouteDeclaration(*j.Declaration.Desired, *request.Declaration.Desired) == nil
-	if !derived && !reportRoute {
+	routes := config.ValidateDeliveryRoutesDeclaration(*j.Declaration.Desired, *request.Declaration.Desired) == nil
+	if !derived && !reportRoute && !routes {
 		return false, nil
 	}
-	if j.Stage != "complete" || (j.Schema != 1 && j.Schema != 2) || !derived && j.Shared != nil || j.Updating || j.RecoveryNeeded || j.SourceExpansion != nil || j.SourceRetirement != nil || j.Activity != nil && (!j.Activity.Complete || j.Activity.Disabled) {
+	if j.Stage != "complete" || (j.Schema != 1 && j.Schema != 2) || j.Updating || j.RecoveryNeeded || j.SourceExpansion != nil || j.SourceRetirement != nil || j.Activity != nil && (!j.Activity.Complete || j.Activity.Disabled) {
 		return true, fmt.Errorf("derived freshness requires completed staged backup setup")
 	}
 	if err := checkSetupProducerReservation(stateRoot, &j); err != nil {
@@ -232,10 +233,10 @@ func (v setupNotificationScope) publishFreshness(root *safefs.Directory, boundar
 	}
 	defer state.Close()
 	var activity string
-	if err = state.get("installation", &activity); err != nil || (activity != "staged-awaiting-qualification" && !(v.Version == 23 && activity == "active")) {
+	if err = state.get("installation", &activity); err != nil || (activity != "staged-awaiting-qualification" && !(productionFreshnessScope(v.Version) && activity == "active")) {
 		return fmt.Errorf("freshness publication requires staged backup")
 	}
-	if v.Version == 23 {
+	if productionFreshnessScope(v.Version) {
 		err = requireCommandScopeOwner(state, v.Before)
 	} else {
 		err = requirePendingSharedSetup(state, &v.Before)
@@ -243,7 +244,7 @@ func (v setupNotificationScope) publishFreshness(root *safefs.Directory, boundar
 	if err != nil {
 		return err
 	}
-	if v.Version == 23 && activity == "active" {
+	if productionFreshnessScope(v.Version) && activity == "active" {
 		if err = state.put("installation", "staged-awaiting-qualification"); err != nil {
 			return err
 		}

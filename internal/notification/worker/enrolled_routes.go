@@ -23,11 +23,23 @@ func ValidateEnrolledRoutesChange(before, after Config) error {
 	return nil
 }
 func checkEnrolledPolicyCapacity(ctx context.Context, s *Store, after Config, version int) error {
-	if version == 31 {
-		if err := checkDeliveryCommandBudgetHead(s, ""); err != nil {
+	if version == 31 || version == 32 || version == 33 || version == 34 || version == 35 {
+		if err := checkDisabledDeliveryCommandHead(s, ""); err != nil {
 			return err
 		}
-		return checkLimitsCapacity(ctx, s, after, true, true)
+		if err := checkLimitsCapacity(ctx, s, after, true, true); err != nil {
+			return err
+		}
+		if version == 33 || version == 35 && protocol.Hash(s.config.Routes) != protocol.Hash(after.Routes) || version == 34 && producerPolicyNeedsSettledQueue(s.config, after) {
+			var pending int
+			if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM messages WHERE state NOT IN ('provider_accepted','expired','superseded','cancelled')").Scan(&pending); err != nil {
+				return err
+			}
+			if pending != 0 {
+				return fmt.Errorf("settle pending messages before changing producer access policy; command requests/results remain retained")
+			}
+		}
+		return nil
 	}
 
 	if version == 21 || version == 24 || version == 23 || version == 25 {

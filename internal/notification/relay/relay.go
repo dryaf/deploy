@@ -52,12 +52,13 @@ type AccountRuntime interface {
 }
 
 type ManagedExecution struct {
-	fresh   bool
-	Account AccountRuntime
-	Inbox   *Inbox
-	Check   func(context.Context) error
-	Command func(context.Context, *os.File, io.Writer, ...string) error
-	Health  func(context.Context) (any, error)
+	fresh     bool
+	Account   AccountRuntime
+	Inbox     *Inbox
+	Check     func(context.Context) error
+	Command   func(context.Context, *os.File, io.Writer, ...string) error
+	Health    func(context.Context) (any, error)
+	Recipient func(context.Context, string, string) (string, error)
 }
 
 func RunManaged(ctx context.Context, c Config, m ManagedExecution) error {
@@ -77,11 +78,12 @@ func RunManaged(ctx context.Context, c Config, m ManagedExecution) error {
 // inbox. Direct alert delivery is permitted only on this distinct first-install
 // path; recovered services retain their conversation-only contract.
 type FreshExecution struct {
-	Account *signalaccount.NativeRuntime
-	Inbox   *Inbox
-	Check   func(context.Context) error
-	Command func(context.Context, *os.File, io.Writer, ...string) error
-	Health  func(context.Context) (any, error)
+	Account   *signalaccount.NativeRuntime
+	Inbox     *Inbox
+	Check     func(context.Context) error
+	Command   func(context.Context, *os.File, io.Writer, ...string) error
+	Health    func(context.Context) (any, error)
+	Recipient func(context.Context, string, string) (string, error)
 }
 
 func RunFreshManaged(ctx context.Context, c Config, f FreshExecution) error {
@@ -100,7 +102,7 @@ func RunFreshManaged(ctx context.Context, c Config, f FreshExecution) error {
 	if err := f.Check(ctx); err != nil {
 		return err
 	}
-	m := ManagedExecution{fresh: true, Account: f.Account, Inbox: f.Inbox, Check: f.Check, Command: f.Command, Health: f.Health}
+	m := ManagedExecution{fresh: true, Account: f.Account, Inbox: f.Inbox, Check: f.Check, Command: f.Command, Health: f.Health, Recipient: f.Recipient}
 	return runRelay(ctx, c, &m)
 }
 
@@ -266,12 +268,26 @@ func runRelay(ctx context.Context, c Config, managed *ManagedExecution) error {
 			ID          string `json:"id"`
 			Message     string `json:"message"`
 			Destination string `json:"destination"`
+			Policy      string `json:"policy,omitempty"`
 		}
 		if err := safefs.ReadJSON(http.MaxBytesReader(w, r.Body, 16<<10), &req, 16<<10); err != nil || req.ID == "" || len(req.ID) > 256 || len(req.Message) == 0 || len(req.Message) > 15000 {
 			http.Error(w, "invalid request", 400)
 			return
 		}
-		if req.Destination != Destination(account, recipient) {
+		selected := recipient
+		if req.Policy != "" {
+			if managed == nil || !managed.fresh || managed.Recipient == nil {
+				http.Error(w, "recipient approval unavailable", 409)
+				return
+			}
+			chosen, selectionErr := managed.Recipient(r.Context(), req.Policy, req.Destination)
+			selected = chosen
+			if selectionErr != nil {
+				http.Error(w, "recipient approval changed", 409)
+				return
+			}
+		}
+		if req.Destination != Destination(account, selected) {
 			http.Error(w, "destination changed", 409)
 			return
 		}
@@ -281,7 +297,7 @@ func runRelay(ctx context.Context, c Config, managed *ManagedExecution) error {
 				return
 			}
 		}
-		if err := run(r.Context(), "send", "-m", req.Message, "--", recipient); err != nil {
+		if err := run(r.Context(), "send", "-m", req.Message, "--", selected); err != nil {
 			http.Error(w, "outcome uncertain", 502)
 			return
 		}

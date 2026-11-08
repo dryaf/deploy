@@ -573,6 +573,12 @@ configuration only when it still matches the installed state.
 
 ## Applying changes and preserving compatibility
 
+The [shared configuration plan](shared-configuration.md) specifies the current
+state/change matrix, read-only planner outcomes and SC6–SC8 dependencies for
+completing local shared gateway/backup updates after ordinary YAML step 54.
+SC1–SC5 planning, producer policy, routing, derived freshness, bounded
+provider/reference changes and shared activity are implemented.
+
 Compile a semantic diff before deciding how to apply it. Do not compare only raw
 YAML bytes, and do not infer every runtime transition from a changed global hash.
 

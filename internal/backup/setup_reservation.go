@@ -43,7 +43,7 @@ func reserveSetupProducer(d *safefs.Directory, j *WorkerSetupJournal) (ProducerR
 	if j.Declaration == nil || j.Updating || j.RecoveryNeeded {
 		return ProducerReservation{}, fmt.Errorf("backup lifecycle is not available for producer reservation")
 	}
-	if j.Shared != nil && (j.Producer == nil || j.Shared.Owner.Binding.Producer != j.Producer.Producer || j.Shared.Owner.Binding.Generation != j.Producer.Generation || j.Shared.GatewayRoot != j.Declaration.NotificationRoot || j.Shared.Owner.Binding.Route != j.Declaration.NotificationRoute) {
+	if j.Shared != nil && (j.Producer == nil || j.Shared.Owner.Binding.Producer != j.Producer.Producer || j.Shared.Owner.Binding.Generation != j.Producer.Generation || j.Shared.GatewayRoot != j.Declaration.NotificationRoot || !reportRouteOwnerShape(*j, j.Shared.Owner)) {
 		return ProducerReservation{}, fmt.Errorf("shared reporting ownership changed from the declarative reservation; migration required")
 	}
 	var intent producerReservationIntent

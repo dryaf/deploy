@@ -160,7 +160,7 @@ func advanceNotificationDelivery(ctx context.Context, r ControlRequest, paths Re
 	pins := old.Pins
 	var request install.DeliveryAdmissionRequest
 	switch old.Children[0].Name {
-	case "notification-delivery-declaration":
+	case "notification-delivery-declaration", "notification-delivery-report-route-declaration":
 		if !old.Complete {
 			return result, fmt.Errorf("finish declaration continuation")
 		}
@@ -175,11 +175,11 @@ func advanceNotificationDelivery(ctx context.Context, r ControlRequest, paths Re
 		result.Identity = &v.Before.Identity
 		return result, nil
 
-	case "notification-delivery-derived-freshness", "notification-delivery-provider-enrollment", "notification-delivery-destination", "notification-delivery-routes", "notification-delivery-producer", "notification-delivery-limits", "notification-delivery-providers", "notification-requalification", "notification-shared-report-route", "notification-shared-derived-freshness", "notification-shared-command-activity", "notification-shared-command-policy", "notification-shared-commands", "notification-shared-routes", "notification-shared-producer", "notification-shared-providers", "notification-shared-freshness", "notification-shared-limits", "notification-enrollment", "notification-mapping", "notification-remapping", "notification-enrolled-led-output":
+	case "notification-shared-activity", "notification-delivery-report-route", "notification-delivery-derived-freshness", "notification-delivery-provider-enrollment", "notification-delivery-destination", "notification-delivery-routes", "notification-delivery-producer", "notification-delivery-limits", "notification-delivery-providers", "notification-requalification", "notification-shared-report-route", "notification-shared-derived-freshness", "notification-shared-command-activity", "notification-shared-command-policy", "notification-shared-commands", "notification-shared-routes", "notification-shared-producer", "notification-shared-providers", "notification-shared-freshness", "notification-shared-limits", "notification-enrollment", "notification-mapping", "notification-remapping", "notification-enrolled-led-output":
 		if !old.Complete {
 			return result, fmt.Errorf("finish consumer enrollment before delivery admission")
 		}
-		if r.Desired.Notification.StatusLEDs.Enabled && len(r.Desired.Notification.StatusLEDs.Bindings) != 0 && !mappingJournal(old) && !enrolledOutputJournal(old) && !sharedLimitsJournal(old) && !requalificationJournal(old) && !deliveryProviderJournal(old) {
+		if r.Desired.Notification.StatusLEDs.Enabled && len(r.Desired.Notification.StatusLEDs.Bindings) != 0 && !mappingJournal(old) && !enrolledOutputJournal(old) && !sharedLimitsJournal(old) && !requalificationJournal(old) && !deliveryProviderJournal(old) && !sharedActivityJournal(old) {
 			return result, fmt.Errorf("apply declared LED bindings before delivery admission")
 		}
 		if sharedLimitsJournal(old) {

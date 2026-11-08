@@ -12,12 +12,23 @@ import (
 )
 
 func requireCommandScopeOwner(state *backupState, j WorkerSetupJournal) error {
+	if err := requireSharedActivityOwner(state, j); err != nil {
+		return err
+	}
+	return requireBackupActivityReady(state)
+}
+
+// Checks the original owner even while its separately pinned activity fence is closed.
+func requireSharedActivityOwner(state *backupState, j WorkerSetupJournal) error {
 	owner, err := currentSharedBackupOwner(state)
 	if err != nil {
 		return err
 	}
-	if owner == nil || j.Producer == nil || owner.Binding.Producer != j.Producer.Producer || owner.Binding.Generation != j.Producer.Generation || owner.Binding.Archive != j.ArchiveID || j.Declaration == nil || owner.Binding.Route != j.Declaration.NotificationRoute {
+	if owner == nil || j.Producer == nil || owner.Binding.Producer != j.Producer.Producer || owner.Binding.Generation != j.Producer.Generation || owner.Binding.Archive != j.ArchiveID || j.Declaration == nil || !reportRouteOwnerShape(j, *owner) {
 		return fmt.Errorf("command activity requires the completed shared reporting owner")
+	}
+	if err = requireReportRouteOwner(j, *owner); err != nil {
+		return err
 	}
 	var control ArchiveControl
 	if err = state.get("control", &control); err != nil {
@@ -27,7 +38,7 @@ func requireCommandScopeOwner(state *backupState, j WorkerSetupJournal) error {
 	if err = state.get("notification_cutover_complete", &completed); err != nil || completed != owner.CutoverHash || !control.SharedRequired || control.ReportingDisabled || control.WriterID != j.WorkerID || control.ArchiveID != j.ArchiveID {
 		return fmt.Errorf("command activity lost its completed backup delivery fence")
 	}
-	return requireBackupActivityReady(state)
+	return nil
 }
 
 // commandScopeOrigin proves that only command policy or LED output permission changed since an
@@ -68,7 +79,7 @@ func commandScopeOrigin(root *safefs.Directory, j WorkerSetupJournal, scope stri
 		want := v.Before
 		want.Declaration, want.RequestHash = v.After.Declaration, workerSetupRequestHash(v.After)
 		want.NotificationScopeHistory = ref
-		if v.Version == 23 {
+		if productionFreshnessScope(v.Version) {
 			want.OwnedFiles = v.freshnessOwnedFiles()
 		}
 		if reportPolicyScope(v.Version) {
@@ -108,7 +119,17 @@ func verifyCommandScopeCapture(root *safefs.Directory, current, want WorkerSetup
 	if owner == nil || *owner != s.Owner {
 		return fmt.Errorf("command scope shared capture changed reporting owner")
 	}
-	profile, err := install.InspectManagedReportProfile(s.GatewayRoot, owner.Binding.Identity, owner.Binding.Producer, owner.Binding.Route)
+	var applied WorkerSetupJournal
+	if err = root.ReadJSON(backupSetupFile, &applied); err != nil {
+		return err
+	}
+	if applied.NotificationScope != nil {
+		return fmt.Errorf("finish pending report policy before inspecting a capture")
+	}
+	if err = requireReportRouteOwner(applied, *owner); err != nil {
+		return err
+	}
+	profile, err := install.InspectManagedReportProfile(s.GatewayRoot, owner.Binding.Identity, owner.Binding.Producer, applied.Declaration.NotificationRoute)
 	if err != nil {
 		return err
 	}

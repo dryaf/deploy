@@ -36,7 +36,7 @@ func requalificationJournal(j OperationJournal) bool {
 // Command authority remains excluded even when intake is currently disabled.
 func requalificationCandidate(j OperationJournal) bool {
 	return j.Pins.Action == "apply" && len(j.Children) == 1 &&
-		(j.Children[0].Name == "notification-delivery" || deliveryDeclarationJournal(j) || deliveryOutputJournal(j) && !admittedCommandHistory(j))
+		(sharedActivityJournal(j) && !admittedCommandHistory(j) || j.Children[0].Name == "notification-delivery" || deliveryDeclarationJournal(j) && !commandDeclarationJournal(j) || deliveryOutputJournal(j) && !admittedCommandHistory(j))
 }
 
 type requalificationIntent struct {
@@ -99,6 +99,17 @@ func requalificationEnrollment(d *safefs.Directory, j OperationJournal) (Operati
 
 func requalificationAncestry(d *safefs.Directory, j OperationJournal, output func(OperationJournal) error) (OperationJournal, error) {
 	for depth := 0; depth < 128; depth++ {
+		if sharedActivityJournal(j) {
+			if _, err := readSharedActivityIntent(d, j); err != nil {
+				return j, err
+			}
+			prior, err := sharedActivityPredecessor(d, j)
+			if err != nil {
+				return j, err
+			}
+			j = prior
+			continue
+		}
 		if requalificationJournal(j) {
 			prior, _, err := requalificationPredecessor(d, j)
 			if err != nil {

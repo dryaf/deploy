@@ -165,7 +165,7 @@ func (v setupSourceRetirement) validate() error {
 		return fmt.Errorf("invalid source retirement authority")
 	}
 	if v.Installation.Policy.Notifications.Mode == "shared" {
-		if b.Producer == nil || b.Producer.Validate(b.WorkerID) != nil || b.Declaration.NotificationDesiredHash == "" || b.Shared != nil && (b.Shared.Owner.Binding.Producer != b.Producer.Producer || b.Shared.Owner.Binding.Generation != b.Producer.Generation || b.Shared.GatewayRoot != b.Declaration.NotificationRoot || b.Shared.Owner.Binding.Route != b.Declaration.NotificationRoute) {
+		if b.Producer == nil || b.Producer.Validate(b.WorkerID) != nil || b.Declaration.NotificationDesiredHash == "" || b.Shared != nil && (b.Shared.Owner.Binding.Producer != b.Producer.Producer || b.Shared.Owner.Binding.Generation != b.Producer.Generation || b.Shared.GatewayRoot != b.Declaration.NotificationRoot || !reportRouteOwnerShape(b, b.Shared.Owner)) {
 			return fmt.Errorf("shared source retirement requires retained producer and delivery ownership")
 		}
 	} else if b.Shared != nil || b.Producer != nil {

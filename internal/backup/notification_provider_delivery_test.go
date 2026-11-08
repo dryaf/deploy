@@ -29,6 +29,10 @@ func providerScopeFixtureWithSources(t *testing.T, aliases []string, enrollment 
 	if len(enrollment) > 0 && enrollment[0] {
 		n.Providers = config.ProviderDeclarations{"signal": {AccountFile: "~/.config/signal-account", RecipientFile: "~/.config/signal-recipient"}}
 	}
+	return providerScopeFixtureWithDeclaration(t, n, aliases)
+}
+func providerScopeFixtureWithDeclaration(t *testing.T, n *config.NotificationDeclaration, aliases []string) (string, VerificationNotificationScopeChange, WorkerSetupJournal, *providerScopeDependencies, *credentialReportServices, *install.ManagedReportProfile) {
+	t.Helper()
 	home, before, _, _ := sharedSourceExpansionFixtureWithNotification(t, n, aliases...)
 	root, err := safefs.Open(home)
 	testutil.Must(t, err)
@@ -62,10 +66,22 @@ func providerScopeFixtureWithSources(t *testing.T, aliases []string, enrollment 
 }
 
 func TestDeliveryProviderScopeResumesWithReportsFenced(t *testing.T) {
-	for _, point := range []string{"scope-intent", "backup-gated", "report-stopped", "report-files", "report-reloaded", "gateway-complete", "scope-receipt", "scope-complete", "limits:scope-intent", "limits:backup-gated", "limits:report-stopped", "limits:gateway-complete", "limits:scope-receipt", "limits:scope-complete", "producer:scope-intent", "producer:backup-gated", "producer:report-stopped", "producer:report-files", "producer:report-reloaded", "producer:gateway-complete", "producer:scope-receipt", "producer:scope-complete", "routes:scope-intent", "routes:backup-gated", "routes:report-stopped", "routes:report-files", "routes:report-reloaded", "routes:gateway-complete", "routes:scope-receipt", "routes:scope-complete", "destination:scope-intent", "destination:backup-gated", "destination:report-stopped", "destination:report-files", "destination:report-reloaded", "destination:gateway-complete", "destination:scope-receipt", "destination:scope-complete", "enrollment:scope-intent", "enrollment:backup-gated", "enrollment:report-stopped", "enrollment:report-files", "enrollment:report-reloaded", "enrollment:gateway-complete", "enrollment:scope-receipt", "enrollment:scope-complete"} {
+	for _, point := range []string{"signal:scope-intent", "signal:report-stopped", "signal:report-files", "signal:gateway-complete", "signal:scope-receipt", "signal:scope-complete", "signal-destination:scope-intent", "signal-destination:report-stopped", "signal-destination:gateway-complete", "signal-destination:scope-receipt", "scope-intent", "backup-gated", "report-stopped", "report-files", "report-reloaded", "gateway-complete", "scope-receipt", "scope-complete", "limits:scope-intent", "limits:backup-gated", "limits:report-stopped", "limits:gateway-complete", "limits:scope-receipt", "limits:scope-complete", "producer:scope-intent", "producer:backup-gated", "producer:report-stopped", "producer:report-files", "producer:report-reloaded", "producer:gateway-complete", "producer:scope-receipt", "producer:scope-complete", "routes:scope-intent", "routes:backup-gated", "routes:report-stopped", "routes:report-files", "routes:report-reloaded", "routes:gateway-complete", "routes:scope-receipt", "routes:scope-complete", "destination:scope-intent", "destination:backup-gated", "destination:report-stopped", "destination:report-files", "destination:report-reloaded", "destination:gateway-complete", "destination:scope-receipt", "destination:scope-complete", "enrollment:scope-intent", "enrollment:backup-gated", "enrollment:report-stopped", "enrollment:report-files", "enrollment:report-reloaded", "enrollment:gateway-complete", "enrollment:scope-receipt", "enrollment:scope-complete"} {
 		t.Run(point, func(t *testing.T) {
-			home, r, before, deps, services, profile := providerScopeFixture(t, strings.HasPrefix(point, "enrollment:"))
+			home, r, before, deps, services, profile := providerScopeFixture(t, strings.HasPrefix(point, "enrollment:") || strings.HasPrefix(point, "signal"))
 			version := 16
+			if strings.HasPrefix(point, "signal") {
+				if strings.HasPrefix(point, "signal-destination:") {
+					version = 20
+				}
+				point = strings.TrimPrefix(strings.TrimPrefix(point, "signal:"), "signal-destination:")
+				p := before.Declaration.Desired.Notification.Providers["signal"]
+				p.AccountFile, p.RecipientFile = filepath.Join(home, "next-account"), filepath.Join(home, "next-recipient")
+				r.Desired.Notification.Providers = config.ProviderDeclarations{"signal": p}
+				deps.credentials = append(slices.Clone(profile.Credentials), filepath.Join(home, ".config/signal-account"), filepath.Join(home, ".config/signal-recipient"), p.AccountFile, p.RecipientFile)
+				slices.Sort(deps.credentials)
+				deps.credentials = slices.Compact(deps.credentials)
+			}
 			if strings.HasPrefix(point, "enrollment:") {
 				version = 21
 				point = strings.TrimPrefix(point, "enrollment:")

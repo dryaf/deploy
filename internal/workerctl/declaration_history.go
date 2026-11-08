@@ -71,7 +71,19 @@ func readDeclaration(d *safefs.Directory, expected string, scope ...int) (config
 // A later backup-only change can revisit the same notification scope, so its
 // original scope snapshot cannot identify the new operation's backup policy.
 func readCommandDeclaration(d *safefs.Directory, j OperationJournal) (config.DesiredWorkers, error) {
-	if !commandJournal(j) && !commandActivityJournal(j) && !commandPauseJournal(j) && !commandDeliveryJournal(j) && !commandLimitsJournal(j) {
+	if sharedActivityJournal(j) {
+		desired, err := readDeclaration(d, j.Pins.Artifacts["shared-activity-policy"])
+		if err != nil {
+			return desired, err
+		}
+		scope, err := desired.NotificationFingerprint()
+		if err != nil || j.Pins.DesiredScope != 1 || scope != j.Pins.DesiredHash {
+			return desired, fmt.Errorf("shared activity declaration changed")
+		}
+		return desired, nil
+	}
+
+	if !commandJournal(j) && !commandActivityJournal(j) && !commandPauseJournal(j) && !commandDeliveryJournal(j) && !commandDeliveryPolicyJournal(j) && !commandDeclarationJournal(j) {
 		return readDeclaration(d, j.Pins.DesiredHash, j.Pins.DesiredScope)
 	}
 	full := j.Pins.Artifacts["command-backup-policy"]

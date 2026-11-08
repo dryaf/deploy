@@ -76,16 +76,20 @@ func (i managedInstaller) reviewPausedRuntimeChange(ctx context.Context, root, e
 	}
 	paused := m
 	paused.Mode, paused.DeliveryActivation = "verification", nil
-	if kind == "command-limits" {
+	if commandPausedPolicy(kind) {
 		if !disabledManagedCommandPolicy(m) {
-			return out, fmt.Errorf("disable commands before changing notification budgets")
+			return out, fmt.Errorf("disable commands before changing notification policy")
 		}
 		paused.Commands = nil
 	}
 	if err = validatePausedRuntimeChange(paused, before, after, kind); err != nil {
 		return out, err
 	}
-	if kind != "declaration" {
+	if kind == "command-declaration" {
+		if err = i.probeCommandDeliveryProducerPolicy(ctx, d, m); err != nil {
+			return out, err
+		}
+	} else if kind != "declaration" {
 		if err = i.probeDeliveryPause(ctx, d, m); err != nil {
 			return out, err
 		}
@@ -114,11 +118,18 @@ func (i managedInstaller) reviewPausedRuntimeChange(ctx context.Context, root, e
 			return out, err
 		}
 	}
+	if err = i.probeSignalDelivery(ctx, d, m, after); err != nil {
+		return out, err
+	}
 	paths, err := retainedDeliveryCredentials(d, j, before)
 	if err != nil {
 		return out, err
 	}
-	paths = append(paths, (&managedProducerSession{runtime: after}).CredentialPaths()...)
+	nextPaths, err := runtimeCredentialPathsPolicy(m, after, false)
+	if err != nil {
+		return out, err
+	}
+	paths = append(paths, nextPaths...)
 	slices.Sort(paths)
 	return DeliveryProviderReview{Before: m, Credentials: slices.Compact(paths)}, nil
 }
@@ -153,6 +164,16 @@ func ValidateDeliveryProviderRotation(m ManagedManifest, before, after Runtime) 
 			changed = changed || old.TokenFile != next.TokenFile || old.ChatFile != next.ChatFile
 			next.TokenFile, next.ChatFile = old.TokenFile, old.ChatFile
 		}
+		if old.Kind == "signal" && protocol.Hash(old) != protocol.Hash(next) {
+			if m.FreshSignal == nil {
+				return fmt.Errorf("Signal delivery references require retained service ownership")
+			}
+			if err := validateSignalDeliveryProfileChange(old, next, false); err != nil {
+				return err
+			}
+			changed = true
+			next = old
+		}
 		if protocol.Hash(old) != protocol.Hash(next) {
 			return fmt.Errorf("credential rotation changed provider authority")
 		}
@@ -173,14 +194,14 @@ func validateDeliveryProviderJournal(j managedJournal) error {
 	if v.Version != managedVersion || !isPausedRuntimeChange(v.Operation) || !safefs.ValidID(v.ID, "n") || b == nil || b.validate() != nil || a.validate() != nil || v.Supersedes != nil || managedPhase(j.Phase) == 0 || p == nil || p.Version != 1 || !safefs.ValidID(p.PauseOperation, "n") || !safefs.DigestPattern.MatchString(p.PauseHash) {
 		return fmt.Errorf("invalid paused provider transition")
 	}
-	if b.Mode != "verification" || b.DeliveryOwnerHash == "" || b.DeliveryActivation != nil || b.Commands != nil || (p.Kind != "command-limits" && b.CommandHistoryHash != "") || (p.Kind == "command-limits" && !safefs.DigestPattern.MatchString(b.CommandHistoryHash)) || b.RecoveryCommitHash != "" || b.SignalVerification != nil || b.SignalProfiles != nil || a.Revision == b.Revision || a.Revision != v.ID || a.ConfigHash == b.ConfigHash || a.RuntimeHash == b.RuntimeHash {
+	if b.Mode != "verification" || b.DeliveryOwnerHash == "" || b.DeliveryActivation != nil || b.Commands != nil || (!commandPausedPolicy(p.Kind) && b.CommandHistoryHash != "") || (commandPausedPolicy(p.Kind) && !safefs.DigestPattern.MatchString(b.CommandHistoryHash)) || b.RecoveryCommitHash != "" || b.SignalVerification != nil || b.SignalProfiles != nil || a.Revision == b.Revision || a.Revision != v.ID || a.ConfigHash == b.ConfigHash || a.RuntimeHash == b.RuntimeHash {
 		return fmt.Errorf("provider transition requires a new paused runtime")
 	}
 	if p.RuntimeHash != a.RuntimeHash || p.ConfigHash != a.ConfigHash || pausedRuntimeOperation(p.Kind) != v.Operation {
 		return fmt.Errorf("paused runtime transition changed its policy kind")
 	}
 	want := *b
-	if p.Kind == "command-limits" || p.Kind == "limits" || p.Kind == "producer" || p.Kind == "routes" || p.Kind == "destination" || p.Kind == "provider-enrollment" {
+	if commandProviderKind(p.Kind) || p.Kind == "command-routes" || p.Kind == "command-producer" || p.Kind == "command-freshness" || p.Kind == "command-limits" || p.Kind == "limits" || p.Kind == "producer" || p.Kind == "routes" || p.Kind == "destination" || p.Kind == "provider-enrollment" {
 		if !safefs.DigestPattern.MatchString(a.DeliveryOwnerConfigHash) || (b.DeliveryOwnerConfigHash != "" && b.DeliveryOwnerConfigHash != a.DeliveryOwnerConfigHash) {
 			return fmt.Errorf("limits transition changed original owner configuration")
 		}
@@ -190,7 +211,7 @@ func validateDeliveryProviderJournal(j managedJournal) error {
 		}
 		want.DeliveryOwnerConfigHash = a.DeliveryOwnerConfigHash
 	}
-	if p.Kind == "" || p.Kind == "destination" || p.Kind == "provider-enrollment" {
+	if commandProviderKind(p.Kind) || p.Kind == "" || p.Kind == "destination" || p.Kind == "provider-enrollment" {
 		if a.ReportCredentialHistory == nil || a.ReportCredentialHistory.Operation != v.ID || a.ReportCredentialHistory.Hash != protocol.Hash(p) {
 			return fmt.Errorf("provider transition lost credential history anchor")
 		}
@@ -341,6 +362,9 @@ func (i managedInstaller) changePausedRuntime(ctx context.Context, spec ManagedS
 	if err = i.probePausedRuntimeChange(ctx, d, b, kind); err != nil {
 		return zero, err
 	}
+	if err = i.probeSignalDelivery(ctx, d, b, afterRuntime); err != nil {
+		return zero, err
+	}
 	if err = deliveryPolicy(b, beforeRuntime); err != nil {
 		return zero, err
 	}
@@ -384,7 +408,7 @@ func (i managedInstaller) changePausedRuntime(ctx context.Context, spec ManagedS
 	if kind != "" {
 		a.DeliveryOwnerConfigHash = deliveryOwner(b, beforeRuntime).ConfigHash
 	}
-	if kind == "" || kind == "destination" || kind == "provider-enrollment" {
+	if commandProviderKind(kind) || kind == "" || kind == "destination" || kind == "provider-enrollment" {
 		a.ReportCredentialHistory = &ManagedReportCredentialHistory{Operation: id, Hash: protocol.Hash(transition)}
 	}
 	body, err := renderManagedUnit(a)

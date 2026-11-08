@@ -33,7 +33,7 @@ func (v setupSourceExpansion) validate() error {
 		if b.Producer == nil || b.Producer.Validate(b.WorkerID) != nil || b.Declaration.NotificationDesiredHash == "" {
 			return fmt.Errorf("shared source expansion requires its retained producer and gateway policy scope")
 		}
-		if b.Shared != nil && (b.Shared.Owner.Binding.Producer != b.Producer.Producer || b.Shared.Owner.Binding.Generation != b.Producer.Generation || b.Shared.GatewayRoot != b.Declaration.NotificationRoot || b.Shared.Owner.Binding.Route != b.Declaration.NotificationRoute) {
+		if b.Shared != nil && (b.Shared.Owner.Binding.Producer != b.Producer.Producer || b.Shared.Owner.Binding.Generation != b.Producer.Generation || b.Shared.GatewayRoot != b.Declaration.NotificationRoot || !reportRouteOwnerShape(b, b.Shared.Owner)) {
 			return fmt.Errorf("shared source expansion changed its delivery owner")
 		}
 	} else if b.Producer != nil || b.Shared != nil {

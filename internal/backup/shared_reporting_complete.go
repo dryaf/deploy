@@ -126,7 +126,20 @@ func verifyFreshCompletedReporting(ctx context.Context, home string, c WorkerIns
 		}
 	}
 	paths := backupCutoverPaths(home, c)
-	profile, err := install.InspectManagedReportProfile(spec.Managed.Root, owner.Binding.Identity, owner.Binding.Producer, owner.Binding.Route)
+	rootForRoute, err := safefs.Open(home)
+	if err != nil {
+		return err
+	}
+	var current WorkerSetupJournal
+	err = rootForRoute.ReadJSON(backupSetupFile, &current)
+	rootForRoute.Close()
+	if err != nil {
+		return err
+	}
+	if err = requireReportRouteOwner(current, owner); err != nil {
+		return err
+	}
+	profile, err := install.InspectManagedReportProfile(spec.Managed.Root, owner.Binding.Identity, owner.Binding.Producer, current.Declaration.NotificationRoute)
 	if err != nil {
 		return err
 	}

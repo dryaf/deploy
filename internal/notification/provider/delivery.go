@@ -31,12 +31,13 @@ type Result struct {
 }
 
 type Profile struct {
-	Conversation  *interaction.Destination `json:"conversation,omitempty"`
-	RelayIdentity protocol.Identity        `json:"relay_identity,omitempty"`
-	Kind          string                   `json:"kind"`
-	TokenFile     string                   `json:"token_file,omitempty"`
-	ChatFile      string                   `json:"chat_file,omitempty"`
-	Socket        string                   `json:"socket,omitempty"`
+	SignalDelivery *SignalDelivery          `json:"signal_delivery,omitempty"`
+	Conversation   *interaction.Destination `json:"conversation,omitempty"`
+	RelayIdentity  protocol.Identity        `json:"relay_identity,omitempty"`
+	Kind           string                   `json:"kind"`
+	TokenFile      string                   `json:"token_file,omitempty"`
+	ChatFile       string                   `json:"chat_file,omitempty"`
+	Socket         string                   `json:"socket,omitempty"`
 	// Destination is an enrolled fingerprint, never a plaintext recipient.
 	Destination string `json:"destination"`
 }
@@ -47,30 +48,38 @@ type Adapter struct {
 	SignalTransport http.RoundTripper
 }
 
-func ReadSecret(path string) (string, error) {
+func readSecretBytes(path string) ([]byte, error) {
 	d, err := safefs.Open(filepath.Dir(path))
 	if err != nil {
-		return "", fmt.Errorf("credential unavailable")
+		return nil, fmt.Errorf("credential unavailable")
 	}
 	defer d.Close()
 	f, err := d.Open(filepath.Base(path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return "", fmt.Errorf("credential unavailable")
+		return nil, fmt.Errorf("credential unavailable")
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || info.Mode().Perm()&0077 != 0 {
-		return "", fmt.Errorf("credential must be private")
+		return nil, fmt.Errorf("credential must be private")
 	}
 	b, err := io.ReadAll(io.LimitReader(f, 4097))
 	if err != nil || len(b) > 4096 {
-		return "", fmt.Errorf("credential exceeds bounds")
+		return nil, fmt.Errorf("credential exceeds bounds")
 	}
 	v := strings.TrimSpace(string(b))
 	if v == "" || strings.ContainsAny(v, "\x00\r\n") {
-		return "", fmt.Errorf("invalid credential")
+		return nil, fmt.Errorf("invalid credential")
 	}
-	return v, nil
+	return b, nil
+}
+
+func ReadSecret(path string) (string, error) {
+	b, err := readSecretBytes(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
 }
 
 var telegramToken = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]+$`)
@@ -142,7 +151,8 @@ func (a Adapter) Send(ctx context.Context, name string, m protocol.Message) Resu
 			ID          string `json:"id"`
 			Message     string `json:"message"`
 			Destination string `json:"destination"`
-		}{m.ID, message, p.Destination}
+			Policy      string `json:"policy,omitempty"`
+		}{m.ID, message, p.Destination, signalDeliveryHash(p.SignalDelivery)}
 		if transport == nil {
 			transport = &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, "unix", p.Socket)
@@ -226,4 +236,11 @@ func (a Adapter) Send(ctx context.Context, name string, m protocol.Message) Resu
 		return Result{Permanent: true}
 	}
 	return Result{}
+}
+
+func signalDeliveryHash(v *SignalDelivery) string {
+	if v == nil {
+		return ""
+	}
+	return v.Hash()
 }

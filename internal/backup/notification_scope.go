@@ -47,7 +47,7 @@ type setupNotificationScopeReceipt struct {
 
 func (v setupNotificationScope) validate() error {
 	b := v.Before
-	if (v.Version < 1 || v.Version > 23) || !safefs.ValidID(v.Operation, "n") || !safefs.DigestPattern.MatchString(v.BeforeGateway) || b.NotificationScope != nil || ((v.Version == 1 || v.Version >= 6 && v.Version <= 15) && (b.Shared != nil || b.Schema != 1)) || (v.Version >= 2 && b.Schema != 1 && b.Schema != 2) || b.Stage != "complete" || !b.StateInitialized || b.Updating || b.RecoveryNeeded || b.SourceExpansion != nil || b.SourceRetirement != nil || b.SharedPolicyUpdate != nil || b.SharedPolicyExpansion != nil || b.TelegramRotation != nil || b.Producer == nil || b.Producer.Validate(b.WorkerID) != nil || b.Declaration == nil || b.Declaration.Desired == nil || b.Declaration.Desired.Notification == nil || b.Declaration.NotificationDesiredHash == "" || v.After.Declaration == nil || v.After.Declaration.Desired == nil || v.After.Declaration.Desired.Notification == nil {
+	if (v.Version < 1 || v.Version > 25) || !safefs.ValidID(v.Operation, "n") || !safefs.DigestPattern.MatchString(v.BeforeGateway) || b.NotificationScope != nil || ((v.Version == 1 || v.Version >= 6 && v.Version <= 15) && (b.Shared != nil || b.Schema != 1)) || (v.Version >= 2 && b.Schema != 1 && b.Schema != 2) || b.Stage != "complete" || !b.StateInitialized || b.Updating || b.RecoveryNeeded || b.SourceExpansion != nil || b.SourceRetirement != nil || b.SharedPolicyUpdate != nil || b.SharedPolicyExpansion != nil || b.TelegramRotation != nil || b.Producer == nil || b.Producer.Validate(b.WorkerID) != nil || b.Declaration == nil || b.Declaration.Desired == nil || b.Declaration.Desired.Notification == nil || b.Declaration.NotificationDesiredHash == "" || v.After.Declaration == nil || v.After.Declaration.Desired == nil || v.After.Declaration.Desired.Notification == nil {
 		return fmt.Errorf("notification policy migration requires a completed backup reservation")
 	}
 	if err := validateSetupDesired(b.Declaration); err != nil {
@@ -57,7 +57,7 @@ func (v setupNotificationScope) validate() error {
 		return err
 	}
 	old, next := b.Declaration.Desired, v.After.Declaration.Desired
-	if !freshnessScope(v.Version) && v.Version != 15 && !reflect.DeepEqual(old.Backup, next.Backup) {
+	if !freshnessScope(v.Version) && !reportRouteScope(v.Version) && !reflect.DeepEqual(old.Backup, next.Backup) {
 		return fmt.Errorf("change notification policy separately from backup policy")
 	}
 	if !freshnessScope(v.Version) && v.Freshness != nil {
@@ -68,8 +68,14 @@ func (v setupNotificationScope) validate() error {
 	}
 	if reportPolicyScope(v.Version) {
 		validate := config.ValidateDeliveryProviderDeclaration
-		if v.Version == 23 {
+		if productionFreshnessScope(v.Version) {
 			validate = config.ValidateDerivedFreshnessDeclaration
+		}
+		if v.Version == 24 {
+			validate = config.ValidateDeliveryReportRouteDeclaration
+		}
+		if v.Version == 25 {
+			validate = config.ValidateCommandDerivedFreshnessDeclaration
 		}
 		if v.Version == 21 {
 			validate = config.ValidateDeliveryProviderEnrollmentDeclaration
@@ -86,7 +92,7 @@ func (v setupNotificationScope) validate() error {
 		if err := validate(*old, *next); err != nil {
 			return err
 		}
-		if v.Version == 23 {
+		if productionFreshnessScope(v.Version) {
 			if err := v.validateFreshness(); err != nil {
 				return err
 			}
@@ -98,7 +104,7 @@ func (v setupNotificationScope) validate() error {
 		if err := config.ValidateDeliveryDeclarationChange(*old, *next); err != nil {
 			return err
 		}
-	} else if v.Version == 15 {
+	} else if reportRouteScope(v.Version) {
 		if err := config.ValidateSharedReportRouteDeclaration(*old, *next); err != nil {
 			return err
 		}
@@ -210,7 +216,7 @@ func (v setupNotificationScope) validate() error {
 	}
 	d := *v.After.Declaration
 	d.Desired, d.DesiredHash, d.NotificationDesiredHash = b.Declaration.Desired, b.Declaration.DesiredHash, b.Declaration.NotificationDesiredHash
-	if v.Version == 15 {
+	if reportRouteScope(v.Version) {
 		if d.NotificationRoute != next.Backup.Notifications.Route {
 			return fmt.Errorf("backup reporting route differs from declaration")
 		}
@@ -284,7 +290,14 @@ func InspectRetainedDeliveryOutputScope(home, operation, beforeGateway, scope st
 // InspectRetainedDeliveryPolicyScope also follows exact credential-only report
 // exclusion migrations; it never treats unrelated backup edits as ancestry.
 func InspectRetainedDeliveryPolicyScope(home, operation, beforeGateway, scope string) (string, bool, error) {
-	return inspectVerificationNotificationScope(home, operation, beforeGateway, scope, []int{5, 16, 17, 18, 19, 20, 21, 22, 23})
+	return inspectVerificationNotificationScope(home, operation, beforeGateway, scope, []int{5, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25})
+}
+
+// Command-bearing policy review follows exact command activity/permission and
+// provider-policy receipts as well as equivalent declarations. This grants no
+// current command authority; the receiver and SQL head are checked separately.
+func InspectRetainedCommandPolicyScope(home, operation, beforeGateway, scope string) (string, bool, error) {
+	return inspectVerificationNotificationScope(home, operation, beforeGateway, scope, []int{2, 3, 4, 5, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25})
 }
 
 func inspectVerificationNotificationScope(home, operation, beforeGateway, scope string, retainedKinds []int) (string, bool, error) {
@@ -567,7 +580,7 @@ func reconcileNotificationScopeReports(ctx context.Context, home string, request
 		after := WorkerSetupRequest{Schema: 1, Operation: "apply", Policy: c.Policy, Image: c.Image, RelayImage: c.RelayImage}
 		decl := *j.Declaration
 		decl.Desired, decl.DesiredHash, decl.NotificationDesiredHash = &request.Desired, newHash, newScope
-		if version == 15 {
+		if reportRouteScope(version) {
 			if request.Desired.Backup == nil {
 				return "", fmt.Errorf("backup report route declaration missing")
 			}
@@ -586,7 +599,11 @@ func reconcileNotificationScopeReports(ctx context.Context, home string, request
 			if j.Declaration.Desired == nil {
 				return "", fmt.Errorf("derived freshness requires the retained backup declaration")
 			}
-			if err = config.ValidateDerivedFreshnessDeclaration(*j.Declaration.Desired, request.Desired); err != nil {
+			validate := config.ValidateDerivedFreshnessDeclaration
+			if version == 25 {
+				validate = config.ValidateCommandDerivedFreshnessDeclaration
+			}
+			if err = validate(*j.Declaration.Desired, request.Desired); err != nil {
 				return "", err
 			}
 			v.After.Policy.Freshness = request.Desired.Backup.Freshness
@@ -595,7 +612,7 @@ func reconcileNotificationScopeReports(ctx context.Context, home string, request
 			}
 		}
 		if reportPolicyScope(version) {
-			if version == 23 {
+			if productionFreshnessScope(version) {
 				if err = v.prepareFreshnessCapture(ctx, home, reports); err != nil {
 					return "", err
 				}
@@ -707,7 +724,7 @@ func reconcileNotificationScopeReports(ctx context.Context, home string, request
 		}
 	}
 	if reportPolicyScope(version) {
-		if version == 23 {
+		if productionFreshnessScope(version) {
 			if err = v.stageFreshnessCapture(ctx, home, reports, boundary); err != nil {
 				return "", err
 			}
@@ -725,6 +742,14 @@ func reconcileNotificationScopeReports(ctx context.Context, home string, request
 	}
 	if !safefs.DigestPattern.MatchString(gateway) {
 		return "", fmt.Errorf("notification scope migration has no canonical gateway receipt")
+	}
+	if version == 24 {
+		if err = v.publishReportRoute(root, gateway); err != nil {
+			return "", err
+		}
+		if err = boundary("report-route-published"); err != nil {
+			return "", err
+		}
 	}
 	if err = boundary("gateway-complete"); err != nil {
 		return "", err

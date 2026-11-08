@@ -20,10 +20,16 @@ import (
 // managedInstaller coordinates files and a user manager. Its crash hook is only
 // supplied by tests; every hook follows a durable boundary or external effect.
 type managedInstaller struct {
+	signalDeliveryProbe              func(context.Context, *safefs.Directory, string, string) error
+	commandProvidersProbe            func(context.Context, *safefs.Directory, string, string) error
+	commandRoutesProbe               func(context.Context, *safefs.Directory, string, string) error
+	commandProducerProbe             func(context.Context, *safefs.Directory, string, string) error
+	commandFreshnessProbe            func(context.Context, *safefs.Directory, string, string) error
 	commandLimitsProbe               func(context.Context, *safefs.Directory, string, string) error
 	commandPauseProbe                func(context.Context, *safefs.Directory, string, string) error
 	deliveryLimitsProbe              func(context.Context, *safefs.Directory, string, string) error
 	deliveryProvidersProbe           func(context.Context, *safefs.Directory, string, string) error
+	sharedActivityProbe              func(context.Context, *safefs.Directory, string, string) error
 	deliveryPauseProbe               func(context.Context, *safefs.Directory, string, string) error
 	bootstrapProvidersProbe          func(context.Context, *safefs.Directory, string, string) error
 	enrolledLimitsProbe              func(context.Context, *safefs.Directory, string, string) error
@@ -130,7 +136,12 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		return zero, err
 	}
 	if spec.FreshSignal != nil {
-		if _, err = validateFreshSignalGateway(ctx, *spec.FreshSignal, spec.Root, spec.State, spec.UnitDirectory, c, false); err != nil {
+		var native FreshSignalManifest
+		native, err = InspectFreshSignal(ctx, *spec.FreshSignal, false)
+		if err == nil {
+			err = validateFreshSignalGatewayManifestPolicy(native, spec.Root, spec.State, spec.UnitDirectory, c, operation != "bootstrap-providers" && operation != "enrolled-providers")
+		}
+		if err != nil {
 			return zero, err
 		}
 	}
@@ -594,6 +605,11 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 	if err = i.requireBootstrapLimitsCapability(ctx, d, m, isManagedPolicyOperation(operation)); err != nil {
 		return m, err
 	}
+	if operation == "bootstrap-providers" || operation == "enrolled-providers" {
+		if err = i.probeSignalDelivery(ctx, d, m, c); err != nil {
+			return zero, err
+		}
+	}
 	if err = i.probeLEDEndpoint(ctx, d, m, c); err != nil {
 		return m, err
 	}
@@ -647,6 +663,11 @@ func (i managedInstaller) prepareExpected(ctx context.Context, operation string,
 		}
 		if err = i.boundary("signal-endpoint-retained"); err != nil {
 			return zero, err
+		}
+	}
+	if before != nil && c.Providers["signal"].SignalDelivery != nil {
+		if anchor := stagedProviderCredentialHistory(managedIntent{ID: opid, Operation: operation, Before: before, After: m}); anchor != nil {
+			m.ReportCredentialHistory = anchor
 		}
 	}
 	j := managedJournal{Intent: managedIntent{Version: managedVersion, ID: opid, Operation: operation, Before: before, After: m, BeforeUnit: string(unit), AfterUnit: body}, Phase: "prepared"}
@@ -843,6 +864,22 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 	if err := validateManagedPointer(d, j, managedPhase(j.Phase) >= managedPhase("published")); err != nil {
 		return m, err
 	}
+	if sharedActivityOperation(j.Intent.Operation) {
+		if err := i.probeSharedActivity(ctx, d, m); err != nil {
+			return m, err
+		}
+		if _, err := sharedActivityPredecessor(d, j); err != nil {
+			return m, err
+		}
+		if m.DeliveryOwnerHash != "" {
+			if _, err := sharedActivityPause(d, j); err != nil {
+				return m, err
+			}
+		}
+	}
+	if err := i.stageSignalDeliveryIntent(ctx, d, j); err != nil {
+		return m, err
+	}
 	var c Runtime
 	var err error
 	// Before publication a renewal's receipt may not exist yet. Artifact
@@ -986,7 +1023,7 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 	if err = i.probeDelivery(ctx, d, m); err != nil {
 		return m, err
 	}
-	if m.DeliveryOwnerHash != "" {
+	if m.DeliveryOwnerHash != "" && !sharedActivityOperation(j.Intent.Operation) {
 		if err = i.inspectDeliveryTransition(ctx, j); err != nil {
 			return m, err
 		}
@@ -1039,7 +1076,7 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 			lease.Close()
 		}
 	}()
-	if j.Intent.Operation == "change-command-delivery-limits" || j.Intent.Operation == "change-delivery-limits" || j.Intent.Operation == "change-delivery-producer" || j.Intent.Operation == "change-delivery-routes" || j.Intent.Operation == "change-delivery-destination" || j.Intent.Operation == "change-delivery-provider-enrollment" {
+	if j.Intent.Operation == "rotate-command-delivery-provider" || j.Intent.Operation == "change-command-delivery-destination" || j.Intent.Operation == "change-command-delivery-routes" || j.Intent.Operation == "change-command-delivery-producer" || j.Intent.Operation == "change-command-delivery-freshness" || j.Intent.Operation == "change-command-delivery-limits" || j.Intent.Operation == "change-delivery-limits" || j.Intent.Operation == "change-delivery-producer" || j.Intent.Operation == "change-delivery-routes" || j.Intent.Operation == "change-delivery-destination" || j.Intent.Operation == "change-delivery-provider-enrollment" {
 		previous, e := managedRuntime(d, *j.Intent.Before)
 		if e != nil {
 			return m, e
@@ -1054,8 +1091,16 @@ func (i managedInstaller) resumeLocked(ctx context.Context, d *safefs.Directory,
 		if j.Intent.Operation == "change-delivery-producer" {
 			migrate = worker.MigrateDeliveryProducerPolicy
 		}
-		if j.Intent.Operation == "change-command-delivery-limits" {
+		if j.Intent.Operation == "rotate-command-delivery-provider" || j.Intent.Operation == "change-command-delivery-destination" {
+			_, err = worker.MigrateCommandDeliveryProviders(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID, m.CommandHistoryHash)
+		} else if j.Intent.Operation == "change-command-delivery-limits" {
 			_, err = worker.MigrateCommandDeliveryLimits(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID, m.CommandHistoryHash)
+		} else if j.Intent.Operation == "change-command-delivery-routes" {
+			_, err = worker.MigrateCommandDeliveryRoutes(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID, m.CommandHistoryHash)
+		} else if j.Intent.Operation == "change-command-delivery-producer" {
+			_, err = worker.MigrateCommandDeliveryProducerPolicy(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID, m.CommandHistoryHash)
+		} else if j.Intent.Operation == "change-command-delivery-freshness" {
+			_, err = worker.MigrateCommandDeliveryFreshness(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID, m.CommandHistoryHash)
 		} else {
 			_, err = migrate(ctx, m.Paths.State, m.Identity, previous.Worker, c.Worker, j.Intent.ID)
 		}

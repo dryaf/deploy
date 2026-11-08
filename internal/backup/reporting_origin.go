@@ -59,7 +59,7 @@ func reportingOrigin(root *safefs.Directory, j WorkerSetupJournal, c WorkerInsta
 		}
 		want := v.Before
 		want.Declaration, want.RequestHash, want.NotificationScopeHistory = v.After.Declaration, workerSetupRequestHash(v.After), ref
-		if v.Version == 23 {
+		if productionFreshnessScope(v.Version) {
 			want.OwnedFiles = v.freshnessOwnedFiles()
 			paths, err := declarationPaths(v.Before.Declaration.Home, v.Before.Declaration)
 			if err != nil {

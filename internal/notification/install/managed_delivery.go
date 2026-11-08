@@ -172,7 +172,7 @@ func readDeliveryAdmission(d *safefs.Directory, m ManagedManifest, c Runtime) (o
 	if err = d.ReadJSON(base+"delivery-admission.json", &out); err != nil {
 		return
 	}
-	if (out.Version != 1 && out.Version != 2 && out.Version != 3) || out.Operation != intent.ID || protocol.Hash(out) != m.DeliveryActivation.Hash || out.BeforeHash != protocol.Hash(before) || out.Owner != deliveryOwner(m, c) || protocol.Hash(out.Owner) != m.DeliveryOwnerHash || out.Qualification.Report.validate() != nil || protocol.Hash(out.Qualification.Report.Binding.Manifest) != protocol.Hash(before) {
+	if (out.Version != 1 && out.Version != 2 && out.Version != 3 && out.Version != 4) || out.Operation != intent.ID || protocol.Hash(out) != m.DeliveryActivation.Hash || out.BeforeHash != protocol.Hash(before) || out.Owner != deliveryOwner(m, c) || protocol.Hash(out.Owner) != m.DeliveryOwnerHash || out.Qualification.Report.validate() != nil || protocol.Hash(out.Qualification.Report.Binding.Manifest) != protocol.Hash(before) {
 		return out, before, fmt.Errorf("delivery admission evidence changed")
 	}
 	if _, e := deliveryPausePredecessor(d, out, before); e != nil {
@@ -507,6 +507,13 @@ func (i managedInstaller) prepareDelivery(ctx context.Context, operation, root, 
 				return zero, fmt.Errorf("delivery renewal lost its completed pause")
 			}
 			proof.Version, proof.PauseOperation, proof.PauseHash = 2, j.Intent.ID, protocol.Hash(j.Intent)
+		} else if j.Intent.Operation == "restore-shared-activity" && before.DeliveryOwnerHash != "" {
+			pause, e := sharedActivityPause(d, j)
+			if e != nil {
+				return zero, e
+			}
+			proof.Version, proof.ProviderOperation, proof.ProviderHash = 4, j.Intent.ID, protocol.Hash(j.Intent)
+			proof.PauseOperation, proof.PauseHash = pause.Intent.ID, protocol.Hash(pause.Intent)
 		} else if isPausedRuntimeChange(j.Intent.Operation) {
 			pause, e := deliveryProviderPause(d, j, c)
 			if e != nil {

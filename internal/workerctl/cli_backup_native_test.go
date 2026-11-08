@@ -78,6 +78,30 @@ func TestWorkerCLIDeliveryLEDOutputThroughSSH(t *testing.T) {
 	testWorkerCLIThroughSSHBackupGateway(t, "delivery-output")
 }
 
+func TestWorkerCLISignalOnlyProvidersThroughSSH(t *testing.T) {
+	testWorkerCLIThroughSSHBackupGateway(t, "delivery-signal")
+}
+func TestWorkerCLISignalProvidersThroughSSH(t *testing.T) {
+	testWorkerCLIThroughSSHBackupGateway(t, "delivery-signal")
+}
+func TestWorkerCLICommandProvidersReadThroughSSH(t *testing.T) {
+	testWorkerCLIThroughSSHBackupGateway(t, "command-provider", "read")
+}
+func TestWorkerCLICommandProvidersMutationThroughSSH(t *testing.T) {
+	testWorkerCLIThroughSSHBackupGateway(t, "command-provider", "mutation")
+}
+func TestWorkerCLICommandProducerReadThroughSSH(t *testing.T) {
+	testWorkerCLIThroughSSHBackupGateway(t, "command-producer", "read")
+}
+func TestWorkerCLICommandProducerMutationThroughSSH(t *testing.T) {
+	testWorkerCLIThroughSSHBackupGateway(t, "command-producer", "mutation")
+}
+func TestWorkerCLICommandFreshnessReadThroughSSH(t *testing.T) {
+	testWorkerCLIThroughSSHBackupGateway(t, "command-freshness", "read")
+}
+func TestWorkerCLICommandFreshnessMutationThroughSSH(t *testing.T) {
+	testWorkerCLIThroughSSHBackupGateway(t, "command-freshness", "mutation")
+}
 func TestWorkerCLICommandLimitsReadThroughSSH(t *testing.T) {
 	testWorkerCLIThroughSSHBackupGateway(t, "command-limits", "read")
 }
@@ -175,6 +199,20 @@ func testWorkerCLIThroughSSHBackupGateway(t *testing.T, commandSuite string, sel
 	if err = os.Chmod(filepath.Join(dir, "deploy"), 0700); err != nil {
 		t.Fatal(err)
 	}
+	if commandSuite == "delivery-signal" {
+		source := filepath.Join(dir, "signal-fixture.go")
+		if err = os.WriteFile(source, []byte(signalProviderCLIFixture), 0600); err != nil {
+			t.Fatal(err)
+		}
+		native := exec.Command("go", "build", "-o", filepath.Join(dir, "signal-cli"), source)
+		native.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if out, e := native.CombinedOutput(); e != nil {
+			t.Fatal(e, string(out))
+		}
+		if err = os.Chmod(filepath.Join(dir, "signal-cli"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -188,12 +226,19 @@ func testWorkerCLIThroughSSHBackupGateway(t *testing.T, commandSuite string, sel
 	write("ssh", backupCLISSH, 0700)
 	write("loginctl", "#!/bin/sh\nprintf 'yes\\n'\n", 0700)
 	write("podman", backupCLIPodman, 0700)
-	write("busctl", backupCLIBus, 0700)
+	bus := backupCLIBus
+	if commandSuite == "delivery-signal" {
+		bus = strings.Replace(bus, "state=json.loads(pathlib.Path('/tmp/wux/manager/manager.json').read_text())", "state=json.loads(pathlib.Path('/tmp/wux/manager/'+('signal-manager.json' if any('deploy_2dnotification_2dsignal' in a for a in sys.argv) else 'manager.json')).read_text())", 1)
+	}
+	write("busctl", bus, 0700)
 	write("generator", "#!/bin/sh\nfor f in \"$QUADLET_UNIT_DIRS\"/*.container; do n=${f##*/}; n=${n%.container}; printf '%s\\n' \"---$n.service---\"; done\n", 0700)
 	manager := strings.Replace(nativeCLIManager, "root=pathlib.Path(os.environ['DEPLOY_WORKER_E2E_ROOT'])", "root=pathlib.Path('/tmp/wux/manager')", 1)
 	manager = strings.Replace(manager, "root/'config/systemd/user/", "root/'.config/systemd/user/", 1)
 	manager = strings.Replace(manager, "if action=='show-environment': sys.exit(0)", backupCLIManager, 1)
 	manager = strings.Replace(manager, "state.update(LoadState='loaded',FragmentPath=str(unit),Names=unit.name)", "state.update(LoadState='loaded',FragmentPath=str(unit),Names=unit.name,LoadedUnit=unit.read_text())", 1)
+	if commandSuite == "delivery-signal" {
+		manager = signalProviderCLIManager(manager)
+	}
 	write("systemctl", manager, 0700)
 	startBackupCLISourceBroker(t, dir)
 	// A synthetic root keeps its ownership mapped inside the user namespace.
@@ -206,13 +251,13 @@ func testWorkerCLIThroughSSHBackupGateway(t *testing.T, commandSuite string, sel
 	}
 	pattern := backupCLINamespacePattern(t.Name(), flag.Lookup("test.run").Value.String())
 	if commandSuite != "" && !strings.Contains(pattern, "/") {
-		if commandSuite == "delivery-providers" || commandSuite == "delivery-limits" || commandSuite == "delivery-producer" || commandSuite == "delivery-routes" || commandSuite == "delivery-destination" || commandSuite == "delivery-declaration" || (commandSuite == "delivery-derived-freshness" || (commandSuite == "delivery-source-addition" || commandSuite == "delivery-source-replacement")) {
+		if commandSuite == "delivery-signal" || commandSuite == "delivery-report-route" || commandSuite == "delivery-providers" || commandSuite == "delivery-limits" || commandSuite == "delivery-producer" || commandSuite == "delivery-routes" || commandSuite == "delivery-destination" || commandSuite == "delivery-declaration" || (commandSuite == "delivery-derived-freshness" || (commandSuite == "delivery-source-addition" || commandSuite == "delivery-source-replacement")) {
 			pattern += "/" + commandSuite + "$"
 		} else if commandSuite == "backup-telegram-destination" {
 			pattern += "/backup-telegram-destination$"
 		} else if commandSuite == "delivery-output" {
 			pattern += "/(delivery|commands)-led-output$"
-		} else if strings.HasPrefix(commandSuite, "shared-policy") {
+		} else if commandSuite == "shared-activity" || strings.HasPrefix(commandSuite, "shared-policy") {
 			pattern += "/" + commandSuite + "$"
 		} else if commandSuite == "source-combined" {
 			pattern += "/shared-(false|true)-source-combined$"
@@ -397,8 +442,16 @@ func testBackupCLIInNamespace(t *testing.T, commandSuite string) {
 		return b
 	}
 
-	if commandSuite == "delivery-providers" || commandSuite == "delivery-limits" || commandSuite == "delivery-producer" || commandSuite == "delivery-routes" || commandSuite == "delivery-destination" || commandSuite == "delivery-declaration" || (commandSuite == "delivery-derived-freshness" || (commandSuite == "delivery-source-addition" || commandSuite == "delivery-source-replacement")) {
+	if commandSuite == "delivery-signal" || commandSuite == "delivery-report-route" || commandSuite == "delivery-providers" || commandSuite == "delivery-limits" || commandSuite == "delivery-producer" || commandSuite == "delivery-routes" || commandSuite == "delivery-destination" || commandSuite == "delivery-declaration" || (commandSuite == "delivery-derived-freshness" || (commandSuite == "delivery-source-addition" || commandSuite == "delivery-source-replacement")) {
 		t.Run(commandSuite, func(t *testing.T) {
+			if commandSuite == "delivery-signal" {
+				testSignalProvidersCLI(t, root, policy, write, read, run)
+				return
+			}
+			if commandSuite == "delivery-report-route" {
+				testDeliveryReportRouteCLI(t, root, policy, write, read, run)
+				return
+			}
 			if commandSuite == "delivery-derived-freshness" || (commandSuite == "delivery-source-addition" || commandSuite == "delivery-source-replacement") {
 				testDeliveryDerivedFreshnessCLI(t, root, policy, write, read, run, port, movedPort, commandSuite == "delivery-source-addition" || commandSuite == "delivery-source-replacement", commandSuite == "delivery-source-replacement")
 				return
@@ -443,6 +496,25 @@ func testBackupCLIInNamespace(t *testing.T, commandSuite string) {
 				t.Fatal("destination publication changed old inputs or invented qualification")
 			}
 			run(t, "backup-worker", "activate", false)
+		})
+		return
+	}
+	if commandSuite == "shared-activity" {
+		t.Run(commandSuite, func(t *testing.T) {
+			policy(true, "daily")
+			run(t, "backup-worker", "apply", true)
+			run(t, "notification-worker", "apply", true)
+			// A staged, enrolled gateway can also be disabled and restored without
+			// creating an output owner or a command receiver.
+			original := string(read(t, "server.yaml"))
+			write("server.yaml", strings.Replace(original, "    notification_worker:\n", "    notification_worker:\n      enabled: false\n", 1))
+			run(t, "notification-worker", "apply", true)
+			write("server.yaml", original)
+			run(t, "backup-worker", "apply", true)
+			checks := sharedActivityCLIQualification(t, root, write, read)
+			run(t, "notification-worker", "apply", true)
+			run(t, "backup-worker", "apply", true)
+			testSharedActivityCLI(t, root, write, read, run, checks, false)
 		})
 		return
 	}
@@ -1162,7 +1234,7 @@ func testBackupCLIInNamespace(t *testing.T, commandSuite string) {
 		}
 		if commandCase.requalification {
 			suite = "requalification"
-			if commandSuite == "command-limits" {
+			if isCommandDeliveryPolicy(commandSuite) || commandSuite == "command-shared-activity" {
 				suite = commandSuite
 			}
 		}
@@ -1191,6 +1263,12 @@ func testBackupCLIInNamespace(t *testing.T, commandSuite string) {
 			base := string(read(t, "server.yaml"))
 			base = strings.Replace(base, "        telegram:\n", "        telegram:\n          account: '123'\n          bot_name: FixtureBot\n", 1)
 			commands := "    notification_worker:\n      commands:\n        enabled: true\n        mode: read\n        workers: {backup: backup-worker}\n        conversations:\n          ops: {provider: telegram, account: '123', native_id: '456'}\n        permissions:\n          - {actor: '789', conversation: ops, worker: backup, permissions: [read], scope: {whole_worker: true}}\n"
+			if commandSuite == "command-producer" || commandSuite == "command-routes" {
+				commands = strings.Replace(commands, "    notification_worker:\n", "    notification_worker:\n      routes: {alerts: {primary: telegram}, audit: {primary: telegram}}\n", 1)
+			}
+			if commandSuite == "command-freshness" {
+				commands = strings.Replace(commands, "    notification_worker:\n", "    notification_worker:\n      producers: {backup-worker: {routes: [alerts], max_silence_seconds: 120, max_evidence_seconds: 90000}}\n", 1)
+			}
 			if commandMode == "mutation" {
 				commands = strings.Replace(commands, "mode: read", "mode: mutation", 1)
 				commands = strings.Replace(commands, "permissions: [read]", "permissions: [read, incident.manage]", 1)
@@ -1284,8 +1362,16 @@ func testBackupCLIInNamespace(t *testing.T, commandSuite string) {
 				if err := json.Unmarshal(receiver, &receiverRecord); err != nil {
 					t.Fatal(err)
 				}
-				if commandCase.requalification {
-					testCommandRequalificationCLI(t, root, write, read, run, len(session.Checks), commandSuite == "command-limits")
+				if commandSuite == "command-routes" {
+					testCommandRoutingCLI(t, root, write, read, run)
+				} else if commandSuite == "command-provider" {
+					testCommandProvidersCLI(t, root, write, read, run, len(session.Checks))
+				} else if commandSuite == "command-shared-activity" {
+					testSharedActivityCLI(t, root, write, read, run, len(session.Checks), true)
+				} else if commandSuite == "command-producer" {
+					testCommandProducerPolicyCLI(t, root, write, read, run, len(session.Checks))
+				} else if commandCase.requalification {
+					testCommandRequalificationCLI(t, root, write, read, run, len(session.Checks), commandSuite)
 				} else if commandCase.helper {
 					testSharedCommandHelperCLI(t, root, write, read, run, receiverRecord.Request)
 				} else {

@@ -66,7 +66,7 @@ func (c CLI) activateBackup(ctx context.Context, v Invocation, inv config.Server
 		c.Controller = SSHController{}
 	}
 	r := ControlRequest{Version: 1, Worker: "backup-worker", Server: v.Server, Action: "activate", Facts: facts, Desired: *inv.Servers[v.Server].Desired, DesiredScope: p.DesiredScope, DesiredHash: p.DesiredHash}
-	if r.Desired.Backup.Notifications.Worker == "" || !config.WorkerEnabled(r.Desired.Backup.Notifications.Enabled) {
+	if r.Desired.Backup.Notifications.Worker == "" {
 		r.Desired.Notification = nil
 	}
 	targets, err := declaredSourceTargets(inv, r.Desired)

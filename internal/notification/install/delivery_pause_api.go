@@ -82,6 +82,9 @@ func (i managedInstaller) inspectDeliveryPause(ctx context.Context, r DeliveryPa
 // require inactive producers.
 func preservesManagedDeliveryOwner(j managedJournal) bool {
 	b, a := j.Intent.Before, j.Intent.After
+	if sharedActivityOperation(j.Intent.Operation) {
+		return validateSharedActivityJournal(j) == nil && b.DeliveryOwnerHash != ""
+	}
 	if isPausedRuntimeChange(j.Intent.Operation) {
 		return validateDeliveryProviderJournal(j) == nil
 	}
@@ -111,7 +114,12 @@ func (i managedInstaller) probeDeliveryPause(ctx context.Context, d *safefs.Dire
 // A paused runtime can retain active generations only under the exact completed
 // pause intent. The verification service still has no provider dispatch loop.
 func requireManagedVerificationProducers(d *safefs.Directory, s *worker.Store, m ManagedManifest, c Runtime, j managedJournal) error {
-	if (j.Intent.Operation == "pause-delivery" || isPausedRuntimeChange(j.Intent.Operation)) && preservesManagedDeliveryOwner(j) && protocol.Hash(j.Intent.After) == protocol.Hash(m) && managedPhase(j.Phase) >= managedPhase("published") && m.Mode == "verification" {
+	if (j.Intent.Operation == "pause-delivery" || isPausedRuntimeChange(j.Intent.Operation) || j.Intent.Operation == "restore-shared-activity") && preservesManagedDeliveryOwner(j) && protocol.Hash(j.Intent.After) == protocol.Hash(m) && managedPhase(j.Phase) >= managedPhase("published") && m.Mode == "verification" {
+		if j.Intent.Operation == "restore-shared-activity" {
+			if _, err := sharedActivityPause(d, j); err != nil {
+				return err
+			}
+		}
 		if isPausedRuntimeChange(j.Intent.Operation) {
 			if _, err := deliveryProviderPause(d, j, c); err != nil {
 				return err
@@ -131,11 +139,11 @@ func deliveryPausePredecessor(d *safefs.Directory, proof deliveryAdmission, veri
 		}
 		return nil, nil
 	}
-	if (proof.Version != 2 && proof.Version != 3) || !safefs.ValidID(proof.PauseOperation, "n") || !safefs.DigestPattern.MatchString(proof.PauseHash) {
+	if (proof.Version != 2 && proof.Version != 3 && proof.Version != 4) || !safefs.ValidID(proof.PauseOperation, "n") || !safefs.DigestPattern.MatchString(proof.PauseHash) {
 		return nil, fmt.Errorf("renewed delivery lacks a pinned pause")
 	}
 	paused := verification
-	if proof.Version == 3 {
+	if proof.Version == 3 || proof.Version == 4 {
 		if !safefs.ValidID(proof.ProviderOperation, "n") || !safefs.DigestPattern.MatchString(proof.ProviderHash) {
 			return nil, fmt.Errorf("provider renewal lacks its pinned rotation")
 		}
@@ -150,7 +158,12 @@ func deliveryPausePredecessor(d *safefs.Directory, proof deliveryAdmission, veri
 		if err != nil {
 			return nil, err
 		}
-		pause, err := deliveryProviderPause(d, managedJournal{Intent: transition, Phase: "complete"}, c)
+		var pause managedJournal
+		if proof.Version == 4 {
+			pause, err = sharedActivityPause(d, managedJournal{Intent: transition, Phase: "complete"})
+		} else {
+			pause, err = deliveryProviderPause(d, managedJournal{Intent: transition, Phase: "complete"}, c)
+		}
 		if err != nil {
 			return nil, err
 		}

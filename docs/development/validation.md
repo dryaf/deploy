@@ -930,3 +930,297 @@ Logs and the integrated-file hash inventory are retained in
 `dist/workspaces/yaml-step49-evidence/`. Step 49's workspace is retained for
 reference; its code has been integrated and must not be copied over the root
 again. Work is paused after step 49.
+
+## Ordinary YAML step 50: producer timing with disabled commands
+
+An unrecovered Telegram gateway with admitted local backup commands can change
+only heartbeat/evidence thresholds in an existing explicit backup producer
+declaration, after disabling intake. Apply pauses delivery and updates both
+workers' declaration scopes; qualify and apply again, then explicitly re-enable
+commands when wanted. Read and mutation modes retain receiver authority,
+permission restrictions, original observations, queued messages/commands,
+saved results/replies, reporting/delivery ownership and LED disposition.
+New declarations and other producer-policy, provider/audience, recovered and
+Signal command variants remain outside this step.
+
+Receipt versions 32/37 bind timing changes to their exact disabled command head,
+same original delivery owner and completed LED output where present. Both
+installed executables must advertise the new command-timing capability before
+review permits a delivery pause. Policy-history capability 13 reads the new
+receipt versions while retaining previous history formats.
+
+Focused declaration, storage, installer and coordinator checks passed in
+`/tmp/deploy-yaml-step50-focused.log` (0.004s, 0.678s, 6.016s and 3.449s).
+The final installer and coordinator checks also passed after cleanup (7.555s
+and 4.136s), in `/tmp/deploy-yaml-step50-installer-final.log` and
+`/tmp/deploy-yaml-step50-coordinator-final.log`. Checks cover repeated timing
+updates, exact interruption/resume at durable boundaries, changed retry inputs,
+missing command/receiver authority, saved results/replies, original observations,
+alternating completed budget changes, independent qualification renewals and
+LED/foreign-client retention. Unrelated quotas, routes, identities, global
+budgets and access-policy edits are refused before retaining an intent.
+
+The four compiled isolated SSH scenarios for timing and existing budget changes,
+in both read and mutation modes, passed in 341.860s. The final run is recorded in
+`/tmp/deploy-yaml-step50-cli-final.log`; it exercises two updates, permission
+narrowing, explicit re-enable, original receiver/reporting receipt retention and
+both workers' apply/resume/status/plan commands. An earlier timing-only run also
+passed in 156.556s. Fixtures provide offline software evidence, not live provider
+or physical LED qualification.
+
+The broader regular package run and `go vet ./...` passed in
+`/tmp/deploy-yaml-step50-regular.log`. The command was
+`GOCACHE=dist/test-go-cache go test -timeout=35m ./... -skip '^TestWorkerCLI'`,
+followed by vet. Installer, worker and coordinator packages reported 979.800s,
+376.312s and 42.728s respectively. The four relevant compiled CLI scenarios ran
+separately as described above; this is
+not the full `make test` gate. Documentation links, generated reference and
+whitespace checks passed. Race tests and manual/live qualification remain deferred.
+
+Step 50 is integrated. Logs, the completed checkpoint and a SHA-256 inventory
+of changed source/docs are retained in `dist/workspaces/yaml-step50-evidence/`.
+No old workspace integration script was applied; no commits or staging were done.
+
+## Shared configuration SC1: migration matrix and read-only planning
+
+The [shared configuration plan](../plans/shared-configuration.md) records the
+remaining state/change matrix, prerequisites, retained authority, qualification,
+SC2–SC8 dependencies and required-action outcomes. The planner now identifies
+unsupported command-bearing, recovered, provider/destination and activity changes
+before an apply is attempted. Existing pending-operation, canonical drift,
+missing-snapshot, scope/helper/path and no-op behavior retains precedence.
+Backup inspection directs gateway-relevant edits to notification planning because
+it does not establish gateway command/recovery authority. No new migration or
+admission is enabled, and no public JSON fields or YAML fields were added.
+
+The focused planning run passed in 0.066s in `/tmp/deploy-sc1-planning.log`:
+130 matrix cells across V0/VU/A0/AU/AD/AE/Q/R0/RD/RE, plus conditional prerequisite,
+read-only file/input, private-value redaction, pending/drift/helper/snapshot,
+no-op/unbound and backup-plan cases. Existing planning tests also passed.
+
+`GOCACHE=dist/test-go-cache go test -timeout=12m ./internal/workerctl -skip '^TestWorkerCLI'`
+passed in 42.850s in `/tmp/deploy-sc1-workerctl.log`.
+`go vet ./internal/workerctl` passed in `/tmp/deploy-sc1-vet.log`.
+The compiled isolated `TestWorkerCLICommandFreshnessReadThroughSSH` scenario passed
+in 146.118s in `/tmp/deploy-sc1-cli.log`; it exercises two timing updates,
+permission narrowing, explicit command re-enable and both workers' ordinary
+apply/resume/status/plan with the new planner. This is offline software evidence.
+
+Documentation links, generated field inventory and whitespace checks passed.
+Logs, the completed checkpoint and an eight-file SC1 SHA-256 inventory are in
+`dist/workspaces/shared-configuration-sc1-evidence/`. The step-50 inventory is
+retained unchanged as historical evidence. No new full `make test`, race,
+host/VM or live qualification gate is claimed for this planner-only change.
+SC2–SC8 remain implementation work; SC1 does not increment ordinary YAML step 50.
+
+## Shared configuration SC2: disabled-command producer policy
+
+SC2 implements ordinary YAML step 51 for existing unrecovered Telegram-only
+command gateways. Effective producer policy uses typed receipts 34/39 and fresh
+notification qualification; equivalent explicit/default declarations retain exact
+runtime bytes and delivery activation. Both helpers prove capability before a
+pause. Retained command-aware backup scope inspection preserves declaration and
+command-activity ancestry across repeated updates and independent renewal.
+
+Focused config, worker, installer, coordinator and backup tests passed in
+`/tmp/deploy-sc2-final-focused.log` (0.003s, 1.181s, 8.061s, 5.044s, 0.188s).
+Coverage includes both intake modes, quota capacity, settled delivery queues,
+queued commands, saved results/replies, reduced receiver permissions, scoped
+context access, LED output and foreign clients, exact retries, missing/corrupt
+pins, original observations and reporting ownership. The completed-declaration
+retry check passed in `/tmp/deploy-sc2-retry-final.log` (0.047s).
+
+Both compiled isolated SSH producer scenarios passed in 274.401s, in
+`/tmp/deploy-sc2-cli-pass.log`. They exercise equivalent declarations in both
+directions, quota/access/default changes with qualification, narrowed permissions,
+explicit re-enable, original receiver/reporting receipt preservation and both
+workers' apply/resume/status/plan. The final dispatch checks passed in 3.465s
+(`/tmp/deploy-sc2-dispatch-final.log`); the complete coordinator suite excluding
+`^TestWorkerCLI` passed in 71.619s (`/tmp/deploy-sc2-workerctl-final.log`). Final
+`go vet ./...` passed (`/tmp/deploy-sc2-vet-final.log`). Documentation links,
+generated field inventory and whitespace checks passed.
+
+All four existing read/mutation timing and budget compiled CLI regressions passed
+in 374.330s (`/tmp/deploy-sc2-cli-regression.log`). The regular
+`go test -timeout=35m ./... -skip '^TestWorkerCLI'` run and chained `go vet ./...`
+passed (`/tmp/deploy-sc2-regular.log`): installer 1166.924s, worker 426.271s,
+backup 209.852s and coordinator 54.648s. It began before the final coordinator
+dispatch fix; the complete final coordinator suite, six relevant compiled CLI
+scenarios and final vet above cover that source separately. Other compiled CLI
+scenarios were excluded; this is not the full milestone `make test` gate.
+Earlier CLI attempts exposed retained scope ancestry, completed-declaration retry
+and staged-handler dispatch issues; they are diagnostic failures, not passing
+evidence. Fixture qualification remains offline software evidence. Race and live/manual qualification remain deferred.
+
+SC2 is complete. Logs, the final checkpoint and a SHA-256 inventory of final
+changed-working-tree Go/docs files are retained in
+`dist/workspaces/shared-configuration-sc2-evidence/`. That inventory includes
+pre-existing step-50/SC1 changes; their historical inventories remain unchanged.
+No staging or commits were made.
+
+## Shared configuration SC3: routing, report selection and derived freshness
+
+SC3 implements ordinary YAML step 52 for unrecovered shared gateways. Telegram-only
+command gateways can disable intake and apply route definitions or derived backup
+freshness. Production report-route selection supports command-free and disabled-
+command gateways through either worker. Existing explicit permission retains the
+exact gateway runtime and qualification; effective default permission changes
+require settled delivery messages and fresh notification qualification. Frozen
+backup exports must settle before selection. Original handoff/owner/binding and
+receiver authority remain immutable; only future exports select the new route.
+
+Backup scope 24 and a compact SQL reference retain report-route authority, with a
+permanent initialization marker so lost records/tables cannot fall back to an old
+audience. Scope 25 coordinates derived freshness with capture/report fences, both
+runtime files and the archive checkpoint. Notification renewal does not activate
+backup capture or command intake. Route receipts 33/38 retain queued commands,
+saved replies, original observations and LED/foreign-client disposition.
+
+Focused config, worker, installer, backup and coordinator checks passed in
+`/tmp/deploy-sc3-focused4.log` (0.004s, 2.054s, 16.272s, 6.035s, 14.293s).
+Final history/compatibility checks passed in `/tmp/deploy-sc3-history.log` (4.613s /
+14.000s). Complete backup and coordinator suites passed in
+`/tmp/deploy-sc3-final-backup-coordinator.log` (204.537s / 63.771s). Later focused
+checks cover missing SQL rows/tables and scope files, plus alternating routing,
+derived freshness, budgets and producer policy:
+`/tmp/deploy-sc3-missing-authority-final.log` (4.048s) and
+`/tmp/deploy-sc3-alternating-history.log` (0.291s). The complete final backup rerun
+after the initialization-marker guard passed in 173.508s:
+`/tmp/deploy-sc3-backup-final.log`.
+
+Compiled isolated SSH scenarios passed:
+
+- Command-free explicit/default report selection, both entry points, repeated
+  effective changes and unchanged original handoff: 140.620s outer / 136.380s
+  fixture. This scenario passed in `/tmp/deploy-sc3-cli3.log`; that mixed run's
+  command scenarios failed because the test attempted command re-enable through
+  the backup worker before applying the notification toggle.
+- Final command routing in read and mutation modes: 248.165s,
+  `/tmp/deploy-sc3-command-cli-final.log`. They exercise both entry points,
+  route definitions, repeated report selection, derived freshness, reduced
+  permissions, notification qualification, explicit command re-enable, retained
+  receiver/handoff and refusal to activate unqualified backup capture.
+- Existing producer/read and timing/mutation CLI regressions: 234.410s,
+  `/tmp/deploy-sc3-cli-regression.log`.
+
+The CLI runs preceded the last missing-table initialization-marker guard; the
+final focused and full backup checks cover that guard. Final `go vet ./...`, docs
+links, generated field inventory and whitespace checks passed. These fixtures
+are offline software evidence, not live qualification.
+
+The broad regular run excluding `^TestWorkerCLI` began before final corrections.
+Its early backup failure exposed a nil declaration in an older shared-setup
+fixture; the compatibility fix and final complete backup/coordinator runs above
+replace that package result. Earlier CLI failures exposed status/history route
+assumptions and a missing delivery dispatch case; their logs are diagnostic
+failures. All other broad packages passed, including installer 1311.207s,
+worker 387.063s and coordinator 64.264s (`/tmp/deploy-sc3-regular.log`). The
+corrected complete backup run above passed on final guard code. No full final-
+source milestone `make test`/race gate is claimed. Race and live/manual
+qualification remain deferred.
+
+SC3 is complete. Logs, the final checkpoint and changed-working-tree SHA-256
+inventory are retained in `dist/workspaces/shared-configuration-sc3-evidence/`.
+That inventory includes pre-existing step-50/SC1/SC2 edits; their historical
+inventories remain unchanged. No staging or commits were made.
+
+
+## Shared configuration SC4: provider references and destinations
+
+SC4 implements ordinary YAML step 53. Disabled Telegram-only command owners can
+rotate same-bot references or change fixed alert destinations without changing
+receiver/cursor/reply authority. Owned direct Signal gateways can select private
+references and recipients while retaining their account/link/inbox/service and
+artifacts. Command profile retirement, metadata/new command authority, native
+intake, account/service replacement and recovered variants retain separate
+admission/lifecycle dependencies.
+
+The worker tests cover queued ordinary delivery for same-destination rotations,
+settled-message refusal for changed destinations, exact disabled command heads,
+queued commands, saved results/replies, cursor and original owner retention.
+Installer cases exercise publication interruptions, LED/foreign-client retention,
+helper refusal before effects, Signal same-account enforcement, immutable approval
+publication and historical approval loss. Coordinator cases cover repeated
+read/mutation updates, original receiver/permission restrictions, changed old/new
+files and exact graph retries. Backup scope tests retain reporting fences,
+private exclusions and original handoff through lost replies.
+
+Compiled offline CLI scenarios run real helpers, private APIs, SQLite and service
+processes in isolated mount/network namespaces. Read and mutation Telegram command
+scenarios rotate tokens, change an alert chat, narrow permissions, qualify and
+explicitly re-enable intake. Native Signal uses a synthetic executable that
+emulates link/account/version/send operations without provider traffic. It covers
+shared staged updates, repeated production reference/recipient changes, actual
+relay sends to approved destinations, Signal-only and combined layouts, unused
+Telegram profile addition/removal after native updates, fresh qualification and both workers'
+apply/resume/status/plan. Original native and reporting receipts remain unchanged.
+These are software orchestration checks; they do not supply live qualification.
+
+Final logs and the working-tree source inventory are recorded in the checkpoint.
+The broad regular run began before the last staged-history guard; the final
+installer/coordinator runs and compiled CLI rerun cover that guard. Race, full
+milestone acceptance and live provider/hardware observations remain deferred.
+
+
+SC4 final results (2026-11-08, 22:19 Europe/Vienna):
+
+- Focused final installer history/invariant checks: 23.525s; complete installer
+  regression: 1487.687s. The full installer run began before the last missing-anchor
+  invariant; the focused final cases and compiled workflows exercise that guard.
+- Final complete coordinator: 60.737s. Config/provider/relay: 0.034s / 0.010s /
+  9.453s. Expanded Signal backup scope interruption cases: 6.724s.
+- Compiled final Telegram read/mutation provider scenarios: 196.926s. Native
+  Signal-only/combined layouts: 181.295s; final Signal-only workflow including
+  unused Telegram addition/removal, exact retained exclusions and stable native
+  process: 300.828s.
+- Broad regular run excluding `^TestWorkerCLI`: all runtime packages passed,
+  including worker 370.533s, backup 209.601s and installer 1524.754s. Its earlier
+  stale generated-reference failure is superseded by regeneration, the complete
+  final coordinator suite and the final documentation check.
+- Final vet, field inventory/reference, 274 local links and whitespace passed.
+
+The checkpoint lists exact logs. Final copies and source inventory are retained
+under `dist/workspaces/shared-configuration-sc4-evidence/`; existing SC1–SC3
+snapshots and `dist/checkpoints/` remain unchanged. No staging or commits were made.
+
+
+## Shared configuration SC5: worker and reporting activity
+
+SC5 implements ordinary YAML step 54. Either worker coordinates the local shared
+activity controls. A disable fences capture and report production before gateway
+pause/removal. Restoration starts verification and requires new notification
+observations before delivery/report triggers resume; capture qualification, a new
+manual backup and explicit activation remain separate. Command intake, receiver,
+producer identity, reporting handoff, archive/source keys, credential exclusions,
+native Signal lifetime and LED permission/history remain retained.
+
+The coordinator pins the full declaration as well as its notification scope.
+Installer restoration anchors also invalidate a previously qualified verification
+manifest without a delivery owner. File/SQL and service stop/start interruptions
+resume exact phases. Corrupt or missing histories, changed retry policy, active
+command enable requests, additional producers and recovered authority fail closed.
+The gateway can stop without source access, a new image or lingering; restoration
+retains normal activation prerequisites. Actually unbound gateways retain their
+separate lifecycle.
+
+Validation completed 2026-11-09, 00:32 Europe/Vienna. Evidence is retained under
+`dist/workspaces/shared-configuration-sc5-evidence/`:
+
+| Evidence | Result |
+| --- | --- |
+| `final-cli.log` | Four compiled isolated scenarios passed, 271.021s: staged/delivery, owned Signal-only, Telegram read and mutation; all activity controls, both workers' apply/resume/status/plan, retained cutover/receiver, explicit intake restore |
+| `staged-terminal-cli-final.log` | Staged restoration through actual terminal qualification and first delivery, then repeated activity cycles; passed, 98.876s |
+| `coordinator-final.log` | Complete coordinator suite excluding `^TestWorkerCLI`; passed, 49.449s; includes no-linger stop prerequisites and unbound delegation |
+| `backup-final.log` | Complete backup suite; passed, 206.657s |
+| `installer-final.log` | Affected installer, managed delivery, pause/renewal, command, provider/history and report-profile regression; passed, 19.791s |
+| `anchors-and-reference-final.log` | Focused restoration, queue/command preservation, LED permission/foreign clients, qualification and field-reference checks; passed |
+| `config-provider-relay-final.log` | Complete config/provider/relay checks; passed, 0.024s / 0.008s / 10.522s |
+| `vet.log` | Vet passed for config, backup, installer and coordinator |
+
+The initial restricted-sandbox runs could not exercise Unix sockets or the
+operator cache. They are retained as diagnostics; `regression.log` was stopped
+and is not passing evidence. Replacement regressions used local socket-capable
+execution and an isolated writable cache. The entire installer suite was not
+rerun for SC5; the affected workflows and compiled service scenarios define this
+validation boundary. All evidence and provider observations are synthetic; no
+live/manual qualification or race run was performed. SC6–SC8 remain separate.

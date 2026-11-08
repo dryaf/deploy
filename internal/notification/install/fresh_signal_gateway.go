@@ -18,6 +18,9 @@ func validateFreshSignalGateway(ctx context.Context, ref FreshSignalReference, r
 	return m, validateFreshSignalGatewayManifest(m, root, state, units, c)
 }
 func validateFreshSignalGatewayManifest(m FreshSignalManifest, root, state, units string, c Runtime) error {
+	return validateFreshSignalGatewayManifestPolicy(m, root, state, units, c, true)
+}
+func validateFreshSignalGatewayManifestPolicy(m FreshSignalManifest, root, state, units string, c Runtime, committed bool) error {
 	if c.Signal != nil || c.Worker.Interaction != nil {
 		return fmt.Errorf("fresh Signal direct service does not grant interactive command intake")
 	}
@@ -41,6 +44,12 @@ func validateFreshSignalGatewayManifest(m FreshSignalManifest, root, state, unit
 			continue
 		}
 		profiles++
+		if p.SignalDelivery != nil {
+			if err := checkFreshSignalDelivery(m, p, committed); err != nil {
+				return err
+			}
+			continue
+		}
 		if p.Socket != m.Spec.socket() || p.Destination != expected.Destination || p.Conversation != nil {
 			return fmt.Errorf("fresh Signal profile differs from owned service")
 		}

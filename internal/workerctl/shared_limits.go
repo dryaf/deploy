@@ -256,7 +256,7 @@ func reconcileSharedPolicy(ctx context.Context, r ControlRequest, paths Resolved
 		return result, true, err
 	}
 	retry := sharedLimitsJournal(current) && sharedPolicyKind(current) == kind && current.Pins.DesiredHash == r.DesiredHash
-	if !retry && (!enrolledNotificationJournal(current) || current.Pins.DesiredHash == r.DesiredHash) {
+	if !retry && (admittedCommandHistory(current) || !enrolledNotificationJournal(current) || current.Pins.DesiredHash == r.DesiredHash) {
 		return result, false, nil
 	}
 	prior := current
@@ -680,6 +680,12 @@ func validateSharedLimitsManifest(v notificationSharedLimitsIntent, m install.Ma
 	want.Revision, want.UnitHash = m.Revision, m.UnitHash
 	want.Paths.Config, want.Paths.Executable = m.Paths.Config, m.Paths.Executable
 	want.HelperHash, want.HelperRevision = want.BinaryHash, m.Revision
+	if v.Version == 7 && input.Providers["signal"].SignalDelivery != nil && protocol.Hash(m.ReportCredentialHistory) != protocol.Hash(v.Before.ReportCredentialHistory) {
+		if err = install.ValidateStagedProviderCredentialHistory(v.Before, m, "enrolled-providers"); err != nil {
+			return err
+		}
+		want.ReportCredentialHistory = m.ReportCredentialHistory
+	}
 	if m.Revision == v.Before.Revision || protocol.Hash(want) != protocol.Hash(m) {
 		return fmt.Errorf("shared limits receipt changed installation authority")
 	}
